@@ -9,8 +9,9 @@
 ////////////////////////////////
 //~ rjf: CodeView Format Shared Types
 
-typedef U32 CV_TypeId;
-typedef U32 CV_ItemId;
+typedef U32 CV_TypeIndex;
+typedef CV_TypeIndex CV_TypeId;
+typedef CV_TypeIndex CV_ItemId;
 typedef U16 CV_ModIndex;
 typedef U16 CV_SectionIndex;
 typedef U16 CV_Reg;
