@@ -41,25 +41,6 @@ struct MSF_Header70
 
 // magic(20) + header(20) = 44 + 20 = 64
 // magic(70) + header(70) = 32 + 24 = 56
-
 #define MSF_MIN_SIZE 64
-
-////////////////////////////////
-//~ rjf: MSF Parser Helper Types
-
-typedef struct MSF_Parsed MSF_Parsed;
-struct MSF_Parsed
-{
-  String8 *streams;
-  U64 stream_count;
-  U64 block_size;
-  U64 block_count;
-};
-
-////////////////////////////////
-//~ rjf: MSF Parser Functions
-
-internal MSF_Parsed* msf_parsed_from_data(Arena *arena, String8 msf_data);
-internal String8     msf_data_from_stream(MSF_Parsed *msf, MSF_StreamNumber sn);
 
 #endif // MSF_H
