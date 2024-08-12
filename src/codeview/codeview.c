@@ -411,7 +411,7 @@ cv_leaf_from_data(Arena *arena, String8 leaf_data, CV_TypeId itype_first)
 //~ CodeView C13 Parser Functions
 
 internal CV_C13Parsed *
-cv_c13_parsed_from_data(Arena *arena, String8 c13_data, PDB_Strtbl *strtbl, PDB_CoffSectionArray *sections)
+cv_c13_parsed_from_data(Arena *arena, String8 c13_data, String8 strtbl, COFF_SectionHeaderArray sections)
 {
   ProfBeginFunction();
   
@@ -488,10 +488,10 @@ cv_c13_parsed_from_data(Arena *arena, String8 c13_data, PDB_Strtbl *strtbl, PDB_
         B32 has_cols = !!(hdr->flags & CV_C13SubSecLinesFlag_HasColumns);
         U64 secrel_off = hdr->sec_off;
         U64 secrel_opl = secrel_off + hdr->len;
-        U64 sec_base_off = sections->sections[sec_idx - 1].voff;
+        U64 sec_base_off = sections.v[sec_idx - 1].voff;
         
         // rjf: bad section index -> skip
-        if(sec_idx < 1 || sections->count < sec_idx)
+        if(sec_idx < 1 || sections.count < sec_idx)
         {
           continue;
         }
@@ -511,7 +511,8 @@ cv_c13_parsed_from_data(Arena *arena, String8 c13_data, PDB_Strtbl *strtbl, PDB_
           {
             CV_C13Checksum *checksum = (CV_C13Checksum*)(c13_data.str + file_chksms->off + file_off);
             U32 name_off = checksum->name_off;
-            file_name = pdb_strtbl_string_from_off(strtbl, name_off);
+            file_name = str8_cstring_capped((char*)(strtbl.str + name_off),
+                                            (char*)(strtbl.str + strtbl.size));
           }
           
           // array layouts
@@ -587,7 +588,8 @@ cv_c13_parsed_from_data(Arena *arena, String8 c13_data, PDB_Strtbl *strtbl, PDB_
           {
             CV_C13Checksum *checksum = (CV_C13Checksum*)(c13_data.str + file_chksms->off + hdr->file_off);
             U32 name_off = checksum->name_off;
-            file_name = pdb_strtbl_string_from_off(strtbl, name_off);
+            file_name = str8_cstring_capped((char*)(strtbl.str + name_off),
+                                            (char*)(strtbl.str + strtbl.size));
           }
           
           // rjf: parse extra files

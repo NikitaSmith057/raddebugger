@@ -3011,8 +3011,6 @@ internal CV_LeafParsed *cv_leaf_from_data(Arena *arena, String8 leaf_data, CV_Ty
 ////////////////////////////////
 //~ CodeView C13 Parser Functions
 
-typedef struct PDB_Strtbl PDB_Strtbl;
-typedef struct PDB_CoffSectionArray PDB_CoffSectionArray;
-internal CV_C13Parsed *cv_c13_parsed_from_data(Arena *arena, String8 c13_data, struct PDB_Strtbl *strtbl, struct PDB_CoffSectionArray *sections);
+internal CV_C13Parsed *cv_c13_parsed_from_data(Arena *arena, String8 c13_data, String8 strtab, COFF_SectionHeaderArray sections);
 
 #endif // CODEVIEW_H

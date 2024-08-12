@@ -562,13 +562,11 @@ pdb_gsi_from_data(Arena *arena, String8 data){
   return(result);
 }
 
-internal PDB_CoffSectionArray*
+internal COFF_SectionHeaderArray
 pdb_coff_section_array_from_data(Arena *arena, String8 data){
-  U64 count = data.size/sizeof(COFF_SectionHeader);
-  
-  PDB_CoffSectionArray *result = push_array(arena, PDB_CoffSectionArray, 1);
-  result->sections = (COFF_SectionHeader*)data.str;
-  result->count = count;
+  COFF_SectionHeaderArray result = {0};
+  result.count = data.size/sizeof(COFF_SectionHeader);
+  result.v = (COFF_SectionHeader*)data.str;
   return(result);
 }
 
@@ -650,7 +648,7 @@ pdb_comp_unit_array_from_data(Arena *arena, String8 data){
 
 internal PDB_CompUnitContributionArray*
 pdb_comp_unit_contribution_array_from_data(Arena *arena, String8 data,
-                                           PDB_CoffSectionArray *sections){
+                                           COFF_SectionHeaderArray sections){
   PDB_CompUnitContribution *contributions = 0;
   U64 count = 0;
   if (data.size >= sizeof(PDB_DbiSectionContribVersion)){
@@ -682,8 +680,8 @@ pdb_comp_unit_contribution_array_from_data(Arena *arena, String8 data,
     contributions = push_array_no_zero(arena, PDB_CompUnitContribution, max_count);
     
     // binary section info
-    U64 section_count = sections->count;
-    COFF_SectionHeader* section_headers = sections->sections;
+    U64 section_count = sections.count;
+    COFF_SectionHeader* section_headers = sections.v;
     
     // fill array
     PDB_CompUnitContribution *contribution_ptr = contributions;

@@ -818,6 +818,14 @@ typedef struct COFF_ArchiveParse
 } COFF_ArchiveParse;
 
 ////////////////////////////////
+
+typedef struct COFF_SectionHeaderArray
+{
+  U64 count;
+  COFF_SectionHeader *v;
+} COFF_SectionHeaderArray;
+
+////////////////////////////////
 //~ rjf: Globals
 
 read_only global COFF_SectionHeader coff_section_header_nil = {0};

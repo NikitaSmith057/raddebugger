@@ -371,11 +371,6 @@ typedef struct PDB_CompUnit{
   String8 group_name;
 } PDB_CompUnit;
 
-typedef struct PDB_CoffSectionArray{
-  COFF_SectionHeader *sections;
-  U64 count;
-} PDB_CoffSectionArray;
-
 typedef struct PDB_CompUnitNode{
   struct PDB_CompUnitNode *next;
   PDB_CompUnit unit;
@@ -413,15 +408,15 @@ internal PDB_TpiHashParsed*   pdb_tpi_hash_from_data(Arena *arena,
                                                      String8 tpi_hash_aux_data);
 internal PDB_GsiParsed*       pdb_gsi_from_data(Arena *arena, String8 gsi_data);
 
-internal PDB_CoffSectionArray*pdb_coff_section_array_from_data(Arena *arena,
-                                                               String8 section_data);
+internal COFF_SectionHeaderArray pdb_coff_section_array_from_data(Arena *arena,
+                                                                  String8 section_data);
 
 internal PDB_CompUnitArray*   pdb_comp_unit_array_from_data(Arena *arena,
                                                             String8 module_info_data);
 
 internal PDB_CompUnitContributionArray*
 pdb_comp_unit_contribution_array_from_data(Arena *arena, String8 seccontrib_data,
-                                           PDB_CoffSectionArray *sections);
+                                           COFF_SectionHeaderArray sections);
 
 ////////////////////////////////
 //~ PDB Definition Functions
