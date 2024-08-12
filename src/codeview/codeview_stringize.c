@@ -568,22 +568,22 @@ cv_stringize_sym_range(Arena *arena, String8List *out,
           CV_SymPub32 *pub32 = (CV_SymPub32*)first;
           
           // flags
-          CV_PubFlags flags = pub32->flags;
+          CV_Pub32Flags flags = pub32->flags;
           str8_list_push(arena, out, str8_lit(" flags="));
           if (flags == 0){
             str8_list_push(arena, out, str8_lit("0|"));
           }
           else{
-            if (flags&CV_PubFlag_Code){
+            if (flags&CV_Pub32Flag_Code){
               str8_list_push(arena, out, str8_lit("Code|"));
             }
-            if (flags&CV_PubFlag_Function){
+            if (flags&CV_Pub32Flag_Function){
               str8_list_push(arena, out, str8_lit("Function|"));
             }
-            if (flags&CV_PubFlag_ManagedCode){
+            if (flags&CV_Pub32Flag_ManagedCode){
               str8_list_push(arena, out, str8_lit("ManagedCode|"));
             }
-            if (flags&CV_PubFlag_MSIL){
+            if (flags&CV_Pub32Flag_MSIL){
               str8_list_push(arena, out, str8_lit("MSIL|"));
             }
           }

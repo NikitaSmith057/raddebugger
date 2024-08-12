@@ -1286,19 +1286,19 @@ struct CV_SymData32
 
 //- (SymKind: PUB32)
 
-typedef U32 CV_PubFlags;
+typedef U32 CV_Pub32Flags;
 enum
 {
-  CV_PubFlag_Code        = (1 << 0),
-  CV_PubFlag_Function    = (1 << 1),
-  CV_PubFlag_ManagedCode = (1 << 2),
-  CV_PubFlag_MSIL        = (1 << 3),
+  CV_Pub32Flag_Code        = (1 << 0),
+  CV_Pub32Flag_Function    = (1 << 1),
+  CV_Pub32Flag_ManagedCode = (1 << 2),
+  CV_Pub32Flag_MSIL        = (1 << 3),
 };
 
 typedef struct CV_SymPub32 CV_SymPub32;
 struct CV_SymPub32
 {
-  CV_PubFlags flags;
+  CV_Pub32Flags flags;
   U32 off;
   CV_SectionIndex sec;
   // U8[] name (null terminated)
