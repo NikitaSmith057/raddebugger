@@ -143,9 +143,9 @@ typedef void OS_ThreadFunctionType(void *ptr);
 ////////////////////////////////
 //~ rjf: Handle Type Functions (Helpers, Implemented Once)
 
-internal OS_Handle os_handle_zero(void);
-internal B32 os_handle_match(OS_Handle a, OS_Handle b);
-internal void os_handle_list_push(Arena *arena, OS_HandleList *handles, OS_Handle handle);
+internal OS_Handle      os_handle_zero(void);
+internal B32            os_handle_match(OS_Handle a, OS_Handle b);
+internal void           os_handle_list_push(Arena *arena, OS_HandleList *handles, OS_Handle handle);
 internal OS_HandleArray os_handle_array_from_list(Arena *arena, OS_HandleList *list);
 
 ////////////////////////////////
@@ -156,13 +156,13 @@ internal String8List os_string_list_from_argcv(Arena *arena, int argc, char **ar
 ////////////////////////////////
 //~ rjf: Filesystem Helpers (Helpers, Implemented Once)
 
-internal String8        os_data_from_file_path(Arena *arena, String8 path);
-internal B32            os_write_data_to_file_path(String8 path, String8 data);
-internal B32            os_write_data_list_to_file_path(String8 path, String8List list);
-internal B32            os_append_data_to_file_path(String8 path, String8 data);
-internal OS_FileID      os_id_from_file_path(String8 path);
-internal S64            os_file_id_compare(OS_FileID a, OS_FileID b);
-internal String8        os_string_from_file_range(Arena *arena, OS_Handle file, Rng1U64 range);
+internal String8   os_data_from_file_path(Arena *arena, String8 path);
+internal B32       os_write_data_to_file_path(String8 path, String8 data);
+internal B32       os_write_data_list_to_file_path(String8 path, String8List list);
+internal B32       os_append_data_to_file_path(String8 path, String8 data);
+internal OS_FileID os_id_from_file_path(String8 path);
+internal S64       os_file_id_compare(OS_FileID a, OS_FileID b);
+internal String8   os_string_from_file_range(Arena *arena, OS_Handle file, Rng1U64 range);
 
 ////////////////////////////////
 //~ rjf: GUID Helpers (Helpers, Implemented Once)
@@ -243,12 +243,13 @@ internal void      os_shared_memory_view_close(OS_Handle handle, void *ptr, Rng1
 ////////////////////////////////
 //~ rjf: @os_hooks Time (Implemented Per-OS)
 
-internal U64         os_now_microseconds(void);
-internal U32         os_now_unix(void);
-internal DateTime    os_now_universal_time(void);
-internal DateTime    os_universal_time_from_local(DateTime *local_time);
-internal DateTime    os_local_time_from_universal(DateTime *universal_time);
-internal void        os_sleep_milliseconds(U32 msec);
+internal U64      os_now_microseconds(void);
+internal U32      os_now_unix(void);
+internal DateTime os_now_universal_time(void);
+internal DateTime os_universal_time_from_local(DateTime *local_time);
+internal DateTime os_local_time_from_universal(DateTime *universal_time);
+internal void     os_sleep_milliseconds(U32 msec);
+internal U32      os_get_process_start_time_unix(void);
 
 ////////////////////////////////
 //~ rjf: @os_hooks Child Processes (Implemented Per-OS)
@@ -300,9 +301,9 @@ internal B32       os_semaphore_take(OS_Handle semaphore, U64 endt_us);
 internal void      os_semaphore_drop(OS_Handle semaphore);
 
 //- rjf: scope macros
-#define OS_MutexScope(mutex) DeferLoop(os_mutex_take(mutex), os_mutex_drop(mutex))
-#define OS_MutexScopeR(mutex) DeferLoop(os_rw_mutex_take_r(mutex), os_rw_mutex_drop_r(mutex))
-#define OS_MutexScopeW(mutex) DeferLoop(os_rw_mutex_take_w(mutex), os_rw_mutex_drop_w(mutex))
+#define OS_MutexScope(mutex)          DeferLoop(os_mutex_take(mutex), os_mutex_drop(mutex))
+#define OS_MutexScopeR(mutex) 	      DeferLoop(os_rw_mutex_take_r(mutex), os_rw_mutex_drop_r(mutex))
+#define OS_MutexScopeW(mutex) 		  DeferLoop(os_rw_mutex_take_w(mutex), os_rw_mutex_drop_w(mutex))
 #define OS_MutexScopeRWPromote(mutex) DeferLoop((os_rw_mutex_drop_r(mutex), os_rw_mutex_take_w(mutex)), (os_rw_mutex_drop_w(mutex), os_rw_mutex_take_r(mutex)))
 
 ////////////////////////////////
@@ -321,6 +322,8 @@ internal void os_safe_call(OS_ThreadFunctionType *func, OS_ThreadFunctionType *f
 //~ rjf: @os_hooks GUIDs (Implemented Per-OS)
 
 internal OS_Guid os_make_guid(void);
+internal B32     os_try_guid_from_string(String8 string, OS_Guid *guid_out);
+internal OS_Guid os_guid_from_string(String8 string);
 
 ////////////////////////////////
 //~ rjf: @os_hooks Entry Points (Implemented Per-OS)
