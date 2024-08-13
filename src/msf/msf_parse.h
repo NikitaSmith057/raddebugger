@@ -12,9 +12,11 @@ struct MSF_Parsed
 {
   String8 *streams;
   U64 stream_count;
-  U64 page_size;
-  U64 page_count;
+  U64 block_size;
+  U64 block_count;
 };
+
+#define MSF_MAX_MAGIC_SIZE Min(sizeof(msf_msf20_magic), sizeof(msf_msf70_magic))
 
 ////////////////////////////////
 //~ rjf: MSF Parser Functions

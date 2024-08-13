@@ -249,8 +249,8 @@ msf_parsed_from_data(Arena *arena, String8 msf_data)
       result               = push_array_no_zero(arena, MSF_Parsed, 1);
       result->streams      = streams;
       result->stream_count = stream_count;
-      result->page_size    = page_size;
-      result->page_count   = whole_file_page_count;
+      result->block_size   = page_size;
+      result->block_count  = whole_file_page_count;
     }
   }
   
@@ -268,4 +268,3 @@ msf_data_from_stream(MSF_Parsed *msf, MSF_StreamNumber sn)
   }
   return(result);
 }
-
