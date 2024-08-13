@@ -2863,7 +2863,7 @@ internal TS_TASK_FUNCTION_DEF(p2r_symbol_stream_convert_task__entry_point)
             void       *raw_leaf  = rec_data.str + sizeof(U16);
             
             // rjf: extract method inline info
-            if(rec_range.hdr.kind == CV_LeafIDKind_MFUNC_ID &&
+            if(rec_range.hdr.kind == CV_LeafKind_MFUNC_ID &&
                rec_range.hdr.size >= sizeof(CV_LeafMFuncId))
             {
               CV_LeafMFuncId *mfunc_id = (CV_LeafMFuncId*)raw_leaf;
@@ -2873,7 +2873,7 @@ internal TS_TASK_FUNCTION_DEF(p2r_symbol_stream_convert_task__entry_point)
             }
             
             // rjf: extract non-method function inline info
-            else if(rec_range.hdr.kind == CV_LeafIDKind_FUNC_ID &&
+            else if(rec_range.hdr.kind == CV_LeafKind_FUNC_ID &&
                     rec_range.hdr.size >= sizeof(CV_LeafFuncId))
             {
               CV_LeafFuncId *func_id = (CV_LeafFuncId*)raw_leaf;

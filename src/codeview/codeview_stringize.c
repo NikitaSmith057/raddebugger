@@ -408,11 +408,11 @@ cv_stringize_sym_range(Arena *arena, String8List *out,
       
       case CV_SymKind_OBJNAME:
       {
-        if (sizeof(CV_SymObjname) > cap){
+        if (sizeof(CV_SymObjName) > cap){
           str8_list_push(arena, out, str8_lit(" bad symbol range\n"));
         }
         else{
-          CV_SymObjname *objname = (CV_SymObjname*)first;
+          CV_SymObjName *objname = (CV_SymObjName*)first;
           
           // sig
           str8_list_pushf(arena, out, " sig=%u\n", objname->sig);
@@ -2004,7 +2004,7 @@ cv_stringize_leaf_range(Arena *arena, String8List *out,
         }
       }break;
       
-      case CV_LeafIDKind_FUNC_ID:
+      case CV_LeafKind_FUNC_ID:
       {
         if (sizeof(CV_LeafFuncId) > cap){
           str8_list_push(arena, out, str8_lit(" bad leaf range\n"));
@@ -2020,7 +2020,7 @@ cv_stringize_leaf_range(Arena *arena, String8List *out,
         }
       }break;
       
-      case CV_LeafIDKind_MFUNC_ID:
+      case CV_LeafKind_MFUNC_ID:
       {
         if (sizeof(CV_LeafMFuncId) > cap){
           str8_list_push(arena, out, str8_lit(" bad leaf range\n"));
@@ -2036,7 +2036,7 @@ cv_stringize_leaf_range(Arena *arena, String8List *out,
         }
       }break;
       
-      case CV_LeafIDKind_BUILDINFO:
+      case CV_LeafKind_BUILDINFO:
       {
         if (sizeof(CV_LeafBuildInfo) > cap){
           str8_list_push(arena, out, str8_lit(" bad leaf range\n"));
@@ -2057,7 +2057,7 @@ cv_stringize_leaf_range(Arena *arena, String8List *out,
         }
       }break;
       
-      case CV_LeafIDKind_SUBSTR_LIST:
+      case CV_LeafKind_SUBSTR_LIST:
       {
         if (sizeof(CV_LeafSubstrList) > cap){
           str8_list_push(arena, out, str8_lit(" bad leaf range\n"));
@@ -2078,7 +2078,7 @@ cv_stringize_leaf_range(Arena *arena, String8List *out,
         }
       }break;
       
-      case CV_LeafIDKind_STRING_ID:
+      case CV_LeafKind_STRING_ID:
       {
         if (sizeof(CV_LeafStringId) > cap){
           str8_list_push(arena, out, str8_lit(" bad leaf range\n"));
@@ -2093,7 +2093,7 @@ cv_stringize_leaf_range(Arena *arena, String8List *out,
         }
       }break;
       
-      case CV_LeafIDKind_UDT_SRC_LINE:
+      case CV_LeafKind_UDT_SRC_LINE:
       {
         if (sizeof(CV_LeafUDTSrcLine) > cap){
           str8_list_push(arena, out, str8_lit(" bad leaf range\n"));
@@ -2237,13 +2237,13 @@ cv_stringize_leaf_range(Arena *arena, String8List *out,
       //case CV_LeafKind_VFTABLE:
       
       // Leaf ID Kinds
-      //case CV_LeafIDKind_FUNC_ID:
-      //case CV_LeafIDKind_MFUNC_ID:
-      //case CV_LeafIDKind_BUILDINFO:
-      //case CV_LeafIDKind_SUBSTR_LIST:
-      //case CV_LeafIDKind_STRING_ID:
-      //case CV_LeafIDKind_UDT_SRC_LINE:
-      case CV_LeafIDKind_UDT_MOD_SRC_LINE:
+      //case CV_LeafKind_FUNC_ID:
+      //case CV_LeafKind_MFUNC_ID:
+      //case CV_LeafKind_BUILDINFO:
+      //case CV_LeafKind_SUBSTR_LIST:
+      //case CV_LeafKind_STRING_ID:
+      //case CV_LeafKind_UDT_SRC_LINE:
+      case CV_LeafKind_UDT_MOD_SRC_LINE:
       
       {
         str8_list_push(arena, out, str8_lit(" no stringizer path\n"));
