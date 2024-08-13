@@ -80,6 +80,13 @@ cv_numeric_from_data_range(U8 *first, U8 *opl)
   return result;
 }
 
+internal U64
+cv_read_numeric(String8 data, U64 offset, CV_NumericParsed *out)
+{
+  *out = cv_numeric_from_data_range(data.str + offset, data.str + data.size);
+  return out->encoded_size;
+}
+
 internal B32
 cv_numeric_fits_in_u64(CV_NumericParsed *num)
 {
@@ -609,6 +616,7 @@ cv_c13_parsed_from_data(Arena *arena, String8 c13_data, String8 strtbl, COFF_Sec
           CV_C13InlineeLinesParsedNode *n = push_array(arena, CV_C13InlineeLinesParsedNode, 1);
           SLLQueuePush(node->inlinee_lines_first, node->inlinee_lines_last, n);
           n->v.inlinee          = hdr->inlinee;
+          n->v.file_off         = hdr->file_off;
           n->v.file_name        = file_name;
           n->v.first_source_ln  = hdr->first_source_ln;
           n->v.extra_file_count = extra_file_count;
