@@ -3090,7 +3090,7 @@ p2r_convert(Arena *arena, P2R_User2Convert *in)
   if(msf != 0) ProfScope("parse PDB auth_guid & named streams table")
   {
     Temp scratch = scratch_begin(&arena, 1);
-    String8 info_data = msf_data_from_stream(msf, PDB_FixedStream_PdbInfo);
+    String8 info_data = msf_data_from_stream(msf, PDB_FixedStream_Info);
     PDB_Info *info = pdb_info_from_data(scratch.arena, info_data);
     named_streams = pdb_named_stream_table_from_info(arena, info);
     MemoryCopyStruct(&auth_guid, &info->auth_guid);
@@ -3104,7 +3104,7 @@ p2r_convert(Arena *arena, P2R_User2Convert *in)
   String8 raw_strtbl = {0};
   if(named_streams != 0) ProfScope("parse PDB strtbl")
   {
-    MSF_StreamNumber strtbl_sn = named_streams->sn[PDB_NamedStream_STRTABLE];
+    MSF_StreamNumber strtbl_sn = named_streams->sn[PDB_NamedStream_StringTable];
     String8 strtbl_data = msf_data_from_stream(msf, strtbl_sn);
     strtbl = pdb_strtbl_from_data(arena, strtbl_data);
     raw_strtbl = str8_substr(strtbl_data, rng_1u64(strtbl->strblock_min, strtbl->strblock_max));

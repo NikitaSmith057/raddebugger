@@ -5,7 +5,33 @@
 #define PDB_PARSE_H
 
 ////////////////////////////////
-//~ PDB Parser Types
+//~ PDB Parser String Table Types
+
+typedef struct PDB_Strtbl
+{
+  String8 data;
+  U32 bucket_count;
+  U32 strblock_min;
+  U32 strblock_max;
+  U32 buckets_min;
+  U32 buckets_max;
+} PDB_Strtbl;
+
+////////////////////////////////
+//~ PDB Parser Info Types
+
+typedef enum PDB_NamedStream
+{
+  PDB_NamedStream_HeaderBlock,
+  PDB_NamedStream_StringTable,
+  PDB_NamedStream_LinkInfo,
+  PDB_NamedStream_Count
+} PDB_NamedStream;
+
+typedef struct PDB_NamedStreamTable
+{
+  MSF_StreamNumber sn[PDB_NamedStream_Count];
+} PDB_NamedStreamTable;
 
 typedef struct PDB_InfoNode
 {
@@ -21,20 +47,37 @@ typedef struct PDB_Info
   COFF_Guid auth_guid;
 } PDB_Info;
 
-typedef struct PDB_NamedStreamTable
+typedef struct PDB_InfoHeader
 {
-  MSF_StreamNumber sn[PDB_NamedStream_COUNT];
-} PDB_NamedStreamTable;
+  PDB_InfoVersion version;
+  U32 time;
+  U32 age;
+} PDB_InfoHeader;
 
-typedef struct PDB_Strtbl
+////////////////////////////////
+//~ PDB Parser DBI Types
+
+//  (this is not "literally" defined by the format - but helpful to have)
+typedef enum PDB_DbiRange
 {
-  String8 data;
-  U32 bucket_count;
-  U32 strblock_min;
-  U32 strblock_max;
-  U32 buckets_min;
-  U32 buckets_max;
-} PDB_Strtbl;
+  PDB_DbiRange_ModuleInfo,
+  PDB_DbiRange_SecCon,
+  PDB_DbiRange_SecMap,
+  PDB_DbiRange_FileInfo,
+  PDB_DbiRange_TSM,
+  PDB_DbiRange_EcInfo,
+  PDB_DbiRange_DbgHeader,
+  PDB_DbiRange_COUNT
+} PDB_DbiRange;
+
+//  (this is not "literally" defined by the format - but helpful to have)
+typedef enum
+{
+  PDB_DbiCompUnitRange_Symbols,
+  PDB_DbiCompUnitRange_C11,
+  PDB_DbiCompUnitRange_C13,
+  PDB_DbiCompUnitRange_COUNT
+} PDB_DbiCompUnitRange;
 
 typedef struct PDB_DbiParsed
 {
@@ -43,10 +86,53 @@ typedef struct PDB_DbiParsed
   MSF_StreamNumber gsi_sn;
   MSF_StreamNumber psi_sn;
   MSF_StreamNumber sym_sn;
-  
   U64 range_off[(U64)(PDB_DbiRange_COUNT) + 1];
   MSF_StreamNumber dbg_streams[PDB_DbiStream_COUNT];
 } PDB_DbiParsed;
+
+typedef struct PDB_CompUnit
+{
+  MSF_StreamNumber sn;
+  U32 range_off[(U32)(PDB_DbiCompUnitRange_COUNT) + 1];
+  
+  String8 obj_name;
+  String8 group_name;
+} PDB_CompUnit;
+
+typedef struct PDB_CoffSectionArray
+{
+  COFF_SectionHeader *sections;
+  U64 count;
+} PDB_CoffSectionArray;
+
+typedef struct PDB_CompUnitNode
+{
+  struct PDB_CompUnitNode *next;
+  PDB_CompUnit unit;
+} PDB_CompUnitNode;
+
+typedef struct PDB_CompUnitArray
+{
+  PDB_CompUnit **units;
+  U64 count;
+} PDB_CompUnitArray;
+
+typedef struct PDB_CompUnitContribution
+{
+  U32 mod;
+  U64 voff_first;
+  U64 voff_opl;
+} PDB_CompUnitContribution;
+
+typedef struct PDB_CompUnitContributionArray
+{
+  PDB_CompUnitContribution *contributions;
+  U64 count;
+} PDB_CompUnitContributionArray;
+
+
+////////////////////////////////
+//~ PDB Parser TPI/IPI Types
 
 typedef struct PDB_TpiParsed
 {
@@ -89,6 +175,9 @@ typedef struct PDB_TpiHashParsed
   U32 bucket_mask;
 } PDB_TpiHashParsed;
 
+////////////////////////////////
+//~ PDB Parser GSI Types
+
 typedef struct PDB_GsiBucket
 {
   U32 *offs;
@@ -99,40 +188,6 @@ typedef struct PDB_GsiParsed
 {
   PDB_GsiBucket buckets[4096];
 } PDB_GsiParsed;
-
-typedef struct PDB_CompUnit
-{
-  MSF_StreamNumber sn;
-  U32 range_off[(U32)(PDB_DbiCompUnitRange_COUNT) + 1];
-  
-  String8 obj_name;
-  String8 group_name;
-} PDB_CompUnit;
-
-typedef struct PDB_CompUnitNode
-{
-  struct PDB_CompUnitNode *next;
-  PDB_CompUnit unit;
-} PDB_CompUnitNode;
-
-typedef struct PDB_CompUnitArray
-{
-  PDB_CompUnit **units;
-  U64 count;
-} PDB_CompUnitArray;
-
-typedef struct PDB_CompUnitContribution
-{
-  U32 mod;
-  U64 voff_first;
-  U64 voff_opl;
-} PDB_CompUnitContribution;
-
-typedef struct PDB_CompUnitContributionArray
-{
-  PDB_CompUnitContribution *contributions;
-  U64 count;
-} PDB_CompUnitContributionArray;
 
 ////////////////////////////////
 //~ PDB Parser Functions
@@ -150,8 +205,7 @@ internal PDB_TpiHashParsed*   pdb_tpi_hash_from_data(Arena *arena,
                                                      String8 tpi_hash_aux_data);
 internal PDB_GsiParsed*       pdb_gsi_from_data(Arena *arena, String8 gsi_data);
 
-internal COFF_SectionHeaderArray pdb_coff_section_array_from_data(Arena *arena,
-                                                                  String8 section_data);
+internal COFF_SectionHeaderArray pdb_coff_section_array_from_data(Arena *arena, String8 section_data);
 
 internal PDB_CompUnitArray*   pdb_comp_unit_array_from_data(Arena *arena,
                                                             String8 module_info_data);
