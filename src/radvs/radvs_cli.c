@@ -6,11 +6,11 @@
 
 #include <stdio.h>
 #include <stdarg.h>
-#include "radvs/radvs_com_main.c"
+#include "radvs/radvs_bridge_main.c"
 
 typedef struct
 {
-  RADVS_EngineSession *session;
+  RADVS_Session  *session;
   Thread          event_thread;
   Mutex           state_mutex;
   Mutex           output_mutex;
@@ -86,7 +86,7 @@ internal void
 radvs_cli_event_worker(void *user_data)
 {
   RADVS_CLI *cli = user_data;
-  RADVS_EngineSession *engine_session = cli->session;
+  RADVS_EngineSession *engine_session = cli->session->engine_session;
   for (;;) {
     if (radvs_engine_session_wait_event(engine_session, max_U64) != RADVS_Result_Ok) {
       break;
@@ -178,7 +178,7 @@ radvs_cli_launch(RADVS_CLI *cli, String8 exe)
     return RADVS_Result_InvalidArgument;
   }
   U32 pid = 0;
-  RADVS_Result result = radvs_engine_session_launch(cli->session, exe, cli->args, cli->wdir, &pid);
+  RADVS_Result result = radvs_engine_session_launch(cli->session->engine_session, exe, cli->args, cli->wdir, &pid);
   if (result == RADVS_Result_Ok) {
     MutexScope (cli->output_mutex) {
       radvs_cli_fprintf(stdout, "launched pid=%u\n", pid);
@@ -192,14 +192,14 @@ internal void
 radvs_cli_list_threads(RADVS_CLI *cli)
 {
   U64 count = 0;
-  RADVS_Result result = radvs_engine_session_copy_threads(cli->session, 0, 0, &count);
+  RADVS_Result result = radvs_engine_session_copy_threads(cli->session->engine_session, 0, 0, &count);
   if (result != RADVS_Result_Ok && result != RADVS_Result_OutOfMemory) {
     radvs_cli_print_result(cli, "threads", result);
     return;
   }
   Temp scratch = scratch_begin(0, 0);
   RADVS_ThreadDesc *threads = push_array(scratch.arena, RADVS_ThreadDesc, count);
-  result = radvs_engine_session_copy_threads(cli->session, threads, count, &count);
+  result = radvs_engine_session_copy_threads(cli->session->engine_session, threads, count, &count);
   if (result == RADVS_Result_Ok) {
     MutexScope (cli->output_mutex) {
       for EachIndex(index, count) {
@@ -223,14 +223,14 @@ internal void
 radvs_cli_list_modules(RADVS_CLI *cli)
 {
   U64 count = 0;
-  RADVS_Result result = radvs_engine_session_copy_modules(cli->session, 0, 0, &count);
+  RADVS_Result result = radvs_engine_session_copy_modules(cli->session->engine_session, 0, 0, &count);
   if (result != RADVS_Result_Ok && result != RADVS_Result_OutOfMemory) {
     radvs_cli_print_result(cli, "modules", result);
     return;
   }
   Temp scratch = scratch_begin(0, 0);
   RADVS_ModuleDesc *modules = push_array(scratch.arena, RADVS_ModuleDesc, count);
-  result = radvs_engine_session_copy_modules(cli->session, modules, count, &count);
+  result = radvs_engine_session_copy_modules(cli->session->engine_session, modules, count, &count);
   if (result == RADVS_Result_Ok) {
     MutexScope (cli->output_mutex) {
       for EachIndex(index, count) {
@@ -268,29 +268,29 @@ radvs_cli_dispatch_command(RADVS_CLI *cli, String8 command_line)
     result = radvs_cli_launch(cli, exe.size != 0 ? exe : cli->exe);
     if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "launch", result); }
   } else if (str8_matchi(command, str8_lit("run"))) {
-    result = radvs_engine_session_run(cli->session, 0, 0);
+    result = radvs_engine_session_run(cli->session->engine_session, 0, 0);
     if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "run", result); }
   } else if (str8_matchi(command, str8_lit("continue"))) {
     DMN_Handle thread_handle = radvs_cli_last_stopped_thread_handle(cli);
     String8 argument = radvs_cli_next_token(&command_line);
     if (argument.size != 0 && !radvs_cli_parse_handle(argument, &thread_handle)) { thread_handle = dmn_handle_zero(); }
-    result = radvs_engine_session_run_thread(cli->session, thread_handle);
+    result = radvs_engine_session_run_thread(cli->session->engine_session, thread_handle);
     if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "continue", result); }
   } else if (str8_matchi(command, str8_lit("step"))) {
     DMN_Handle thread_handle = radvs_cli_last_stopped_thread_handle(cli);
     String8 argument = radvs_cli_next_token(&command_line);
     if (argument.size != 0 && !radvs_cli_parse_handle(argument, &thread_handle)) { thread_handle = dmn_handle_zero(); }
-    result = radvs_engine_session_step_thread(cli->session, thread_handle);
+    result = radvs_engine_session_step_thread(cli->session->engine_session, thread_handle);
     if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "step", result); }
   } else if (str8_matchi(command, str8_lit("break"))) {
-    result = radvs_engine_session_break(cli->session);
+    result = radvs_engine_session_break(cli->session->engine_session);
     if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "break", result); }
   } else if (str8_matchi(command, str8_lit("bp"))) {
     U64 address = 0;
     if (radvs_cli_parse_u64(radvs_cli_next_token(&command_line), &address)) {
       RADVS_BreakpointID breakpoint_id = 0;
       RADVS_BreakpointSpec spec = { .address = address, .enabled = 1 };
-      result = radvs_engine_session_alloc_breakpoint(cli->session, &spec, &breakpoint_id);
+      result = radvs_engine_session_alloc_breakpoint(cli->session->engine_session, &spec, &breakpoint_id);
       if (result == RADVS_Result_Ok) {
         MutexScope (cli->output_mutex) {
           radvs_cli_fprintf(stdout, "breakpoint id=%I64u address=0x%I64x\n", breakpoint_id, address);
@@ -307,7 +307,7 @@ radvs_cli_dispatch_command(RADVS_CLI *cli, String8 command_line)
     U64 breakpoint_id = 0;
     if (radvs_cli_parse_u64(radvs_cli_next_token(&command_line), &breakpoint_id)) {
       B32 enabled = str8_matchi(command, str8_lit("bp-enable"));
-      result = radvs_engine_session_set_breakpoint_enabled(cli->session, breakpoint_id, enabled);
+      result = radvs_engine_session_set_breakpoint_enabled(cli->session->engine_session, breakpoint_id, enabled);
       if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "breakpoint", result); }
     } else {
       radvs_cli_print_result(cli, "breakpoint", RADVS_Result_InvalidArgument);
@@ -315,7 +315,7 @@ radvs_cli_dispatch_command(RADVS_CLI *cli, String8 command_line)
   } else if (str8_matchi(command, str8_lit("bp-delete"))) {
     U64 breakpoint_id = 0;
     if (radvs_cli_parse_u64(radvs_cli_next_token(&command_line), &breakpoint_id)) {
-      result = radvs_engine_session_remove_breakpoint(cli->session, breakpoint_id);
+      result = radvs_engine_session_remove_breakpoint(cli->session->engine_session, breakpoint_id);
       if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "bp-delete", result); }
     } else {
       radvs_cli_print_result(cli, "bp-delete", RADVS_Result_InvalidArgument);
@@ -328,9 +328,9 @@ radvs_cli_dispatch_command(RADVS_CLI *cli, String8 command_line)
     DMN_Handle process_handle = {0};
     String8 argument = radvs_cli_next_token(&command_line);
     if (argument.size == 0) {
-      result = radvs_engine_session_terminate(cli->session, 0, 0);
+      result = radvs_engine_session_terminate(cli->session->engine_session, 0, 0);
     } else if (radvs_cli_parse_handle(argument, &process_handle)) {
-      result = radvs_engine_session_terminate_process(cli->session, process_handle);
+      result = radvs_engine_session_terminate_process(cli->session->engine_session, process_handle);
     }
     if (result != RADVS_Result_Ok) { radvs_cli_print_result(cli, "terminate", result); }
   } else if (str8_matchi(command, str8_lit("wait"))) {
@@ -407,7 +407,7 @@ entry_point(CmdLine *cmdline)
     return;
   }
 
-  RADVS_Result result = (RADVS_Result)radvs_com_session_alloc(&cli.session);
+  RADVS_Result result = radvs_session_create(&cli.session);
   if (result != RADVS_Result_Ok) {
     radvs_cli_fprintf(stderr, "session: %S\n", radvs_cli_result_string(result));
     return;
@@ -418,7 +418,7 @@ entry_point(CmdLine *cmdline)
   if (cli.event_thread.u64[0] == 0) {
     mutex_release(cli.output_mutex);
     mutex_release(cli.state_mutex);
-    radvs_com_session_release(cli.session);
+    radvs_session_destroy(cli.session);
     return;
   }
 
@@ -463,9 +463,9 @@ entry_point(CmdLine *cmdline)
     }
   }
 
-  radvs_engine_session_close_event_wait(cli.session);
+  radvs_engine_session_close_event_wait(cli.session->engine_session);
   thread_join(cli.event_thread, max_U64);
   mutex_release(cli.output_mutex);
   mutex_release(cli.state_mutex);
-  radvs_com_session_release(cli.session);
+  radvs_session_destroy(cli.session);
 }

@@ -100,22 +100,22 @@ namespace RAD
             out uint  exitCode,
             [Out, MarshalAs(UnmanagedType.LPArray, SizeConst = 1)] THREADPROPERTIES[] threadProperties,
             [Out, MarshalAs(UnmanagedType.LPArray, SizeConst = 1)] EXCEPTION_INFO[] exceptionInfo,
-            ref String8 text);
+            out IntPtr text);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int GetStringDelegate(RadDbgSessionHandle session, ref String8 value);
+        private delegate int GetStringDelegate(RadDbgSessionHandle session, out IntPtr value);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int GetHostNameDelegate(
             RadDbgSessionHandle session,
             enum_GETHOSTNAME_TYPE type,
-            ref String8 value);
+            out IntPtr value);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int GetProcessIdDelegate(RadDbgSessionHandle session, out AD_PROCESS_ID processId);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int GetEngineInfoDelegate(RadDbgSessionHandle session, ref String8 name, out Guid engineId);
+        private delegate int GetEngineInfoDelegate(RadDbgSessionHandle session, out IntPtr name, out Guid engineId);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int CopyThreadsDelegate(
@@ -130,9 +130,9 @@ namespace RAD
             uint threadId,
             enum_THREADPROPERTY_FIELDS fields,
             [Out, MarshalAs(UnmanagedType.LPArray, SizeConst = 1)] THREADPROPERTIES[] properties,
-            ref String8 name);
+            out IntPtr name);
 
-        private delegate int FillString(ref String8 value);
+        private delegate int AllocateString(out IntPtr value);
 
         internal static int CreateSession(out RadDbgSessionHandle? session)
         {
@@ -217,11 +217,11 @@ namespace RAD
         internal static int WaitEvent(RadDbgSessionHandle session, uint timeout, out RadDbgNativeEvent? nativeEvent)
         {
             nativeEvent = null;
+            IntPtr text = IntPtr.Zero;
             try
             {
                 THREADPROPERTIES[] threadProperties = new THREADPROPERTIES[1];
                 EXCEPTION_INFO[] exceptionInfo = new EXCEPTION_INFO[1];
-                String8 text = default;
                 int result = NativeExports.Value.WaitEvent(
                     session,
                     timeout,
@@ -231,51 +231,11 @@ namespace RAD
                     out uint exitCode,
                     threadProperties,
                     exceptionInfo,
-                    ref text);
+                    out text);
 
-                if (result < 0 && result != ErrorInsufficientBuffer)
+                if (result < 0)
                 {
                     return result;
-                }
-
-                string decodedText = string.Empty;
-                if (text.size != 0)
-                {
-                    if (text.size > int.MaxValue)
-                    {
-                        return RadDbgHResult.E_OUTOFMEMORY;
-                    }
-
-                    byte[] buffer = new byte[(int)text.size];
-                    GCHandle pin = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                    try
-                    {
-                        text.str = pin.AddrOfPinnedObject();
-                        text.size = (ulong)buffer.Length;
-                        result = NativeExports.Value.WaitEvent(
-                            session,
-                            timeout,
-                            out eventIid,
-                            out attributes,
-                            out sequence,
-                            out exitCode,
-                            threadProperties,
-                            exceptionInfo,
-                            ref text);
-                        if (result < 0)
-                        {
-                            return result;
-                        }
-                        if (text.size > (ulong)buffer.Length)
-                        {
-                            return ErrorInsufficientBuffer;
-                        }
-                        decodedText = Encoding.UTF8.GetString(buffer, 0, (int)text.size);
-                    }
-                    finally
-                    {
-                        pin.Free();
-                    }
                 }
 
                 nativeEvent = new RadDbgNativeEvent
@@ -286,7 +246,7 @@ namespace RAD
                     ExitCode         = exitCode,
                     ThreadProperties = threadProperties[0],
                     ExceptionInfo    = exceptionInfo[0],
-                    Text             = decodedText,
+                    Text             = StringFromBstr(text),
                 };
                 return result;
             }
@@ -294,11 +254,18 @@ namespace RAD
             {
                 return Marshal.GetHRForException(exception);
             }
+            finally
+            {
+                if (text != IntPtr.Zero)
+                {
+                    Marshal.FreeBSTR(text);
+                }
+            }
         }
 
         internal static int GetProgramName(RadDbgSessionHandle session, out string name)
         {
-            return GetString((ref String8 value) => NativeExports.Value.GetProgramName(session, ref value), out name);
+            return GetString((out IntPtr value) => NativeExports.Value.GetProgramName(session, out value), out name);
         }
 
         internal static int GetHostName(
@@ -306,7 +273,7 @@ namespace RAD
             enum_GETHOSTNAME_TYPE type,
             out string name)
         {
-            return GetString((ref String8 value) => NativeExports.Value.GetHostName(session, type, ref value), out name);
+            return GetString((out IntPtr value) => NativeExports.Value.GetHostName(session, type, out value), out name);
         }
 
         internal static int GetHostPid(RadDbgSessionHandle session, out AD_PROCESS_ID processId)
@@ -324,14 +291,14 @@ namespace RAD
 
         internal static int GetHostMachineName(RadDbgSessionHandle session, out string name)
         {
-            return GetString((ref String8 value) => NativeExports.Value.GetHostMachineName(session, ref value), out name);
+            return GetString((out IntPtr value) => NativeExports.Value.GetHostMachineName(session, out value), out name);
         }
 
         internal static int GetEngineInfo(RadDbgSessionHandle session, out string name, out Guid engineId)
         {
             Guid returnedEngineId = Guid.Empty;
             int result = GetString(
-                (ref String8 value) => NativeExports.Value.GetEngineInfo(session, ref value, out returnedEngineId),
+                (out IntPtr value) => NativeExports.Value.GetEngineInfo(session, out value, out returnedEngineId),
                 out name);
             engineId = returnedEngineId;
             return result;
@@ -394,7 +361,7 @@ namespace RAD
 
             string name;
             int result = GetString(
-                (ref String8 value) => NativeExports.Value.GetThreadProperties(session, threadId, fields, properties, ref value),
+                (out IntPtr value) => NativeExports.Value.GetThreadProperties(session, threadId, fields, properties, out value),
                 out name);
             if (result >= 0 && (properties[0].dwFields & enum_THREADPROPERTY_FIELDS.TPF_NAME) != 0)
             {
@@ -424,53 +391,36 @@ namespace RAD
             }
         }
 
-        private static int GetString(FillString fill, out string value)
+        private static int GetString(AllocateString allocate, out string value)
         {
             value = string.Empty;
+            IntPtr nativeString = IntPtr.Zero;
             try
             {
-                String8 nativeString = default;
-                int result = fill(ref nativeString);
-                if (result < 0 && result != ErrorInsufficientBuffer)
+                int result = allocate(out nativeString);
+                if (result < 0)
                 {
                     return result;
                 }
-                if (nativeString.size == 0)
-                {
-                    return RadDbgHResult.S_OK;
-                }
-                if (nativeString.size > int.MaxValue)
-                {
-                    return RadDbgHResult.E_OUTOFMEMORY;
-                }
-
-                byte[] buffer = new byte[(int)nativeString.size];
-                GCHandle pin = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-                try
-                {
-                    nativeString.str  = pin.AddrOfPinnedObject();
-                    nativeString.size = (ulong)buffer.Length;
-                    result = fill(ref nativeString);
-                    if (result < 0)
-                    {
-                        return result;
-                    }
-                    if (nativeString.size > (ulong)buffer.Length)
-                    {
-                        return ErrorInsufficientBuffer;
-                    }
-                    value = Encoding.UTF8.GetString(buffer, 0, (int)nativeString.size);
-                    return result;
-                }
-                finally
-                {
-                    pin.Free();
-                }
+                value = StringFromBstr(nativeString);
+                return result;
             }
             catch (Exception exception)
             {
                 return Marshal.GetHRForException(exception);
             }
+            finally
+            {
+                if (nativeString != IntPtr.Zero)
+                {
+                    Marshal.FreeBSTR(nativeString);
+                }
+            }
+        }
+
+        private static string StringFromBstr(IntPtr value)
+        {
+            return value == IntPtr.Zero ? string.Empty : Marshal.PtrToStringBSTR(value) ?? string.Empty;
         }
 
         private static int Invoke(Func<int> action)

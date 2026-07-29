@@ -23,27 +23,22 @@
         <Parent guid="guidRADPackageCmdSet" id="MyMenuGroup" />
         <Strings>
           <ButtonText>Debug Engine</ButtonText>
-		        <CommandName>Debug Engine</CommandName>
+		  <CommandName>Debug Engine</CommandName>
         </Strings>
       </Menu>
     </Menus>
 
     <Buttons>
-      <Button guid="guidRADPackageCmdSet" id="DebugEnginePlaceholder" priority="0x0000" type="Button">
+      <Button guid="guidRADPackageCmdSet" id="NativeEngineId" priority="0x0100" type="Button">
         <Parent guid="guidRADPackageCmdSet" id="DebugEngineGroup" />
-        <CommandFlag>DefaultDisabled</CommandFlag>
-        <CommandFlag>TextChanges</CommandFlag>
         <Strings>
-          <ButtonText>Loading debug engines...</ButtonText>
+          <ButtonText>Native</ButtonText>
         </Strings>
       </Button>
-      <Button guid="guidRADPackageCmdSet" id="DebugEngineItemStart" priority="0x0100" type="Button">
+      <Button guid="guidRADPackageCmdSet" id="RadEngineId" priority="0x0200" type="Button">
         <Parent guid="guidRADPackageCmdSet" id="DebugEngineGroup" />
-        <CommandFlag>DynamicItemStart</CommandFlag>
-        <CommandFlag>DynamicVisibility</CommandFlag>
-        <CommandFlag>TextChanges</CommandFlag>
         <Strings>
-          <ButtonText>Debug engine</ButtonText>
+          <ButtonText>RAD</ButtonText>
         </Strings>
       </Button>
     </Buttons>
@@ -56,10 +51,9 @@
       <IDSymbol name="MyMenuGroup" value="0x1020" />
       <IDSymbol name="DebugEngineMenu" value="0x1021" />
       <IDSymbol name="DebugEngineGroup" value="0x1022" />
-      <IDSymbol name="DebugEnginePlaceholder" value="0x00ff" />
-      <IDSymbol name="DebugEngineItemStart" value="0x0100" />
+      <IDSymbol name="NativeEngineId" value="0x0100" />
+      <IDSymbol name="RadEngineId" value="0x0101" />
     </GuidSymbol>
 
   </Symbols>
 </CommandTable>
-

@@ -20,7 +20,7 @@ namespace RAD
         {
             ThreadHelper.ThrowIfNotOnUIThread();
 
-            if (this.package.HasSelectedDebugEngine &&
+            if (this.package.UseRadDbgEngine      &&
                 this.package.IsDebuggerInDesignMode &&
                 commandGroup == VSConstants.GUID_VSStandardCommandSet97)
             {

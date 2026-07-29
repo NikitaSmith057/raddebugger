@@ -1009,7 +1009,7 @@ radvs_engine_reduce_event_locked(RADVS_Engine *engine, const DMN_Event *event, R
   case DMN_EventKind_HandshakeComplete: NotImplemented; break;
   case DMN_EventKind_ModuleDebugInfo: NotImplemented; break;
   case DMN_EventKind_Memory: NotImplemented; break;
-  case DMN_EventKind_DebugString: break;
+  case DMN_EventKind_DebugString: NotImplemented; break;
   case DMN_EventKind_SetThreadName: NotImplemented; break;
   case DMN_EventKind_SetThreadColor: NotImplemented; break;
   case DMN_EventKind_SetBreakpoint: NotImplemented; break;

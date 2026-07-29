@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.ComponentModel.Design;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -8,55 +7,18 @@ using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudio.VCProjectEngine;
-using Microsoft.Win32;
 
 namespace RAD
 {
     internal sealed class RadCommandHandler
     {
-        public const int DebugEngineItemStartId = 0x0100;
-        public const int DebugEnginePlaceholderId = 0x00ff;
+        public const int NativeCommandId = 0x0100;
+        public const int RadCommandId    = 0x0101;
 
         public static readonly Guid CommandSet = new Guid("c19e4a06-d36b-48b6-baf7-7e37a824e803");
 
-        private readonly RadDbgPackage       package;
+        private readonly RadDbgPackage          package;
         private readonly IVsMonitorSelection monitorSelection;
-        private readonly List<DebugEngine>   discoveredDebugEngines = new();
-
-        private sealed class DebugEngine
-        {
-            internal DebugEngine(Guid id, string name)
-            {
-                this.Id = id;
-                this.Name = name;
-            }
-
-            internal Guid Id { get; }
-            internal string Name { get; }
-        }
-
-        private sealed class DynamicDebugEngineMenuCommand : OleMenuCommand
-        {
-            private readonly Predicate<int> matchItem;
-
-            internal DynamicDebugEngineMenuCommand(CommandID commandId, Predicate<int> matchItem, EventHandler invoke, EventHandler beforeQueryStatus)
-                : base(invoke, null, beforeQueryStatus, commandId)
-            {
-                this.matchItem = matchItem;
-            }
-
-            public override bool DynamicItemMatch(int commandId)
-            {
-                if (this.matchItem(commandId))
-                {
-                    this.MatchedCommandId = commandId;
-                    return true;
-                }
-
-                this.MatchedCommandId = 0;
-                return false;
-            }
-        }
 
         private RadCommandHandler(RadDbgPackage         package,
                                   OleMenuCommandService commandService,
@@ -65,16 +27,16 @@ namespace RAD
             this.package          = package          ?? throw new ArgumentNullException(nameof(package));
             this.monitorSelection = monitorSelection ?? throw new ArgumentNullException(nameof(monitorSelection));
 
-            var debugEngineMenu = new DynamicDebugEngineMenuCommand(
-                new CommandID(CommandSet, DebugEngineItemStartId),
-                this.IsDiscoveredDebugEngineItem,
-                this.SelectDiscoveredDebugEngine,
-                this.UpdateDiscoveredDebugEngineStatus);
-            commandService.AddCommand(debugEngineMenu);
+            // Register RAD Debugger menu item.
+            var radCommand = new OleMenuCommand(this.SelectRadDbgEngine, new CommandID(CommandSet, RadCommandId));
+            commandService.AddCommand(radCommand);
+            radCommand.BeforeQueryStatus += this.UpdateRadDbgEngineStatus;
 
-            var placeholder = new OleMenuCommand(null, new CommandID(CommandSet, DebugEnginePlaceholderId));
-            placeholder.BeforeQueryStatus += this.UpdateDebugEnginePlaceholderStatus;
-            commandService.AddCommand(placeholder);
+            // Register the stock native debugger menu item.
+            commandService = commandService ?? throw new ArgumentNullException(nameof(commandService));
+            var nativeCommand = new OleMenuCommand(this.SelectNativeDebugEngine, new CommandID(CommandSet, NativeCommandId));
+            commandService.AddCommand(nativeCommand);
+            nativeCommand.BeforeQueryStatus += this.UpdateNativeDebugEngineStatus;
         }
 
         public static async Task<RadCommandHandler> InitializeAsync(RadDbgPackage package)
@@ -90,110 +52,26 @@ namespace RAD
             return new RadCommandHandler(package, commandService, monitorSelection);
         }
 
-        private bool IsDiscoveredDebugEngineItem(int commandId)
+        private void SelectNativeDebugEngine(object sender, EventArgs e)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-
-            // Visual Studio starts a new DynamicItemStart query each time this menu opens.
-            if (commandId == DebugEngineItemStartId)
-            {
-                this.DiscoverDebugEngines();
-            }
-
-            int itemIndex = commandId - DebugEngineItemStartId;
-            return itemIndex >= 0 && itemIndex < this.discoveredDebugEngines.Count;
+            this.package.UseRadDbgEngine = false;
         }
 
-        private void SelectDiscoveredDebugEngine(object sender, EventArgs e)
+        private void SelectRadDbgEngine(object sender, EventArgs e)
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-
-            DynamicDebugEngineMenuCommand command = (DynamicDebugEngineMenuCommand)sender;
-            int itemIndex = this.GetDynamicItemIndex(command);
-            if ((uint)itemIndex < (uint)this.discoveredDebugEngines.Count)
-            {
-                this.package.SelectedDebugEngineId = this.discoveredDebugEngines[itemIndex].Id;
-            }
+            this.package.UseRadDbgEngine = true;
         }
 
-        private void UpdateDiscoveredDebugEngineStatus(object sender, EventArgs e)
+        private void UpdateNativeDebugEngineStatus(object sender, EventArgs e)
         {
-            DynamicDebugEngineMenuCommand command = (DynamicDebugEngineMenuCommand)sender;
-            int itemIndex = this.GetDynamicItemIndex(command);
-            if (itemIndex == 0)
-            {
-                this.DiscoverDebugEngines();
-            }
-            if ((uint)itemIndex < (uint)this.discoveredDebugEngines.Count)
-            {
-                DebugEngine engine = this.discoveredDebugEngines[itemIndex];
-                command.Visible = true;
-                command.Enabled = true;
-                command.Checked = this.package.SelectedDebugEngineId == engine.Id;
-                command.Text = engine.Name;
-            }
-            else
-            {
-                command.Visible = false;
-                command.Enabled = false;
-            }
-
-            command.MatchedCommandId = 0;
+            ((OleMenuCommand)sender).Checked = !this.package.UseRadDbgEngine;
         }
 
-        private void UpdateDebugEnginePlaceholderStatus(object sender, EventArgs e)
+        private void UpdateRadDbgEngineStatus(object sender, EventArgs e)
         {
-            OleMenuCommand command = (OleMenuCommand)sender;
-            this.DiscoverDebugEngines();
-            command.Enabled = false;
-            command.Visible = this.discoveredDebugEngines.Count == 0;
-            command.Text = "No debug engines discovered";
-        }
-
-        private int GetDynamicItemIndex(DynamicDebugEngineMenuCommand command)
-        {
-            int commandId = command.MatchedCommandId == 0 ? DebugEngineItemStartId : command.MatchedCommandId;
-            return commandId - DebugEngineItemStartId;
-        }
-
-        private void DiscoverDebugEngines()
-        {
-            this.discoveredDebugEngines.Clear();
-
-            Dictionary<Guid, string> engineNames = new();
-            this.AddDebugEngines(this.package.ApplicationRegistryRoot, engineNames);
-            this.AddDebugEngines(this.package.UserRegistryRoot, engineNames);
-
-            foreach (KeyValuePair<Guid, string> engine in engineNames)
-            {
-                this.discoveredDebugEngines.Add(new DebugEngine(engine.Key, engine.Value));
-            }
-
-            this.discoveredDebugEngines.Sort((left, right) => string.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase));
-        }
-
-        private void AddDebugEngines(RegistryKey registryRoot, Dictionary<Guid, string> engineNames)
-        {
-            using RegistryKey? engines = registryRoot.OpenSubKey(@"AD7Metrics\Engine");
-            if (engines == null)
-            {
-                return;
-            }
-
-            foreach (string keyName in engines.GetSubKeyNames())
-            {
-                if (!Guid.TryParse(keyName, out Guid engineId))
-                {
-                    continue;
-                }
-
-                using RegistryKey? engine = engines.OpenSubKey(keyName);
-                string? name = engine?.GetValue("Name") as string ?? engine?.GetValue(string.Empty) as string;
-                if (!string.IsNullOrWhiteSpace(name))
-                {
-                    engineNames[engineId] = name!;
-                }
-            }
+            ((OleMenuCommand)sender).Checked = this.package.UseRadDbgEngine;
         }
 
         private (string ExecutablePath, string Arguments, string WorkingDirectory) GetActiveCppLaunchSettings()
@@ -261,7 +139,7 @@ namespace RAD
             }
         }
 
-        private async Task LaunchTargetAsync(string executablePath, string arguments, string workingDirectory)
+        private async Task LaunchRadDbggerTargetAsync(string executablePath, string arguments, string workingDirectory)
         {
             await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(this.package.DisposalToken);
 
@@ -273,11 +151,10 @@ namespace RAD
                 bstrExe               = executablePath,
                 bstrArg               = arguments,
                 bstrCurDir            = workingDirectory,
-                guidLaunchDebugEngine = this.package.SelectedDebugEngineId
-                    ?? throw new InvalidOperationException("Select a debug engine before launching."),
+                guidLaunchDebugEngine = new Guid(RadDbgEngine.EngineIdString),
             };
             
-            // Launch the executable using the selected AD7 engine.
+            // Launch the executable using the RAD debug engine.
             this.package.debugger4?.LaunchDebugTargets4(1, [target], new VsDebugTargetProcessInfo[1]);
         }
 
@@ -291,8 +168,8 @@ namespace RAD
                 // Read the active C++ project's launch settings.
                 var launchSettings = this.GetActiveCppLaunchSettings();
 
-                // Launch the target using the selected AD7 engine.
-                await this.LaunchTargetAsync(launchSettings.ExecutablePath, launchSettings.Arguments, launchSettings.WorkingDirectory);
+                // Launch the target using the RAD debug engine.
+                await this.LaunchRadDbggerTargetAsync(launchSettings.ExecutablePath, launchSettings.Arguments, launchSettings.WorkingDirectory);
 
                 return true;
             }

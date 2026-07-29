@@ -1,592 +1,726 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Threading;
+using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Debugger.Interop;
 
 namespace RAD
 {
-    [ComVisible(true)]
     [Guid(ClassIdString)]
     [ClassInterface(ClassInterfaceType.None)]
+    [ComVisible(true)]
     public sealed class RadDbgEngine : IDebugEngine2, IDebugEngineLaunch2
     {
         public const string EngineIdString = "97bd1aec-93d9-4748-b28d-e7e8eca0f781";
         public const string ClassIdString = "56b7b5ea-2c5e-4486-904e-4bf87a110c9b";
-
         private static readonly Guid EngineId = new Guid(EngineIdString);
 
-        private readonly object syncRoot = new object();
-        private RadDbgSessionHandle? session;
-        private IDebugPort2? port;
-        private IDebugProcess2? process;
-        private RadDbgProgram? program;
+        private RadDbgBridge? bridgeSession;
+        private IDebugProcess2? launchProcess;
         private IDebugEventCallback2? callback;
-        private Thread? eventThread;
-        private RadDbgSessionHandle? workerDisposeSession;
-        private bool eventWorkerStarted;
-        private bool hasLaunched;
-        private int programExited;
+        private RadDbgProgram? program;
+        private uint launchSystemProcessId;
 
-        public int EnumPrograms(out IEnumDebugPrograms2 ppEnum)
+        private readonly object programLock = new object();
+        private readonly object breakpointLock = new object();
+        private readonly Dictionary<ulong, RadDbgProgram> programs = new Dictionary<ulong, RadDbgProgram>();
+        private readonly Dictionary<ulong, RadDbgProgramNode> programNodes = new Dictionary<ulong, RadDbgProgramNode>();
+        private readonly Dictionary<ulong, RadDbgBoundBreakpoint> boundBreakpoints = new Dictionary<ulong, RadDbgBoundBreakpoint>();
+        public int LaunchSuspended(string pszServer, IDebugPort2 pPort, string pszExe, string pszArgs, string pszDir, string bstrEnv, string pszOptions, enum_LAUNCH_FLAGS dwLaunchFlags, uint hStdInput, uint hStdOutput, uint hStdError, IDebugEventCallback2 pCallback, out IDebugProcess2 ppProcess)
         {
-            lock (this.syncRoot)
+            ppProcess = null!;
+            if (this.bridgeSession != null)
             {
-                if (this.program == null)
-                {
-                    ppEnum = null!;
-                    return RadDbgHResult.S_OK;
-                }
-                ppEnum = new RadDbgProgramEnumerator(this.program);
-                return RadDbgHResult.S_OK;
+                return VSConstants.E_FAIL;
             }
+
+            int result = RadDbgBridge.LaunchSuspended(pszExe, pszArgs ?? string.Empty, pszDir ?? string.Empty, out RadDbgBridge? session, out uint processId);
+            if (result != VSConstants.S_OK)
+            {
+                return result;
+            }
+
+            AD_PROCESS_ID adProcessId = new AD_PROCESS_ID
+            {
+                ProcessIdType = (uint)enum_AD_PROCESS_ID.AD_PROCESS_ID_SYSTEM,
+                dwProcessId = processId,
+            };
+            int processResult = pPort.GetProcess(adProcessId, out IDebugProcess2 debugProcess);
+            if (processResult < 0)
+            {
+                session!.Terminate(0);
+                session.Dispose();
+                return processResult;
+            }
+
+            this.bridgeSession = session;
+            this.launchProcess = debugProcess;
+            this.launchSystemProcessId = processId;
+            this.callback = pCallback;
+            ppProcess = debugProcess;
+            return VSConstants.S_OK;
         }
 
-        public int Attach(
-            IDebugProgram2[] rgpPrograms,
-            IDebugProgramNode2[] rgpProgramNodes,
-            uint celtPrograms,
-            IDebugEventCallback2 pCallback,
-            enum_ATTACH_REASON dwReason)
+        public int Attach(IDebugProgram2[] rgpPrograms, IDebugProgramNode2[] rgpProgramNodes, uint celtPrograms, IDebugEventCallback2 pCallback, enum_ATTACH_REASON dwReason)
         {
-            if (rgpPrograms == null || celtPrograms != 1 || rgpPrograms.Length == 0 ||
-                rgpPrograms[0] == null || pCallback == null)
+            if (celtPrograms != 1 || rgpPrograms == null || rgpPrograms.Length == 0 || this.bridgeSession == null || this.program != null)
             {
-                return RadDbgHResult.E_INVALIDARG;
+                return VSConstants.E_FAIL;
             }
 
-            lock (this.syncRoot)
+            this.callback = pCallback;
+            int attachResult = this.bridgeSession.Attach(rgpPrograms, rgpProgramNodes, celtPrograms, pCallback, dwReason);
+            if (attachResult < 0 && attachResult != VSConstants.E_NOTIMPL)
             {
-                if (this.session == null)
-                {
-                    return RadDbgHResult.E_INVALIDARG;
-                }
-                if (this.callback != null)
-                {
-                    return RadDbgHResult.E_UNEXPECTED;
-                }
+                return attachResult;
             }
 
-            int result = rgpPrograms[0].GetProgramId(out Guid programId);
-            if (result < 0)
+            int programIdResult = rgpPrograms[0].GetProgramId(out Guid programId);
+            if (programIdResult < 0)
             {
-                return result;
+                return programIdResult;
             }
 
-            IDebugProcess2? attachedProcess;
-            lock (this.syncRoot)
-            {
-                attachedProcess = this.process;
-            }
+            IDebugProcess2? attachedProcess = this.launchProcess;
             if (attachedProcess == null)
             {
-                result = rgpPrograms[0].GetProcess(out attachedProcess);
-                if (result < 0)
+                int processResult = rgpPrograms[0].GetProcess(out attachedProcess);
+                if (processResult < 0)
                 {
-                    return result;
+                    return processResult;
                 }
             }
 
-            RadDbgProgram attachedProgram = new RadDbgProgram(this, attachedProcess, programId);
-            lock (this.syncRoot)
+            this.program = new RadDbgProgram(this, attachedProcess, programId);
+            this.program.MarkRegistered();
+            this.SendEvent(null, new RadEngineCreateEvent(this), typeof(IDebugEngineCreateEvent2).GUID, null);
+            this.SendEvent(this.program, new RadProgramCreateEvent(), typeof(IDebugProgramCreateEvent2).GUID, null);
+            return VSConstants.S_OK;
+        }
+
+        public int ContinueFromSynchronousEvent(IDebugEvent2 pEvent)
+        {
+            if (this.bridgeSession != null)
             {
-                if (this.callback != null || this.session == null)
+                if (pEvent is RadProgramCreateEvent createEvent)
                 {
-                    return RadDbgHResult.E_UNEXPECTED;
+                    if (createEvent.StartsNativeSession)
+                    {
+                        if (this.program is RadDbgProgram program)
+                        {
+                            return this.bridgeSession.ContinueFromSynchronousEvent();
+                        }
+                    }
                 }
-                this.process = attachedProcess;
-                this.program = attachedProgram;
-                this.callback = pCallback;
+                else if (pEvent is RadProgramDestroyEvent destroyEvent)
+                {
+                    return this.bridgeSession.AcknowledgeEvent(destroyEvent.Sequence);
+                }
             }
+            return VSConstants.E_FAIL;
+        }
 
-            RadDbgEngineCreateEvent engineEvent = new RadDbgEngineCreateEvent(this);
-            Guid engineEventIid = typeof(IDebugEngineCreateEvent2).GUID;
-            result = pCallback.Event(
-                this,
-                null!,
-                attachedProgram,
-                null!,
-                engineEvent,
-                ref engineEventIid,
-                (uint)enum_EVENTATTRIBUTES.EVENT_ASYNCHRONOUS);
-            if (result < 0)
-            {
-                this.RollBackAttach(attachedProgram, pCallback);
-                return result;
-            }
-
-            RadDbgProgramCreateEvent programEvent = new RadDbgProgramCreateEvent();
-            Guid programEventIid = typeof(IDebugProgramCreateEvent2).GUID;
-            result = pCallback.Event(
-                this,
-                null!,
-                attachedProgram,
-                null!,
-                programEvent,
-                ref programEventIid,
-                (uint)enum_EVENTATTRIBUTES.EVENT_SYNCHRONOUS);
-            if (result < 0)
-            {
-                this.RollBackAttach(attachedProgram, pCallback);
-            }
-            return result;
+        public int CauseBreak()
+        {
+            return this.BreakProgram();
         }
 
         public int CreatePendingBreakpoint(IDebugBreakpointRequest2 pBPRequest, out IDebugPendingBreakpoint2 ppPendingBP)
         {
             ppPendingBP = null!;
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int SetException(EXCEPTION_INFO[] pException)
-        {
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int RemoveSetException(EXCEPTION_INFO[] pException)
-        {
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int RemoveAllSetExceptions(ref Guid guidType)
-        {
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int GetEngineId(out Guid pguidEngine)
-        {
-            pguidEngine = EngineId;
-            return RadDbgHResult.S_OK;
+            int result = RadDbgPendingBreakpoint.Create(this, pBPRequest, out RadDbgPendingBreakpoint? pendingBreakpoint);
+            if (result == VSConstants.S_OK)
+            {
+                ppPendingBP = pendingBreakpoint!;
+            }
+            return result;
         }
 
         public int DestroyProgram(IDebugProgram2 pProgram)
         {
-            lock (this.syncRoot)
+            if (!ReferenceEquals(pProgram, this.program))
             {
-                if (this.program == null || !ReferenceEquals(this.program, pProgram))
-                {
-                    return RadDbgHResult.E_INVALIDARG;
-                }
-                this.program = null;
+                return VSConstants.E_FAIL;
             }
 
-            this.CloseSession();
-            return RadDbgHResult.S_OK;
+            if (this.bridgeSession != null)
+            {
+                int result = this.bridgeSession.DestroyProgram(pProgram);
+                if (result < 0 && result != VSConstants.E_NOTIMPL)
+                {
+                    return result;
+                }
+            }
+
+            this.program = null;
+            this.DisposeBridgeSession();
+            return VSConstants.S_OK;
         }
 
-        public int ContinueFromSynchronousEvent(IDebugEvent2 pEvent)
+        public int EnumPrograms(out IEnumDebugPrograms2 ppEnum)
         {
-            if (pEvent is RadDbgProgramDestroyEvent destroyEvent)
+            if (this.bridgeSession != null)
             {
-                return this.WithSession(session => RadDbgNative.ContinueSynchronousEvent(session, destroyEvent.Sequence));
+                int result = this.bridgeSession.EnumProgramDescriptors(out _, out _);
+                if (result < 0 && result != VSConstants.E_NOTIMPL)
+                {
+                    ppEnum = null!;
+                    return result;
+                }
             }
-            if (pEvent is RadDbgProgramCreateEvent)
+
+            List<IDebugProgram2> snapshot = new List<IDebugProgram2>();
+            lock (this.programLock)
             {
-                return this.ContinueInitialSynchronousEvent();
+                if (this.program != null)
+                {
+                    snapshot.Add(this.program);
+                }
+                foreach (RadDbgProgram childProgram in this.programs.Values)
+                {
+                    if (!ReferenceEquals(childProgram, this.program))
+                    {
+                        snapshot.Add(childProgram);
+                    }
+                }
             }
-            return RadDbgHResult.E_INVALIDARG;
+            ppEnum = new RadDbgProgramEnum(snapshot.ToArray());
+            return VSConstants.S_OK;
+        }
+
+        public int GetEngineId(out Guid pguidEngine)
+        {
+            if (this.bridgeSession != null)
+            {
+                int result = this.bridgeSession.GetEngineId(out pguidEngine);
+                if (result == VSConstants.S_OK || result != VSConstants.E_NOTIMPL)
+                {
+                    return result;
+                }
+            }
+
+            pguidEngine = EngineId;
+            return VSConstants.S_OK;
+        }
+
+        public int RemoveAllSetExceptions(ref Guid guidType)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.RemoveAllSetExceptions(ref guidType);
+        }
+
+        public int RemoveSetException(EXCEPTION_INFO[] pException)
+        {
+            if (pException == null || pException.Length == 0)
+            {
+                return VSConstants.E_INVALIDARG;
+            }
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.RemoveSetException(ref pException[0]);
+        }
+
+        public int SetException(EXCEPTION_INFO[] pException)
+        {
+            if (pException == null || pException.Length == 0)
+            {
+                return VSConstants.E_INVALIDARG;
+            }
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.SetException(ref pException[0]);
         }
 
         public int SetLocale(ushort wLangID)
         {
-            return RadDbgHResult.S_OK;
-        }
-
-        public int SetRegistryRoot(string pszRegistryRoot)
-        {
-            return RadDbgHResult.S_OK;
+            return this.bridgeSession == null ? VSConstants.S_OK : this.bridgeSession.SetLocale(wLangID);
         }
 
         public int SetMetric(string pszMetric, object varValue)
         {
-            return RadDbgHResult.S_OK;
+            return this.bridgeSession == null ? VSConstants.S_OK : this.bridgeSession.SetMetric(pszMetric, varValue);
         }
 
-        public int CauseBreak()
+        public int SetRegistryRoot(string pszRegistryRoot)
         {
-            return this.BreakSession();
-        }
-
-        public int LaunchSuspended(
-            string pszServer,
-            IDebugPort2 pPort,
-            string pszExe,
-            string pszArgs,
-            string pszDir,
-            string bstrEnv,
-            string pszOptions,
-            enum_LAUNCH_FLAGS dwLaunchFlags,
-            uint hStdInput,
-            uint hStdOutput,
-            uint hStdError,
-            IDebugEventCallback2 pCallback,
-            out IDebugProcess2 ppProcess)
-        {
-            ppProcess = null!;
-            if (pPort == null || pszExe == null)
-            {
-                return RadDbgHResult.E_INVALIDARG;
-            }
-
-            lock (this.syncRoot)
-            {
-                if (this.session != null || this.hasLaunched)
-                {
-                    return RadDbgHResult.E_INVALIDARG;
-                }
-            }
-
-            int result = RadDbgNative.CreateSession(out RadDbgSessionHandle? createdSession);
-            if (result < 0 || createdSession == null)
-            {
-                return result < 0 ? result : RadDbgHResult.E_FAIL;
-            }
-
-            result = RadDbgNative.Launch(createdSession, pszExe, pszArgs, pszDir, out AD_PROCESS_ID processId);
-            if (result < 0)
-            {
-                createdSession.Dispose();
-                return result;
-            }
-
-            result = pPort.GetProcess(processId, out IDebugProcess2 launchedProcess);
-            if (result < 0)
-            {
-                RadDbgNative.Terminate(createdSession);
-                createdSession.Dispose();
-                return result;
-            }
-
-            lock (this.syncRoot)
-            {
-                this.session = createdSession;
-                this.hasLaunched = true;
-                this.port = pPort;
-                this.process = launchedProcess;
-                this.programExited = 0;
-            }
-            ppProcess = launchedProcess;
-            return RadDbgHResult.S_OK;
+            return this.bridgeSession == null ? VSConstants.S_OK : this.bridgeSession.SetRegistryRoot(pszRegistryRoot);
         }
 
         public int ResumeProcess(IDebugProcess2 pProcess)
         {
-            IDebugPort2? currentPort;
-            lock (this.syncRoot)
+            if (this.launchProcess == null)
             {
-                if (this.session == null || pProcess == null || this.port == null)
-                {
-                    return RadDbgHResult.E_INVALIDARG;
-                }
-                currentPort = this.port;
+                return VSConstants.E_FAIL;
             }
 
-            if (!(currentPort is IDebugDefaultPort2 defaultPort))
+            if (!ReferenceEquals(pProcess, this.launchProcess))
             {
-                return RadDbgHResult.E_NOINTERFACE;
+                return VSConstants.E_INVALIDARG;
             }
-            int result = defaultPort.GetPortNotify(out IDebugPortNotify2 notify);
-            if (result < 0)
+
+            int resumeResult = this.bridgeSession?.ResumeLaunchProcess(this.program?.ProcessHandle ?? 0) ?? VSConstants.S_OK;
+            if (resumeResult < 0 && resumeResult != VSConstants.E_NOTIMPL)
             {
-                return result;
+                return resumeResult;
             }
+
+            int portResult = this.launchProcess.GetPort(out IDebugPort2 port);
+            if (portResult < 0 || !(port is IDebugDefaultPort2 defaultPort))
+            {
+                return VSConstants.E_FAIL;
+            }
+
+            int notifyResult = defaultPort.GetPortNotify(out IDebugPortNotify2 notify);
+            if (notifyResult < 0)
+            {
+                return notifyResult;
+            }
+
             return notify.AddProgramNode(new RadDbgProgramNode(this));
         }
 
         public int CanTerminateProcess(IDebugProcess2 pProcess)
         {
-            lock (this.syncRoot)
+            if (!ReferenceEquals(pProcess, this.launchProcess))
             {
-                return this.session != null && pProcess != null
-                    ? RadDbgHResult.S_OK
-                    : RadDbgHResult.E_INVALIDARG;
+                return VSConstants.E_INVALIDARG;
             }
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.CanTerminateLaunchProcess(this.program?.ProcessHandle ?? 0);
         }
 
         public int TerminateProcess(IDebugProcess2 pProcess)
         {
-            lock (this.syncRoot)
+            if (!ReferenceEquals(pProcess, this.launchProcess))
             {
-                if (this.session == null || pProcess == null)
+                return VSConstants.E_INVALIDARG;
+            }
+
+            int result = this.bridgeSession?.TerminateLaunchProcess(this.program?.ProcessHandle ?? 0) ?? VSConstants.E_NOTIMPL;
+            return result == VSConstants.E_NOTIMPL ? this.TerminateProgram() : result;
+        }
+
+        internal void SetCallback(IDebugEventCallback2 callback)
+        {
+            this.callback = callback;
+        }
+
+        internal RadDbgProgram? CurrentProgram => this.program;
+
+        internal int BreakProgram()
+        {
+            if (this.bridgeSession == null)
+            {
+                return VSConstants.E_NOTIMPL;
+            }
+
+            int result = this.bridgeSession.EngineBreak();
+            return result == VSConstants.E_NOTIMPL ? this.bridgeSession.Break() : result;
+        }
+
+        internal int CreateAddressBreakpoint(ulong address, bool enabled, RadDbgAddressBreakpointMode mode, out ulong breakpointId)
+        {
+            breakpointId = 0;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.CreateAddressBreakpoint(address, enabled, mode, out breakpointId);
+        }
+
+        internal int CreateSourceBreakpoint(string sourcePath, uint line, uint column, out ulong breakpointId)
+        {
+            breakpointId = 0;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.CreateSourceBreakpoint(sourcePath, line, column, out breakpointId);
+        }
+
+        internal int SetBreakpointEnabled(ulong breakpointId, bool enabled)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.SetBreakpointEnabled(breakpointId, enabled);
+        }
+
+        internal int DeleteBreakpoint(ulong breakpointId)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.DeleteBreakpoint(breakpointId);
+        }
+
+        internal void RegisterBoundBreakpoint(RadDbgBoundBreakpoint breakpoint)
+        {
+            lock (this.breakpointLock)
+            {
+                this.boundBreakpoints[breakpoint.Id] = breakpoint;
+            }
+        }
+
+        internal void UnregisterBoundBreakpoint(ulong breakpointId)
+        {
+            lock (this.breakpointLock)
+            {
+                this.boundBreakpoints.Remove(breakpointId);
+            }
+        }
+
+        internal IDebugBoundBreakpoint2? BoundBreakpointFromId(ulong breakpointId)
+        {
+            lock (this.breakpointLock)
+            {
+                return breakpointId != 0 && this.boundBreakpoints.TryGetValue(breakpointId, out RadDbgBoundBreakpoint? breakpoint) ? breakpoint : null;
+            }
+        }
+
+        internal void SendBreakpointBound(RadDbgPendingBreakpoint pendingBreakpoint, RadDbgBoundBreakpoint boundBreakpoint)
+        {
+            this.SendEvent(this.program, new RadBreakpointBoundEvent(pendingBreakpoint, boundBreakpoint), typeof(IDebugBreakpointBoundEvent2).GUID, null);
+        }
+
+        internal void SendBreakpointError(RadDbgErrorBreakpoint errorBreakpoint)
+        {
+            this.SendEvent(this.program, new RadBreakpointErrorEvent(errorBreakpoint), typeof(IDebugBreakpointErrorEvent2).GUID, null);
+        }
+
+        internal int ContinueProgram(ulong threadHandle)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.Continue(threadHandle);
+        }
+
+        internal int TerminateProgram(ulong processHandle = 0)
+        {
+            if (this.bridgeSession == null)
+            {
+                return VSConstants.E_NOTIMPL;
+            }
+
+            if (processHandle == 0)
+            {
+                int result = this.bridgeSession.GetProgramDescriptor(out processHandle, out _, out _, out _, out _, out _);
+                if (result != VSConstants.S_OK)
                 {
-                    return RadDbgHResult.E_INVALIDARG;
+                    return result;
                 }
             }
-            return this.TerminateSession();
+            return this.bridgeSession.Terminate(processHandle);
         }
 
-        internal int RunSession()
+        internal int GetTopFrame(ulong threadHandle, out RadDbgFrameInfo frame, out string sourcePath)
         {
-            if (Interlocked.CompareExchange(ref this.programExited, 0, 0) != 0)
+            if (this.bridgeSession == null)
             {
-                return RadDbgHResult.S_OK;
+                frame = default;
+                sourcePath = string.Empty;
+                return VSConstants.E_FAIL;
+            }
+            return this.bridgeSession.GetTopFrame(threadHandle, out frame, out sourcePath);
+        }
+
+        internal int GetThreads(RadDbgProgram program, out IDebugThread2[] threads)
+        {
+            if (this.bridgeSession == null)
+            {
+                threads = Array.Empty<IDebugThread2>();
+                return VSConstants.E_FAIL;
+            }
+            return this.bridgeSession.GetThreadWrappers(program, out threads);
+        }
+
+        internal int ProgramCanDetach()
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.CanDetachProgram();
+        }
+
+        internal int AttachProgram(IDebugEventCallback2 callback)
+        {
+            this.SetCallback(callback);
+            if (this.bridgeSession == null)
+            {
+                return VSConstants.S_OK;
             }
 
-            int result = this.StartEventWorker();
-            return result < 0 ? result : this.WithSession(RadDbgNative.Run);
+            int result = this.bridgeSession.ProgramAttach(callback);
+            return result == VSConstants.E_NOTIMPL ? VSConstants.S_OK : result;
         }
 
-        internal int BreakSession()
+        internal int DetachProgram()
         {
-            return this.WithSession(RadDbgNative.Break);
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.DetachProgram();
         }
 
-        internal int TerminateSession()
+        internal int EnumCodeContexts(IDebugDocumentPosition2 documentPosition, out IEnumDebugCodeContexts2 contexts)
         {
-            return this.WithSession(RadDbgNative.Terminate);
+            contexts = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.EnumCodeContexts(documentPosition, out contexts);
+        }
+
+        internal int EnumCodePaths(string hint, IDebugCodeContext2 startContext, IDebugStackFrame2 stackFrame, int source, out IEnumCodePaths2 paths, out IDebugCodeContext2 safetyContext)
+        {
+            paths = null!;
+            safetyContext = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.EnumCodePaths(hint, startContext, stackFrame, source, out paths, out safetyContext);
+        }
+
+        internal int GetModules(RadDbgProgram program, out IDebugModule2[] modules)
+        {
+            modules = Array.Empty<IDebugModule2>();
+            if (this.bridgeSession == null)
+            {
+                return VSConstants.E_NOTIMPL;
+            }
+
+            int result = this.bridgeSession.EnumModules(out RadDbgModuleDesc[] nativeModules);
+            if (result == VSConstants.E_NOTIMPL)
+            {
+                result = this.bridgeSession.CopyModules(out nativeModules);
+            }
+            if (result != VSConstants.S_OK)
+            {
+                return result;
+            }
+
+            List<IDebugModule2> wrappers = new List<IDebugModule2>();
+            foreach (RadDbgModuleDesc nativeModule in nativeModules)
+            {
+                if (program.ProcessHandle == 0 || nativeModule.ProcessHandle == program.ProcessHandle)
+                {
+                    wrappers.Add(new RadDbgModule(nativeModule));
+                }
+            }
+            modules = wrappers.ToArray();
+            return VSConstants.S_OK;
+        }
+
+        internal int ExecuteProgram()
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.ExecuteProgram();
+        }
+
+        internal int GetDebugProperty(out IDebugProperty2 property)
+        {
+            property = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetDebugProperty(out property);
+        }
+
+        internal int GetDisassemblyStream(enum_DISASSEMBLY_STREAM_SCOPE scope, IDebugCodeContext2 codeContext, out IDebugDisassemblyStream2 stream)
+        {
+            stream = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetDisassemblyStream(scope, codeContext, out stream);
+        }
+
+        internal int GetEncUpdate(out object update)
+        {
+            update = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetEncUpdate(out update);
+        }
+
+        internal int GetMemoryBytes(ulong processHandle, out IDebugMemoryBytes2 memoryBytes)
+        {
+            memoryBytes = null!;
+            if (this.bridgeSession == null)
+            {
+                return VSConstants.E_NOTIMPL;
+            }
+
+            int result = this.bridgeSession.GetNativeMemoryBytes(out memoryBytes);
+            if (result == VSConstants.E_NOTIMPL)
+            {
+                memoryBytes = new RadDbgMemoryBytes(this, processHandle);
+                return VSConstants.S_OK;
+            }
+            return result;
         }
 
         internal int GetProgramName(out string name)
         {
-            return this.WithSession(RadDbgNative.GetProgramName, out name);
-        }
-
-        internal int GetHostName(enum_GETHOSTNAME_TYPE type, out string name)
-        {
             name = string.Empty;
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            return currentSession == null
-                ? RadDbgHResult.E_UNEXPECTED
-                : RadDbgNative.GetHostName(currentSession, type, out name);
-        }
-
-        internal int GetHostPid(out AD_PROCESS_ID processId)
-        {
-            processId = default;
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            return currentSession == null
-                ? RadDbgHResult.E_UNEXPECTED
-                : RadDbgNative.GetHostPid(currentSession, out processId);
-        }
-
-        internal int GetHostMachineName(out string name)
-        {
-            return this.WithSession(RadDbgNative.GetHostMachineName, out name);
-        }
-
-        internal int GetEngineInfo(out string name, out Guid engineId)
-        {
-            name = string.Empty;
-            engineId = EngineId;
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            return currentSession == null
-                ? RadDbgHResult.E_UNEXPECTED
-                : RadDbgNative.GetEngineInfo(currentSession, out name, out engineId);
-        }
-
-        internal int CopyThreads(out THREADPROPERTIES[] threads)
-        {
-            threads = Array.Empty<THREADPROPERTIES>();
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            return currentSession == null
-                ? RadDbgHResult.E_UNEXPECTED
-                : RadDbgNative.CopyThreads(currentSession, out threads);
-        }
-
-        internal int GetThreadProperties(uint threadId, enum_THREADPROPERTY_FIELDS fields, THREADPROPERTIES[] properties)
-        {
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            return currentSession == null
-                ? RadDbgHResult.E_UNEXPECTED
-                : RadDbgNative.GetThreadProperties(currentSession, threadId, fields, properties);
-        }
-
-        private int StartEventWorker()
-        {
-            lock (this.syncRoot)
+            if (this.bridgeSession == null)
             {
-                if (this.eventWorkerStarted)
-                {
-                    return RadDbgHResult.S_OK;
-                }
-                if (this.session == null || this.callback == null || this.program == null)
-                {
-                    return RadDbgHResult.E_UNEXPECTED;
-                }
-
-                this.eventWorkerStarted = true;
-                this.eventThread = new Thread(this.EventWorker)
-                {
-                    IsBackground = true,
-                    Name = "RAD AD7 event wait",
-                };
-                this.eventThread.SetApartmentState(ApartmentState.MTA);
-                try
-                {
-                    this.eventThread.Start();
-                }
-                catch (Exception exception)
-                {
-                    this.eventThread = null;
-                    this.eventWorkerStarted = false;
-                    return Marshal.GetHRForException(exception);
-                }
-                return RadDbgHResult.S_OK;
+                return VSConstants.E_NOTIMPL;
             }
+
+            int result = this.bridgeSession.GetProgramName(out name);
+            return result == VSConstants.E_NOTIMPL ? this.bridgeSession.GetProgramDescriptor(out _, out _, out name, out _, out _, out _) : result;
         }
 
-        private int ContinueInitialSynchronousEvent()
+        internal int GetProgramEngineInfo(out string engineName, out Guid engineId)
         {
-            int result = this.StartEventWorker();
-            return result < 0
-                ? result
-                : this.WithSession(session => RadDbgNative.ContinueSynchronousEvent(session, 0));
+            engineName = string.Empty;
+            engineId = Guid.Empty;
+            if (this.bridgeSession == null)
+            {
+                return VSConstants.E_NOTIMPL;
+            }
+
+            int result = this.bridgeSession.GetProgramEngineInfo(out engineName, out engineId);
+            if (result == VSConstants.E_NOTIMPL)
+            {
+                result = this.bridgeSession.GetProgramDescriptor(out _, out _, out _, out _, out engineName, out string engineIdText);
+                if (result == VSConstants.S_OK && !Guid.TryParse(engineIdText, out engineId))
+                {
+                    return VSConstants.E_FAIL;
+                }
+            }
+            return result;
         }
 
-        private void EventWorker()
+        internal int GetProgramId(out Guid programId)
         {
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            if (currentSession == null)
+            programId = Guid.Empty;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetProgramId(out programId);
+        }
+
+        internal int ResolveSourcePosition(string sourcePath, uint line, uint column)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.ResolveSourcePosition(sourcePath, line, column);
+        }
+
+        internal int StepProgram(ulong threadHandle, enum_STEPKIND stepKind, enum_STEPUNIT stepUnit)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.ProgramStep(threadHandle, (uint)stepKind, (uint)stepUnit);
+        }
+
+        internal int TerminateProgramViaProgram()
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.TerminateProgram();
+        }
+
+        internal int WriteDump(enum_DUMPTYPE dumpType, string dumpUrl)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.WriteDump((uint)dumpType, dumpUrl);
+        }
+
+        internal int EnumFrameInfo(ulong threadHandle, enum_FRAMEINFO_FLAGS fieldSpec, uint radix, out IEnumDebugFrameInfo2 frames)
+        {
+            frames = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.EnumFrameInfo(threadHandle, (uint)fieldSpec, radix, out frames);
+        }
+
+        internal int GetThreadName(ulong threadHandle, out string name)
+        {
+            name = string.Empty;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetThreadName(threadHandle, out name);
+        }
+
+        internal int CanSetNextStatement(ulong threadHandle, IDebugStackFrame2 stackFrame, IDebugCodeContext2 codeContext)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.CanSetNextStatement(threadHandle, stackFrame, codeContext);
+        }
+
+        internal int SetNextStatement(ulong threadHandle, IDebugStackFrame2 stackFrame, IDebugCodeContext2 codeContext)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.SetNextStatement(threadHandle, stackFrame, codeContext);
+        }
+
+        internal int GetNativeThreadId(ulong threadHandle, out uint threadId)
+        {
+            threadId = 0;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetThreadId(threadHandle, out threadId);
+        }
+
+        internal int GetThreadProgram(ulong threadHandle, out IDebugProgram2 program)
+        {
+            program = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetThreadProgram(threadHandle, out program);
+        }
+
+        internal int GetThreadProperties(ulong threadHandle, enum_THREADPROPERTY_FIELDS fields, ref THREADPROPERTIES properties)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetThreadProperties(threadHandle, (uint)fields, ref properties);
+        }
+
+        internal int GetLogicalThread(ulong threadHandle, IDebugStackFrame2 stackFrame, out IDebugLogicalThread2 logicalThread)
+        {
+            logicalThread = null!;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetLogicalThread(threadHandle, stackFrame, out logicalThread);
+        }
+
+        internal int ResumeThread(ulong threadHandle, out uint suspendCount)
+        {
+            suspendCount = 0;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.ResumeThread(threadHandle, out suspendCount);
+        }
+
+        internal int SetThreadName(ulong threadHandle, string name)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.SetThreadName(threadHandle, name);
+        }
+
+        internal int SuspendThread(ulong threadHandle, out uint suspendCount)
+        {
+            suspendCount = 0;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.SuspendThread(threadHandle, out suspendCount);
+        }
+
+        internal int SetInstructionPointer(ulong threadHandle, ulong address)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.SetInstructionPointer(threadHandle, address);
+        }
+
+        internal int GetMemorySize(ulong processHandle, out ulong size)
+        {
+            size = 0;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.GetMemorySize(processHandle, out size);
+        }
+
+        internal int ReadMemoryAt(ulong processHandle, ulong address, uint byteCount, byte[] buffer, out uint read, out uint unreadable)
+        {
+            read = 0;
+            unreadable = 0;
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.ReadMemoryAt(processHandle, address, byteCount, buffer, out read, out unreadable);
+        }
+
+        internal int WriteMemoryAt(ulong processHandle, ulong address, uint byteCount, byte[] buffer)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.WriteMemoryAt(processHandle, address, byteCount, buffer);
+        }
+
+        internal int StepThread(ulong threadHandle, enum_STEPKIND stepKind, enum_STEPUNIT stepUnit)
+        {
+            return this.bridgeSession == null ? VSConstants.E_NOTIMPL : this.bridgeSession.Step(threadHandle, (uint)stepKind, (uint)stepUnit);
+        }
+
+        internal int GetProgramDescriptor(out ulong processHandle, out uint processId, out string programName, out string hostName, out string engineName, out string engineId)
+        {
+            if (this.bridgeSession == null)
+            {
+                processHandle = 0;
+                processId = 0;
+                programName = string.Empty;
+                hostName = string.Empty;
+                engineName = string.Empty;
+                engineId = string.Empty;
+                return VSConstants.E_FAIL;
+            }
+            return this.bridgeSession.GetProgramDescriptor(out processHandle, out processId, out programName, out hostName, out engineName, out engineId);
+        }
+
+        internal int GetProgramDescriptor(ulong processHandle, out uint processId, out string programName, out string hostName, out string engineName, out string engineId)
+        {
+            if (this.bridgeSession == null)
+            {
+                processId = 0;
+                programName = string.Empty;
+                hostName = string.Empty;
+                engineName = string.Empty;
+                engineId = string.Empty;
+                return VSConstants.E_FAIL;
+            }
+            return this.bridgeSession.GetProgramDescriptor(processHandle, out processId, out programName, out hostName, out engineName, out engineId);
+        }
+
+        internal void SendEvent(IDebugProgram2? program, IDebugEvent2 @event, Guid eventGuid, IDebugThread2? thread)
+        {
+            if (this.callback == null)
             {
                 return;
             }
 
-            try
-            {
-                for (;;)
-                {
-                    int result = RadDbgNative.WaitEvent(currentSession, uint.MaxValue, out RadDbgNativeEvent? nativeEvent);
-                    if (RadDbgNative.IsTimeout(result))
-                    {
-                        continue;
-                    }
-                    if (result < 0 || nativeEvent == null)
-                    {
-                        break;
-                    }
-                    if (this.DispatchEvent(nativeEvent) < 0)
-                    {
-                        break;
-                    }
-                }
-            }
-            catch (Exception)
-            {
-                // A disconnected AD7 callback must not become an unhandled exception on devenv's worker thread.
-            }
-            finally
-            {
-                RadDbgSessionHandle? disposeSession = null;
-                lock (this.syncRoot)
-                {
-                    this.eventThread = null;
-                    this.eventWorkerStarted = false;
-                    if (ReferenceEquals(this.workerDisposeSession, currentSession))
-                    {
-                        disposeSession = this.workerDisposeSession;
-                        this.workerDisposeSession = null;
-                    }
-                }
-                disposeSession?.Dispose();
-            }
+            @event.GetAttributes(out uint attributes);
+            this.callback.Event(this, null!, program!, thread!, @event, ref eventGuid, attributes);
         }
 
-        private int DispatchEvent(RadDbgNativeEvent nativeEvent)
+        private void DisposeBridgeSession()
         {
-            IDebugEventCallback2? currentCallback;
-            RadDbgProgram? currentProgram;
-            lock (this.syncRoot)
+            this.bridgeSession?.Dispose();
+            this.bridgeSession = null;
+            this.launchProcess = null;
+            this.launchSystemProcessId = 0;
+            lock (this.programLock)
             {
-                currentCallback = this.callback;
-                currentProgram = this.program;
+                this.programs.Clear();
+                this.programNodes.Clear();
             }
-            if (currentCallback == null || currentProgram == null)
+            lock (this.breakpointLock)
             {
-                return RadDbgHResult.E_UNEXPECTED;
-            }
-
-            IDebugEvent2? debugEvent = RadDbgEventFactory.Create(nativeEvent);
-            if (debugEvent == null)
-            {
-                return RadDbgHResult.S_OK;
-            }
-            if (debugEvent is RadDbgProgramDestroyEvent)
-            {
-                Interlocked.Exchange(ref this.programExited, 1);
-            }
-
-            IDebugThread2? thread = nativeEvent.ThreadProperties.dwThreadId == 0
-                ? null
-                : new RadDbgThread(this, currentProgram, nativeEvent.ThreadProperties.dwThreadId);
-            Guid eventIid = nativeEvent.EventIid;
-            return currentCallback.Event(
-                this,
-                null!,
-                currentProgram,
-                thread!,
-                debugEvent,
-                ref eventIid,
-                nativeEvent.Attributes);
-        }
-
-        private void CloseSession()
-        {
-            RadDbgSessionHandle? closingSession;
-            Thread? worker;
-            RadDbgSessionHandle? disposeSession = null;
-            lock (this.syncRoot)
-            {
-                closingSession = this.session;
-                if (closingSession == null)
-                {
-                    return;
-                }
-                this.session = null;
-                worker = this.eventThread;
-                this.callback = null;
-                this.process = null;
-                this.port = null;
-                if (worker != null && worker.IsAlive)
-                {
-                    this.workerDisposeSession = closingSession;
-                }
-                else
-                {
-                    disposeSession = closingSession;
-                    this.eventThread = null;
-                    this.eventWorkerStarted = false;
-                }
-            }
-
-            RadDbgNative.CloseEventWait(closingSession);
-            disposeSession?.Dispose();
-        }
-
-        private void RollBackAttach(RadDbgProgram attachedProgram, IDebugEventCallback2 attachedCallback)
-        {
-            lock (this.syncRoot)
-            {
-                if (ReferenceEquals(this.program, attachedProgram))
-                {
-                    this.program = null;
-                }
-                if (ReferenceEquals(this.callback, attachedCallback))
-                {
-                    this.callback = null;
-                }
+                this.boundBreakpoints.Clear();
             }
         }
-
-        private RadDbgSessionHandle? GetSession()
-        {
-            lock (this.syncRoot)
-            {
-                return this.session;
-            }
-        }
-
-        private int WithSession(Func<RadDbgSessionHandle, int> action)
-        {
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            return currentSession == null ? RadDbgHResult.E_UNEXPECTED : action(currentSession);
-        }
-
-        private int WithSession(SessionStringOperation action, out string value)
-        {
-            value = string.Empty;
-            RadDbgSessionHandle? currentSession = this.GetSession();
-            return currentSession == null ? RadDbgHResult.E_UNEXPECTED : action(currentSession, out value);
-        }
-
-        private delegate int SessionStringOperation(RadDbgSessionHandle session, out string value);
     }
 }

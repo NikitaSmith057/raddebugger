@@ -1,157 +1,192 @@
 using System;
+using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Debugger.Interop;
 
 namespace RAD
 {
     internal sealed class RadDbgProgram : IDebugProgram2
     {
-        private readonly RadDbgEngine   engine;
+        private readonly RadDbgEngine engine;
         private readonly IDebugProcess2 process;
-        private readonly Guid           programId;
+        private readonly Guid programId;
+        private ulong processHandle;
+        private bool registered;
 
-        internal RadDbgProgram(RadDbgEngine engine, IDebugProcess2 process, Guid programId)
+        internal RadDbgProgram(RadDbgEngine engine, IDebugProcess2 process, Guid programId, ulong processHandle = 0)
         {
-            this.engine    = engine;
-            this.process   = process;
+            this.engine = engine;
+            this.process = process;
             this.programId = programId;
+            this.processHandle = processHandle;
         }
 
-        public int EnumThreads(out IEnumDebugThreads2 ppEnum)
+        internal ulong ProcessHandle => this.processHandle;
+        internal bool IsRegistered => this.registered;
+        internal RadDbgEngine Engine => this.engine;
+
+        internal void BindNativeProcess(ulong processHandle)
         {
-            int result = this.engine.CopyThreads(out THREADPROPERTIES[] nativeThreads);
-            if (result < 0)
-            {
-                ppEnum = null!;
-                return result;
-            }
-
-            IDebugThread2[] threads = new IDebugThread2[nativeThreads.Length];
-            for (int index = 0; index < nativeThreads.Length; ++index)
-            {
-                threads[index] = new RadDbgThread(this.engine, this, nativeThreads[index].dwThreadId);
-            }
-
-            ppEnum = new RadDbgThreadEnumerator(threads);
-            return RadDbgHResult.S_OK;
+            this.processHandle = processHandle;
         }
 
-        public int GetName(out string pbstrName)
+        internal void MarkRegistered()
         {
-            return this.engine.GetProgramName(out pbstrName);
+            this.registered = true;
         }
 
-        public int GetProcess(out IDebugProcess2 ppProcess)
+        internal bool TryGetTopFrame(RadDbgThread thread, out RadDbgFrameInfo frame, out string sourcePath)
         {
-            ppProcess = this.process;
-            return RadDbgHResult.S_OK;
-        }
-
-        public int Terminate()
-        {
-            return this.engine.TerminateSession();
-        }
-
-        public int Attach(IDebugEventCallback2 pCallback)
-        {
-            return RadDbgHResult.S_OK;
+            frame = default;
+            sourcePath = string.Empty;
+            return this.engine.GetTopFrame(thread.Handle, out frame, out sourcePath) == VSConstants.S_OK;
         }
 
         public int CanDetach()
         {
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int Detach()
-        {
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int GetProgramId(out Guid pguidProgramId)
-        {
-            pguidProgramId = this.programId;
-            return RadDbgHResult.S_OK;
-        }
-
-        public int GetDebugProperty(out IDebugProperty2 ppProperty)
-        {
-            ppProperty = null!;
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int Execute()
-        {
-            return this.engine.RunSession();
-        }
-
-        public int Continue(IDebugThread2 pThread)
-        {
-            return this.engine.RunSession();
-        }
-
-        public int Step(IDebugThread2 pThread, enum_STEPKIND sk, enum_STEPUNIT Step)
-        {
-            return RadDbgHResult.E_NOTIMPL;
+            return this.engine.ProgramCanDetach();
         }
 
         public int CauseBreak()
         {
-            return this.engine.BreakSession();
+            return this.engine.BreakProgram();
         }
 
-        public int GetEngineInfo(out string pbstrEngine, out Guid pguidEngine)
+        public int Continue(IDebugThread2 pThread)
         {
-            return this.engine.GetEngineInfo(out pbstrEngine, out pguidEngine);
+            return pThread is RadDbgThread thread ? this.engine.ContinueProgram(thread.Handle) : VSConstants.E_INVALIDARG;
+        }
+
+        public int Detach()
+        {
+            return this.engine.DetachProgram();
         }
 
         public int EnumCodeContexts(IDebugDocumentPosition2 pDocPos, out IEnumDebugCodeContexts2 ppEnum)
         {
-            ppEnum = null!;
-            return RadDbgHResult.E_NOTIMPL;
+            return this.engine.EnumCodeContexts(pDocPos, out ppEnum);
         }
 
-        public int GetMemoryBytes(out IDebugMemoryBytes2 ppMemoryBytes)
+        public int EnumCodePaths(string pszHint, IDebugCodeContext2 pStart, IDebugStackFrame2 pFrame, int fSource, out IEnumCodePaths2 ppEnum, out IDebugCodeContext2 ppSafety)
         {
-            ppMemoryBytes = null!;
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int GetDisassemblyStream(
-            enum_DISASSEMBLY_STREAM_SCOPE dwScope,
-            IDebugCodeContext2 pCodeContext,
-            out IDebugDisassemblyStream2 ppDisassemblyStream)
-        {
-            ppDisassemblyStream = null!;
-            return RadDbgHResult.E_NOTIMPL;
+            return this.engine.EnumCodePaths(pszHint, pStart, pFrame, fSource, out ppEnum, out ppSafety);
         }
 
         public int EnumModules(out IEnumDebugModules2 ppEnum)
         {
             ppEnum = null!;
-            return RadDbgHResult.E_NOTIMPL;
+            int result = this.engine.GetModules(this, out IDebugModule2[] modules);
+            if (result != VSConstants.S_OK)
+            {
+                return result;
+            }
+            ppEnum = new RadDbgModuleEnum(modules);
+            return VSConstants.S_OK;
         }
 
-        public int GetENCUpdate(out object ppUpdate)
-        {
-            ppUpdate = null!;
-            return RadDbgHResult.E_NOTIMPL;
-        }
-
-        public int EnumCodePaths(
-            string pszHint,
-            IDebugCodeContext2 pStart,
-            IDebugStackFrame2 pFrame,
-            int fSource,
-            out IEnumCodePaths2 ppEnum,
-            out IDebugCodeContext2 ppSafety)
+        public int EnumThreads(out IEnumDebugThreads2 ppEnum)
         {
             ppEnum = null!;
-            ppSafety = null!;
-            return RadDbgHResult.E_NOTIMPL;
+            int result = this.engine.GetThreads(this, out IDebugThread2[] wrappers);
+            if (result != VSConstants.S_OK)
+            {
+                return VSConstants.E_FAIL;
+            }
+            ppEnum = new RadDbgThreadEnum(wrappers);
+            return VSConstants.S_OK;
         }
 
-        public int WriteDump(enum_DUMPTYPE DUMPTYPE, string pszDumpUrl)
+        public int Execute()
         {
-            return RadDbgHResult.E_NOTIMPL;
+            int result = this.engine.ExecuteProgram();
+            return result == VSConstants.E_NOTIMPL ? this.engine.ContinueProgram(0) : result;
+        }
+
+        public int GetDebugProperty(out IDebugProperty2 ppProperty)
+        {
+            return this.engine.GetDebugProperty(out ppProperty);
+        }
+
+        public int GetDisassemblyStream(enum_DISASSEMBLY_STREAM_SCOPE dwScope, IDebugCodeContext2 pCodeContext, out IDebugDisassemblyStream2 ppDisassemblyStream)
+        {
+            return this.engine.GetDisassemblyStream(dwScope, pCodeContext, out ppDisassemblyStream);
+        }
+
+        public int GetENCUpdate(out object pUpdate)
+        {
+            return this.engine.GetEncUpdate(out pUpdate);
+        }
+
+        public int GetEngineInfo(out string pbstrEngine, out Guid pguidEngine)
+        {
+            int engineInfoResult = this.engine.GetProgramEngineInfo(out pbstrEngine, out pguidEngine);
+            if (engineInfoResult != VSConstants.E_NOTIMPL)
+            {
+                return engineInfoResult;
+            }
+
+            int result = this.engine.GetProgramDescriptor(this.processHandle, out _, out _, out _, out pbstrEngine, out string engineId);
+            if (result != VSConstants.S_OK || !Guid.TryParse(engineId, out pguidEngine))
+            {
+                pguidEngine = Guid.Empty;
+                return VSConstants.E_FAIL;
+            }
+            return VSConstants.S_OK;
+        }
+
+        public int GetMemoryBytes(out IDebugMemoryBytes2 ppMemoryBytes)
+        {
+            return this.engine.GetMemoryBytes(this.processHandle, out ppMemoryBytes);
+        }
+
+        public int GetName(out string pbstrName)
+        {
+            int result = this.engine.GetProgramName(out pbstrName);
+            return result == VSConstants.E_NOTIMPL ? this.engine.GetProgramDescriptor(this.processHandle, out _, out pbstrName, out _, out _, out _) : result;
+        }
+
+        public int GetProcess(out IDebugProcess2 ppProcess)
+        {
+            ppProcess = this.process;
+            return 0;
+        }
+
+        public int GetProgramId(out Guid pguidProgramId)
+        {
+            int result = this.engine.GetProgramId(out pguidProgramId);
+            if (result != VSConstants.E_NOTIMPL)
+            {
+                return result;
+            }
+
+            pguidProgramId = this.programId;
+            return 0;
+        }
+
+        public int Step(IDebugThread2 pThread, enum_STEPKIND sk, enum_STEPUNIT step)
+        {
+            if (pThread is not RadDbgThread thread)
+            {
+                return VSConstants.E_INVALIDARG;
+            }
+
+            int result = this.engine.StepProgram(thread.Handle, sk, step);
+            return result == VSConstants.E_NOTIMPL ? this.engine.StepThread(thread.Handle, sk, step) : result;
+        }
+
+        public int Terminate()
+        {
+            int result = this.engine.TerminateProgramViaProgram();
+            return result == VSConstants.E_NOTIMPL ? this.engine.TerminateProgram(this.processHandle) : result;
+        }
+
+        public int Attach(IDebugEventCallback2 pCallback)
+        {
+            return this.engine.AttachProgram(pCallback);
+        }
+
+        public int WriteDump(enum_DUMPTYPE dumptype, string pszDumpUrl)
+        {
+            return this.engine.WriteDump(dumptype, pszDumpUrl);
         }
     }
 }

@@ -1,7 +1,7 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-// Included by the RADVS unity build after the RAD base, OS, demon, and linker
+// Included by radvs_bridge_main.c after the RAD base, OS, demon, and linker
 // implementations. DEMON has process-global state, so this file owns one
 // worker and exposes one lightweight endpoint to each RADVS engine session.
 

@@ -5,6 +5,8 @@
 #include "radvs/radvs_com_api.h"
 #include "radvs/radvs_engine.h"
 
+#pragma comment(lib, "oleaut32")
+
 typedef enum RADVS_AD7_State
 {
   RADVS_AD7_State_New,
@@ -58,29 +60,20 @@ struct RADVS_AD7_Session
   String8                    deferred_text;
 };
 
-static const GUID radvs_ad7_engine_id =
-  {0x97bd1aec, 0x93d9, 0x4748, {0xb2, 0x8d, 0xe7, 0xe8, 0xec, 0xa0, 0xf7, 0x81}};
+static const GUID radvs_ad7_engine_id = {0x97bd1aec, 0x93d9, 0x4748, {0xb2, 0x8d, 0xe7, 0xe8, 0xec, 0xa0, 0xf7, 0x81}};
 
 // msdbg.h declares these C IID constants, but the bridge's existing link does
 // not consume the AD2 SDK import library that normally defines them. Selectany
 // keeps the C translation unit self-contained and permits that library to be
 // linked by another host without creating duplicate-definition failures.
-__declspec(selectany) const IID IID_IDebugProgramDestroyEvent2 =
-  {0xe147e9e3, 0x6440, 0x4073, {0xa7, 0xb7, 0xa6, 0x55, 0x92, 0xc7, 0x14, 0xb5}};
-__declspec(selectany) const IID IID_IDebugThreadCreateEvent2 =
-  {0x2090ccfc, 0x70c5, 0x491d, {0xa5, 0xe8, 0xba, 0xd2, 0xdd, 0x9e, 0xe3, 0xea}};
-__declspec(selectany) const IID IID_IDebugThreadDestroyEvent2 =
-  {0x2c3b7532, 0xa36f, 0x4a6e, {0x90, 0x72, 0x49, 0xbe, 0x64, 0x9b, 0x85, 0x41}};
-__declspec(selectany) const IID IID_IDebugLoadCompleteEvent2 =
-  {0xb1844850, 0x1349, 0x45d4, {0x9f, 0x12, 0x49, 0x52, 0x12, 0xf5, 0xeb, 0x0b}};
-__declspec(selectany) const IID IID_IDebugBreakEvent2 =
-  {0xc7405d1d, 0xe24b, 0x44e0, {0xb7, 0x07, 0xd8, 0xa5, 0xa4, 0xe1, 0x64, 0x1b}};
-__declspec(selectany) const IID IID_IDebugExceptionEvent2 =
-  {0x51a94113, 0x8788, 0x4a54, {0xae, 0x15, 0x08, 0xb7, 0x4f, 0xf9, 0x22, 0xd0}};
-__declspec(selectany) const IID IID_IDebugOutputStringEvent2 =
-  {0x569c4bb1, 0x7b82, 0x46fc, {0xae, 0x28, 0x45, 0x36, 0xdd, 0xad, 0x75, 0x3e}};
-__declspec(selectany) const IID IID_IDebugStopCompleteEvent2 =
-  {0x3dca9dcd, 0xfb09, 0x4af1, {0xa9, 0x26, 0x45, 0xf2, 0x93, 0xd4, 0x8b, 0x2d}};
+__declspec(selectany) const IID IID_IDebugProgramDestroyEvent2 = {0xe147e9e3, 0x6440, 0x4073, {0xa7, 0xb7, 0xa6, 0x55, 0x92, 0xc7, 0x14, 0xb5}};
+__declspec(selectany) const IID IID_IDebugThreadCreateEvent2   = {0x2090ccfc, 0x70c5, 0x491d, {0xa5, 0xe8, 0xba, 0xd2, 0xdd, 0x9e, 0xe3, 0xea}};
+__declspec(selectany) const IID IID_IDebugThreadDestroyEvent2  = {0x2c3b7532, 0xa36f, 0x4a6e, {0x90, 0x72, 0x49, 0xbe, 0x64, 0x9b, 0x85, 0x41}};
+__declspec(selectany) const IID IID_IDebugLoadCompleteEvent2   = {0xb1844850, 0x1349, 0x45d4, {0x9f, 0x12, 0x49, 0x52, 0x12, 0xf5, 0xeb, 0x0b}};
+__declspec(selectany) const IID IID_IDebugBreakEvent2          = {0xc7405d1d, 0xe24b, 0x44e0, {0xb7, 0x07, 0xd8, 0xa5, 0xa4, 0xe1, 0x64, 0x1b}};
+__declspec(selectany) const IID IID_IDebugExceptionEvent2      = {0x51a94113, 0x8788, 0x4a54, {0xae, 0x15, 0x08, 0xb7, 0x4f, 0xf9, 0x22, 0xd0}};
+__declspec(selectany) const IID IID_IDebugOutputStringEvent2   = {0x569c4bb1, 0x7b82, 0x46fc, {0xae, 0x28, 0x45, 0x36, 0xdd, 0xad, 0x75, 0x3e}};
+__declspec(selectany) const IID IID_IDebugStopCompleteEvent2   = {0x3dca9dcd, 0xfb09, 0x4af1, {0xa9, 0x26, 0x45, 0xf2, 0x93, 0xd4, 0x8b, 0x2d}};
 
 internal HRESULT
 radvs_ad7_hresult_from_result(RADVS_Result result)
@@ -101,8 +94,7 @@ radvs_ad7_hresult_from_result(RADVS_Result result)
 internal HRESULT
 radvs_ad7_buffer_hresult_from_result(RADVS_Result result)
 {
-  return result == RADVS_Result_OutOfMemory ? HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) :
-                                              radvs_ad7_hresult_from_result(result);
+  return result == RADVS_Result_OutOfMemory ? HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER) : radvs_ad7_hresult_from_result(result);
 }
 
 internal B32
@@ -112,25 +104,28 @@ radvs_ad7_string_is_valid(String8 string)
 }
 
 internal HRESULT
-radvs_ad7_copy_output_string(String8 source, String8 *in_out)
+radvs_ad7_alloc_output_string(String8 source, BSTR *out)
 {
-  if (in_out == 0) {
+  if (out == 0) {
     return E_POINTER;
   }
-  U8 *buffer = in_out->str;
-  U64 capacity = in_out->size;
-  if (buffer == 0 && capacity != 0) {
-    in_out->size = source.size;
-    return E_INVALIDARG;
+  *out = 0;
+  if (source.size == 0) {
+    return S_OK;
   }
-  in_out->size = source.size;
-  if (source.size > capacity || (source.size != 0 && buffer == 0)) {
-    return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+
+  Temp scratch = scratch_begin(0, 0);
+  String16 utf16 = str16_from_8(scratch.arena, source);
+  HRESULT result = E_OUTOFMEMORY;
+  if (utf16.size <= max_U32) {
+    BSTR string = SysAllocStringLen((OLECHAR *)utf16.str, (UINT)utf16.size);
+    if (string != 0) {
+      *out = string;
+      result = S_OK;
+    }
   }
-  if (source.size != 0) {
-    MemoryCopy(buffer, source.str, source.size);
-  }
-  return S_OK;
+  scratch_end(scratch);
+  return result;
 }
 
 internal RADVS_Result
@@ -172,8 +167,8 @@ radvs_ad7_event_thread_properties(U32 system_thread_id)
 {
   THREADPROPERTIES result = {0};
   if (system_thread_id != 0) {
-    result.dwFields = TPF_ID | TPF_STATE;
-    result.dwThreadId = system_thread_id;
+    result.dwFields      = TPF_ID | TPF_STATE;
+    result.dwThreadId    = system_thread_id;
     result.dwThreadState = THREADSTATE_STOPPED;
   }
   return result;
@@ -217,29 +212,29 @@ internal void
 radvs_ad7_set_deferred_event(RADVS_AD7_Session *session, RADVS_AD7_TranslatedEvent event, String8 text)
 {
   arena_clear(session->deferred_event_arena);
-  session->deferred_event = event;
-  session->deferred_text = push_str8_copy(session->deferred_event_arena, text);
+  session->deferred_event       = event;
+  session->deferred_text        = push_str8_copy(session->deferred_event_arena, text);
   session->deferred_event_valid = 1;
 }
 
 internal HRESULT
 radvs_ad7_deliver_pending_event(RADVS_AD7_Session *session,
-                                GUID *out_event_iid,
-                                DWORD *out_attributes,
-                                U64 *out_sequence,
-                                DWORD *out_exit_code,
-                                THREADPROPERTIES *out_thread,
-                                EXCEPTION_INFO *out_exception,
-                                String8 *in_out_text)
+                                GUID              *out_event_iid,
+                                DWORD             *out_attributes,
+                                U64               *out_sequence,
+                                DWORD             *out_exit_code,
+                                THREADPROPERTIES  *out_thread,
+                                EXCEPTION_INFO    *out_exception,
+                                BSTR              *out_text)
 {
-  *out_event_iid = session->pending_event.iid;
-  *out_attributes = session->pending_event.attributes;
-  *out_sequence = session->pending_event.sequence;
-  *out_exit_code = session->pending_event.exit_code;
-  *out_thread = session->pending_event.thread;
-  *out_exception = session->pending_event.exception;
-  HRESULT result = radvs_ad7_copy_output_string(session->pending_text, in_out_text);
+  HRESULT result = radvs_ad7_alloc_output_string(session->pending_text, out_text);
   if (SUCCEEDED(result)) {
+    *out_event_iid  = session->pending_event.iid;
+    *out_attributes = session->pending_event.attributes;
+    *out_sequence   = session->pending_event.sequence;
+    *out_exit_code  = session->pending_event.exit_code;
+    *out_thread     = session->pending_event.thread;
+    *out_exception  = session->pending_event.exception;
     session->pending_event_valid = 0;
   }
   return result;
@@ -248,6 +243,9 @@ radvs_ad7_deliver_pending_event(RADVS_AD7_Session *session,
 internal B32
 radvs_ad7_map_event(RADVS_AD7_Session *session, const RADVS_Event *event)
 {
+  Temp scratch = scratch_begin(0, 0);
+  B32 is_ok = 0;
+
   const DMN_Event *raw = &event->raw;
   switch (raw->kind) {
   default: break;
@@ -260,33 +258,27 @@ radvs_ad7_map_event(RADVS_AD7_Session *session, const RADVS_Event *event)
 
   case DMN_EventKind_CreateThread: {
     if (event->thread_created) {
-      RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugThreadCreateEvent2,
-                                                                        EVENT_ASYNCHRONOUS,
-                                                                        event);
+      RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugThreadCreateEvent2, EVENT_ASYNCHRONOUS, event);
       radvs_ad7_set_pending_event(session, translated, str8_zero());
-      return 1;
+      is_ok = 1;
     }
   } break;
 
   case DMN_EventKind_ExitThread: {
-    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugThreadDestroyEvent2,
-                                                                      EVENT_ASYNCHRONOUS,
-                                                                      event);
+    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugThreadDestroyEvent2, EVENT_ASYNCHRONOUS, event);
     translated.exit_code = raw->code;
     if (dmn_handle_match(session->stopped_thread_handle, event->thread_handle)) {
       session->stopped_thread_handle = dmn_handle_zero();
     }
     radvs_ad7_set_pending_event(session, translated, str8_zero());
-    return 1;
+    is_ok = 1;
   } break;
 
   case DMN_EventKind_HandshakeComplete: {
     if (!session->load_complete_sent) {
       session->load_complete_sent = 1;
-      session->state = RADVS_AD7_State_Running;
-      RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugLoadCompleteEvent2,
-                                                                        EVENT_ASYNCHRONOUS,
-                                                                        event);
+      session->state              = RADVS_AD7_State_Running;
+      RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugLoadCompleteEvent2, EVENT_ASYNCHRONOUS, event);
       radvs_ad7_set_pending_event(session, translated, str8_zero());
       return 1;
     }
@@ -297,57 +289,49 @@ radvs_ad7_map_event(RADVS_AD7_Session *session, const RADVS_Event *event)
   case DMN_EventKind_SingleStep:
   case DMN_EventKind_Exception:
   case DMN_EventKind_Halt: {
-    if (!dmn_handle_match(event->thread_handle, dmn_handle_zero())) {
-      session->state = RADVS_AD7_State_Stopped;
-      session->stopped_thread_handle = event->thread_handle;
-      session->event_batch_received = 0;
+    if (dmn_handle_match(event->thread_handle, dmn_handle_zero())) { break; }
 
-      GUID iid = IID_IDebugStopCompleteEvent2;
-      String8 text = str8_zero();
-      Temp scratch = scratch_begin(0, 0);
-      if (raw->kind == DMN_EventKind_Exception) {
-        iid = IID_IDebugExceptionEvent2;
-        text = push_str8f(scratch.arena, "Debuggee exception 0x%08X", raw->code);
-      } else if (raw->kind == DMN_EventKind_Halt) {
-        iid = IID_IDebugBreakEvent2;
-      }
-      RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(iid, EVENT_ASYNC_STOP, event);
-      if (raw->kind == DMN_EventKind_Exception) {
-        translated.exception.dwCode = raw->code;
-        translated.exception.dwState = raw->exception_repeated ? EXCEPTION_STOP_SECOND_CHANCE :
-                                                                 EXCEPTION_STOP_FIRST_CHANCE;
-      }
-      if (event->thread_created) {
-        RADVS_AD7_TranslatedEvent thread_created = radvs_ad7_translated_event(IID_IDebugThreadCreateEvent2,
-                                                                              EVENT_ASYNCHRONOUS,
-                                                                              event);
-        radvs_ad7_set_deferred_event(session, translated, text);
-        radvs_ad7_set_pending_event(session, thread_created, str8_zero());
-      } else {
-        radvs_ad7_set_pending_event(session, translated, text);
-      }
-      scratch_end(scratch);
-      return 1;
+    session->state                 = RADVS_AD7_State_Stopped;
+    session->stopped_thread_handle = event->thread_handle;
+    session->event_batch_received  = 0;
+
+    GUID    iid  = IID_IDebugStopCompleteEvent2;
+    String8 text = str8_zero();
+    if (raw->kind == DMN_EventKind_Exception) {
+      iid  = IID_IDebugExceptionEvent2;
+      text = push_str8f(scratch.arena, "Debuggee exception 0x%08X", raw->code);
+    } else if (raw->kind == DMN_EventKind_Halt) {
+      iid = IID_IDebugBreakEvent2;
     }
+
+    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(iid, EVENT_ASYNC_STOP, event);
+    if (raw->kind == DMN_EventKind_Exception) {
+      translated.exception.dwCode  = raw->code;
+      translated.exception.dwState = raw->exception_repeated ? EXCEPTION_STOP_SECOND_CHANCE : EXCEPTION_STOP_FIRST_CHANCE;
+    }
+
+    if (event->thread_created) {
+      RADVS_AD7_TranslatedEvent thread_created = radvs_ad7_translated_event(IID_IDebugThreadCreateEvent2, EVENT_ASYNCHRONOUS, event);
+      radvs_ad7_set_deferred_event(session, translated, text);
+      radvs_ad7_set_pending_event(session, thread_created, str8_zero());
+    } else {
+      radvs_ad7_set_pending_event(session, translated, text);
+    }
+
+    is_ok = 1;
   } break;
 
   case DMN_EventKind_DebugString: {
-    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugOutputStringEvent2,
-                                                                      EVENT_ASYNCHRONOUS,
-                                                                      event);
+    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugOutputStringEvent2, EVENT_ASYNCHRONOUS, event);
     radvs_ad7_set_pending_event(session, translated, raw->string);
-    return 1;
+    is_ok = 1;
   } break;
 
   case DMN_EventKind_Error: {
-    Temp scratch = scratch_begin(0, 0);
     String8 text = push_str8f(scratch.arena, "RADVS DEMON error %u", raw->error_kind);
-    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugOutputStringEvent2,
-                                                                      EVENT_ASYNCHRONOUS,
-                                                                      event);
+    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugOutputStringEvent2, EVENT_ASYNCHRONOUS, event);
     radvs_ad7_set_pending_event(session, translated, text);
-    scratch_end(scratch);
-    return 1;
+    is_ok = 1;
   } break;
 
   case DMN_EventKind_ExitProcess: {
@@ -357,17 +341,20 @@ radvs_ad7_map_event(RADVS_AD7_Session *session, const RADVS_Event *event)
       }
       break;
     }
-    session->state = RADVS_AD7_State_AwaitProgramDestroyAck;
+
+    session->state                 = RADVS_AD7_State_AwaitProgramDestroyAck;
     session->stopped_thread_handle = dmn_handle_zero();
-    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugProgramDestroyEvent2,
-                                                                      EVENT_SYNCHRONOUS,
-                                                                      event);
+
+    RADVS_AD7_TranslatedEvent translated = radvs_ad7_translated_event(IID_IDebugProgramDestroyEvent2, EVENT_SYNCHRONOUS, event);
     translated.exit_code = raw->code;
     radvs_ad7_set_pending_event(session, translated, str8_zero());
     session->pending_destroy_sequence = session->pending_event.sequence;
-    return 1;
+
+    is_ok = 1;
   } break;
   }
+
+  scratch_end(scratch);
   return 0;
 }
 
@@ -415,15 +402,15 @@ radvs_ad7_bridge_session_create(RADVS_AD7_Session **out_session)
     return radvs_ad7_hresult_from_result(result);
   }
 
-  Arena *arena = arena_alloc(.reserve_size = KB(64), .commit_size = KB(16));
+  Arena *arena = arena_alloc();
   RADVS_AD7_Session *session = push_array(arena, RADVS_AD7_Session, 1);
-  session->arena = arena;
-  session->event_arena = arena_alloc(.reserve_size = KB(64), .commit_size = KB(16));
-  session->deferred_event_arena = arena_alloc(.reserve_size = KB(64), .commit_size = KB(16));
-  session->engine_session = engine_session;
-  session->mutex = mutex_alloc();
-  session->closing_cv = cond_var_alloc();
-  session->state = RADVS_AD7_State_New;
+  session->arena                = arena;
+  session->event_arena          = arena_alloc();
+  session->deferred_event_arena = arena_alloc();
+  session->engine_session       = engine_session;
+  session->mutex                = mutex_alloc();
+  session->closing_cv           = cond_var_alloc();
+  session->state                = RADVS_AD7_State_New;
   *out_session = session;
   return S_OK;
 }
@@ -440,7 +427,7 @@ radvs_ad7_bridge_session_destroy(RADVS_AD7_Session *session)
     mutex_drop(session->mutex);
     return HRESULT_FROM_WIN32(ERROR_BUSY);
   }
-  session->closing = 1;
+  session->closing           = 1;
   session->event_wait_closed = 1;
   cond_var_broadcast(session->closing_cv);
   mutex_drop(session->mutex);
@@ -452,12 +439,12 @@ radvs_ad7_bridge_session_destroy(RADVS_AD7_Session *session)
   }
   mutex_drop(session->mutex);
 
-  RADVS_EngineSession *engine_session = session->engine_session;
-  Arena *arena = session->arena;
-  Arena *event_arena = session->event_arena;
-  Arena *deferred_event_arena = session->deferred_event_arena;
-  CondVar closing_cv = session->closing_cv;
-  Mutex mutex = session->mutex;
+  RADVS_EngineSession *engine_session       = session->engine_session;
+  Arena               *arena                = session->arena;
+  Arena               *event_arena          = session->event_arena;
+  Arena               *deferred_event_arena = session->deferred_event_arena;
+  CondVar              closing_cv           = session->closing_cv;
+  Mutex                mutex                = session->mutex;
   cond_var_release(closing_cv);
   mutex_release(mutex);
   arena_release(deferred_event_arena);
@@ -648,15 +635,11 @@ radvs_ad7_bridge_wait_event(RADVS_AD7_Session *session,
                             DWORD *out_exit_code,
                             THREADPROPERTIES *out_thread,
                             EXCEPTION_INFO *out_exception,
-                            String8 *in_out_text)
+                            BSTR *out_text)
 {
   if (out_event_iid == 0 || out_attributes == 0 || out_sequence == 0 ||
-      out_exit_code == 0 || out_thread == 0 || out_exception == 0 || in_out_text == 0) {
+      out_exit_code == 0 || out_thread == 0 || out_exception == 0 || out_text == 0) {
     return E_POINTER;
-  }
-  if (in_out_text->str == 0 && in_out_text->size != 0) {
-    in_out_text->size = 0;
-    return E_INVALIDARG;
   }
   MemoryZeroStruct(out_event_iid);
   *out_attributes = 0;
@@ -664,10 +647,10 @@ radvs_ad7_bridge_wait_event(RADVS_AD7_Session *session,
   *out_exit_code = 0;
   MemoryZeroStruct(out_thread);
   MemoryZeroStruct(out_exception);
+  *out_text = 0;
 
   RADVS_Result result = radvs_ad7_session_enter(session, 1);
   if (result != RADVS_Result_Ok) {
-    in_out_text->size = 0;
     return radvs_ad7_hresult_from_result(result);
   }
 
@@ -676,7 +659,6 @@ radvs_ad7_bridge_wait_event(RADVS_AD7_Session *session,
     deadline_us = now_time_us() + (U64)timeout_ms * 1000;
   }
   HRESULT hresult = S_FALSE;
-  B32 event_output = 0;
   for (;;) {
     B32 delivered = 0;
     B32 wait_closed = 0;
@@ -692,7 +674,7 @@ radvs_ad7_bridge_wait_event(RADVS_AD7_Session *session,
                                                   out_exit_code,
                                                   out_thread,
                                                   out_exception,
-                                                  in_out_text);
+                                                  out_text);
         delivered = 1;
       } else if (session->deferred_event_valid) {
         RADVS_AD7_TranslatedEvent deferred_event = session->deferred_event;
@@ -708,7 +690,7 @@ radvs_ad7_bridge_wait_event(RADVS_AD7_Session *session,
                                                   out_exit_code,
                                                   out_thread,
                                                   out_exception,
-                                                  in_out_text);
+                                                  out_text);
         delivered = 1;
       } else if (session->pending_destroy_sequence != 0) {
         wait_for_destroy_ack = 1;
@@ -719,7 +701,6 @@ radvs_ad7_bridge_wait_event(RADVS_AD7_Session *session,
       break;
     }
     if (delivered) {
-      event_output = 1;
       break;
     }
     if (wait_for_destroy_ack) {
@@ -795,40 +776,37 @@ radvs_ad7_bridge_wait_event(RADVS_AD7_Session *session,
     }
   }
 
-  if (!event_output) {
-    in_out_text->size = 0;
-  }
   radvs_ad7_session_leave(session, 1);
   return hresult;
 }
 
 internal HRESULT
-radvs_ad7_session_copy_static_string(RADVS_AD7_Session *session, String8 source, String8 *in_out)
+radvs_ad7_session_alloc_static_string(RADVS_AD7_Session *session, String8 source, BSTR *out)
 {
-  if (in_out == 0) {
+  if (out == 0) {
     return E_POINTER;
   }
+  *out = 0;
   RADVS_Result result = radvs_ad7_session_enter(session, 0);
   if (result != RADVS_Result_Ok) {
-    in_out->size = 0;
     return radvs_ad7_hresult_from_result(result);
   }
-  HRESULT hresult = radvs_ad7_copy_output_string(source, in_out);
+  HRESULT hresult = radvs_ad7_alloc_output_string(source, out);
   radvs_ad7_session_leave(session, 0);
   return hresult;
 }
 
 HRESULT RADVS_AD7_CALL
-radvs_ad7_bridge_get_program_name(RADVS_AD7_Session *session, String8 *in_out_name)
+radvs_ad7_bridge_get_program_name(RADVS_AD7_Session *session, BSTR *out_name)
 {
-  return radvs_ad7_session_copy_static_string(session, str8_lit("RAD program"), in_out_name);
+  return radvs_ad7_session_alloc_static_string(session, str8_lit("RAD program"), out_name);
 }
 
 HRESULT RADVS_AD7_CALL
-radvs_ad7_bridge_get_host_name(RADVS_AD7_Session *session, GETHOSTNAME_TYPE type, String8 *in_out_name)
+radvs_ad7_bridge_get_host_name(RADVS_AD7_Session *session, GETHOSTNAME_TYPE type, BSTR *out_name)
 {
   (void)type;
-  return radvs_ad7_bridge_get_host_machine_name(session, in_out_name);
+  return radvs_ad7_bridge_get_host_machine_name(session, out_name);
 }
 
 HRESULT RADVS_AD7_CALL
@@ -854,35 +832,33 @@ radvs_ad7_bridge_get_host_pid(RADVS_AD7_Session *session, AD_PROCESS_ID *out_pro
 }
 
 HRESULT RADVS_AD7_CALL
-radvs_ad7_bridge_get_host_machine_name(RADVS_AD7_Session *session, String8 *in_out_name)
+radvs_ad7_bridge_get_host_machine_name(RADVS_AD7_Session *session, BSTR *out_name)
 {
-  if (in_out_name == 0) {
+  if (out_name == 0) {
     return E_POINTER;
   }
+  *out_name = 0;
   RADVS_Result result = radvs_ad7_session_enter(session, 0);
   if (result != RADVS_Result_Ok) {
-    in_out_name->size = 0;
     return radvs_ad7_hresult_from_result(result);
   }
   String8 machine_name = get_system_info()->machine_name;
   HRESULT hresult = E_FAIL;
   if (machine_name.size != 0) {
-    hresult = radvs_ad7_copy_output_string(machine_name, in_out_name);
-  } else {
-    in_out_name->size = 0;
+    hresult = radvs_ad7_alloc_output_string(machine_name, out_name);
   }
   radvs_ad7_session_leave(session, 0);
   return hresult;
 }
 
 HRESULT RADVS_AD7_CALL
-radvs_ad7_bridge_get_engine_info(RADVS_AD7_Session *session, String8 *in_out_name, GUID *out_engine_id)
+radvs_ad7_bridge_get_engine_info(RADVS_AD7_Session *session, BSTR *out_name, GUID *out_engine_id)
 {
-  if (in_out_name == 0 || out_engine_id == 0) {
+  if (out_name == 0 || out_engine_id == 0) {
     return E_POINTER;
   }
   *out_engine_id = radvs_ad7_engine_id;
-  return radvs_ad7_session_copy_static_string(session, str8_lit("RAD Debug Engine"), in_out_name);
+  return radvs_ad7_session_alloc_static_string(session, str8_lit("RAD Debug Engine"), out_name);
 }
 
 HRESULT RADVS_AD7_CALL
@@ -932,14 +908,14 @@ radvs_ad7_bridge_get_thread_properties(RADVS_AD7_Session *session,
                                        DWORD system_thread_id,
                                        THREADPROPERTY_FIELDS fields,
                                        THREADPROPERTIES *out_properties,
-                                       String8 *in_out_name)
+                                       BSTR *out_name)
 {
-  if (out_properties == 0 || in_out_name == 0) {
+  if (out_properties == 0 || out_name == 0) {
     return E_POINTER;
   }
   MemoryZeroStruct(out_properties);
-  if (system_thread_id == 0 || (in_out_name->str == 0 && in_out_name->size != 0)) {
-    in_out_name->size = 0;
+  *out_name = 0;
+  if (system_thread_id == 0) {
     return E_INVALIDARG;
   }
 
@@ -951,11 +927,51 @@ radvs_ad7_bridge_get_thread_properties(RADVS_AD7_Session *session,
     *out_properties = radvs_ad7_thread_properties_from_desc(&thread, fields);
     String8 name = (fields & TPF_NAME) != 0 ? push_str8f(scratch.arena, "Thread %u", system_thread_id) :
                                              str8_zero();
-    hresult = radvs_ad7_copy_output_string(name, in_out_name);
+    hresult = radvs_ad7_alloc_output_string(name, out_name);
     scratch_end(scratch);
     radvs_ad7_session_leave(session, 0);
-  } else {
-    in_out_name->size = 0;
   }
   return hresult;
 }
+
+////////////////////////////////
+
+#define BRIDGE_NOT_IMPLEMENTED return 0;
+
+HRESULT
+BRIDGE_FN(IDebugEngineLaunch2_LaunchSuspended)(RADVS_AD7_Session *session,
+                                               LPCOLESTR pszServer,
+                                               IDebugPort2 *pPort,
+                                               LPCOLESTR pszExe,
+                                               LPCOLESTR pszArgs,
+                                               LPCOLESTR pszDir,
+                                               BSTR bstrEnv,
+                                               LPCOLESTR pszOptions,
+                                               LAUNCH_FLAGS dwLaunchFlags,
+                                               DWORD hStdInput,
+                                               DWORD hStdOutput,
+                                               DWORD hStdError,
+                                               IDebugEventCallback2 *pCallback,
+                                               IDebugProcess2 **ppProcess)
+{
+  BRIDGE_NOT_IMPLEMENTED;
+}
+
+HRESULT
+BRIDGE_FN(IDebugEngineLaunch2_ResumeProcess)(RADVS_AD7_Session *session, IDebugProcess2 *pProcess)
+{
+  BRIDGE_NOT_IMPLEMENTED;
+}
+
+HRESULT
+BRIDGE_FN(IDebugEngineLaunch2_CanTerminateProcess)(RADVS_AD7_Session *session, IDebugProcess2 *pProcess)
+{
+  BRIDGE_NOT_IMPLEMENTED;
+}
+
+HRESULT
+BRIDGE_FN(IDebugEngineLaunch2_TerminateProcess)(RADVS_AD7_Session *session, IDebugProcess2 *pProcess)
+{
+  BRIDGE_NOT_IMPLEMENTED;
+}
+

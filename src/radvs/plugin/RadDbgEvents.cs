@@ -3,210 +3,197 @@ using Microsoft.VisualStudio.Debugger.Interop;
 
 namespace RAD
 {
-    internal abstract class RadDbgEvent : IDebugEvent2
+    internal class RadDbgEvent : IDebugEvent2
     {
         private readonly uint attributes;
-
-        protected RadDbgEvent(uint attributes)
+        internal RadDbgEvent(uint attributes)
         {
             this.attributes = attributes;
         }
-
         public int GetAttributes(out uint pdwAttrib)
         {
             pdwAttrib = this.attributes;
-            return RadDbgHResult.S_OK;
+            return 0;
         }
     }
 
-    internal sealed class RadDbgEngineCreateEvent : RadDbgEvent, IDebugEngineCreateEvent2
+    internal sealed class RadEngineCreateEvent : RadDbgEvent, IDebugEngineCreateEvent2
     {
         private readonly IDebugEngine2 engine;
-
-        internal RadDbgEngineCreateEvent(IDebugEngine2 engine)
-            : base((uint)enum_EVENTATTRIBUTES.EVENT_ASYNCHRONOUS)
+        internal RadEngineCreateEvent(IDebugEngine2 engine) : base((uint)enum_EVENTATTRIBUTES.EVENT_ASYNCHRONOUS)
         {
             this.engine = engine;
         }
-
-        public int GetEngine(out IDebugEngine2 pEngine)
+        public int GetEngine(out IDebugEngine2 ppEngine)
         {
-            pEngine = this.engine;
-            return RadDbgHResult.S_OK;
+            ppEngine = this.engine;
+            return 0;
         }
     }
 
-    internal sealed class RadDbgProgramCreateEvent : RadDbgEvent, IDebugProgramCreateEvent2
+    internal sealed class RadProgramCreateEvent : RadDbgEvent, IDebugProgramCreateEvent2
     {
-        internal RadDbgProgramCreateEvent()
-            : base((uint)enum_EVENTATTRIBUTES.EVENT_SYNCHRONOUS)
+        internal bool StartsNativeSession { get; }
+
+        internal RadProgramCreateEvent(bool startsNativeSession = true) : base((uint)enum_EVENTATTRIBUTES.EVENT_SYNCHRONOUS)
         {
+            this.StartsNativeSession = startsNativeSession;
         }
     }
 
-    internal sealed class RadDbgLoadCompleteEvent : RadDbgEvent, IDebugLoadCompleteEvent2
+    internal sealed class RadLoadCompleteEvent : RadDbgEvent, IDebugLoadCompleteEvent2
     {
-        internal RadDbgLoadCompleteEvent(uint attributes)
-            : base(attributes)
-        {
-        }
+        internal RadLoadCompleteEvent(uint attributes) : base(attributes) {}
     }
 
-    internal sealed class RadDbgProgramDestroyEvent : RadDbgEvent, IDebugProgramDestroyEvent2
+    internal sealed class RadThreadCreateEvent : RadDbgEvent, IDebugThreadCreateEvent2
+    {
+        internal RadThreadCreateEvent(uint attributes) : base(attributes) {}
+    }
+
+    internal sealed class RadThreadDestroyEvent : RadDbgEvent, IDebugThreadDestroyEvent2
     {
         private readonly uint exitCode;
+        internal RadThreadDestroyEvent(uint exitCode, uint attributes) : base(attributes)
+        {
+            this.exitCode = exitCode;
+        }
+        public int GetExitCode(out uint pdwExitCode)
+        {
+            pdwExitCode = this.exitCode;
+            return 0;
+        }
+    }
 
-        internal RadDbgProgramDestroyEvent(uint attributes, uint exitCode, ulong sequence)
-            : base(attributes)
+    internal sealed class RadProgramDestroyEvent : RadDbgEvent, IDebugProgramDestroyEvent2
+    {
+        private readonly uint exitCode;
+        internal ulong Sequence { get; }
+
+        internal RadProgramDestroyEvent(uint exitCode, ulong sequence, uint attributes) : base(attributes)
         {
             this.exitCode = exitCode;
             this.Sequence = sequence;
         }
-
-        internal ulong Sequence { get; }
-
-        public int GetExitCode(out uint pdwExit)
+        public int GetExitCode(out uint pdwExitCode)
         {
-            pdwExit = this.exitCode;
-            return RadDbgHResult.S_OK;
+            pdwExitCode = this.exitCode;
+            return 0;
         }
     }
 
-    internal sealed class RadDbgOutputStringEvent : RadDbgEvent, IDebugOutputStringEvent2
+    internal sealed class RadBreakEvent : RadDbgEvent, IDebugBreakEvent2
+    {
+        internal RadBreakEvent(uint attributes) : base(attributes) {}
+    }
+
+    internal sealed class RadStopCompleteEvent : RadDbgEvent, IDebugStopCompleteEvent2
+    {
+        internal RadStopCompleteEvent(uint attributes) : base(attributes) {}
+    }
+
+    internal sealed class RadBreakpointBoundEvent : RadDbgEvent, IDebugBreakpointBoundEvent2
+    {
+        private readonly IDebugPendingBreakpoint2 pendingBreakpoint;
+        private readonly IDebugBoundBreakpoint2 boundBreakpoint;
+
+        internal RadBreakpointBoundEvent(IDebugPendingBreakpoint2 pendingBreakpoint, IDebugBoundBreakpoint2 boundBreakpoint) : base((uint)enum_EVENTATTRIBUTES.EVENT_ASYNCHRONOUS)
+        {
+            this.pendingBreakpoint = pendingBreakpoint;
+            this.boundBreakpoint = boundBreakpoint;
+        }
+
+        public int EnumBoundBreakpoints(out IEnumDebugBoundBreakpoints2 ppEnum)
+        {
+            ppEnum = new RadDbgBoundBreakpointEnum(new IDebugBoundBreakpoint2[] { this.boundBreakpoint });
+            return 0;
+        }
+
+        public int GetPendingBreakpoint(out IDebugPendingBreakpoint2 ppPendingBP)
+        {
+            ppPendingBP = this.pendingBreakpoint;
+            return 0;
+        }
+    }
+
+    internal sealed class RadBreakpointErrorEvent : RadDbgEvent, IDebugBreakpointErrorEvent2
+    {
+        private readonly IDebugErrorBreakpoint2 errorBreakpoint;
+
+        internal RadBreakpointErrorEvent(IDebugErrorBreakpoint2 errorBreakpoint) : base((uint)enum_EVENTATTRIBUTES.EVENT_ASYNCHRONOUS)
+        {
+            this.errorBreakpoint = errorBreakpoint;
+        }
+
+        public int GetErrorBreakpoint(out IDebugErrorBreakpoint2 ppErrorBP)
+        {
+            ppErrorBP = this.errorBreakpoint;
+            return 0;
+        }
+    }
+
+    internal sealed class RadBreakpointEvent : RadDbgEvent, IDebugBreakpointEvent2
+    {
+        private readonly IDebugBoundBreakpoint2[] boundBreakpoints;
+
+        internal RadBreakpointEvent(IDebugBoundBreakpoint2[] boundBreakpoints, uint attributes) : base(attributes)
+        {
+            this.boundBreakpoints = boundBreakpoints;
+        }
+
+        public int EnumBreakpoints(out IEnumDebugBoundBreakpoints2 ppEnum)
+        {
+            ppEnum = new RadDbgBoundBreakpointEnum(this.boundBreakpoints);
+            return 0;
+        }
+    }
+
+    internal sealed class RadExceptionEvent : RadDbgEvent, IDebugExceptionEvent2
+    {
+        private readonly uint code;
+        private readonly bool repeated;
+        internal RadExceptionEvent(uint code, bool repeated, uint attributes) : base(attributes)
+        {
+            this.code     = code;
+            this.repeated = repeated;
+        }
+        public int CanPassToDebuggee()
+        {
+            return 1;
+        }
+        public int GetException(EXCEPTION_INFO[] pExceptionInfo)
+        {
+            pExceptionInfo[0] = new EXCEPTION_INFO
+            {
+                bstrExceptionName = $"0x{this.code:X8}",
+                dwCode            = this.code,
+                dwState           = this.repeated ? enum_EXCEPTION_STATE.EXCEPTION_STOP_SECOND_CHANCE : enum_EXCEPTION_STATE.EXCEPTION_STOP_FIRST_CHANCE,
+                guidType          = Guid.Empty,
+            };
+            return 0;
+        }
+        public int GetExceptionDescription(out string pbstrDescription)
+        {
+            pbstrDescription = $"Debuggee exception 0x{this.code:X8}";
+            return 0;
+        }
+        public int PassToDebuggee(int fPass)
+        {
+            return 0;
+        }
+    }
+
+    internal sealed class RadOutputStringEvent : RadDbgEvent, IDebugOutputStringEvent2
     {
         private readonly string text;
-
-        internal RadDbgOutputStringEvent(uint attributes, string text)
-            : base(attributes)
+        internal RadOutputStringEvent(string text, uint attributes) : base(attributes)
         {
             this.text = text;
         }
-
         public int GetString(out string pbstrString)
         {
             pbstrString = this.text;
-            return RadDbgHResult.S_OK;
-        }
-    }
-
-    internal sealed class RadDbgThreadCreateEvent : RadDbgEvent, IDebugThreadCreateEvent2
-    {
-        internal RadDbgThreadCreateEvent(uint attributes)
-            : base(attributes)
-        {
-        }
-    }
-
-    internal sealed class RadDbgThreadDestroyEvent : RadDbgEvent, IDebugThreadDestroyEvent2
-    {
-        private readonly uint exitCode;
-
-        internal RadDbgThreadDestroyEvent(uint attributes, uint exitCode)
-            : base(attributes)
-        {
-            this.exitCode = exitCode;
-        }
-
-        public int GetExitCode(out uint pdwExit)
-        {
-            pdwExit = this.exitCode;
-            return RadDbgHResult.S_OK;
-        }
-    }
-
-    internal sealed class RadDbgStopCompleteEvent : RadDbgEvent, IDebugStopCompleteEvent2
-    {
-        internal RadDbgStopCompleteEvent(uint attributes)
-            : base(attributes)
-        {
-        }
-    }
-
-    internal sealed class RadDbgBreakEvent : RadDbgEvent, IDebugBreakEvent2
-    {
-        internal RadDbgBreakEvent(uint attributes)
-            : base(attributes)
-        {
-        }
-    }
-
-    internal sealed class RadDbgExceptionEvent : RadDbgEvent, IDebugExceptionEvent2
-    {
-        private readonly EXCEPTION_INFO exceptionInfo;
-        private readonly string description;
-
-        internal RadDbgExceptionEvent(uint attributes, EXCEPTION_INFO exceptionInfo, string description)
-            : base(attributes)
-        {
-            this.exceptionInfo = exceptionInfo;
-            this.description = description;
-        }
-
-        public int GetException(EXCEPTION_INFO[] pExceptionInfo)
-        {
-            if (pExceptionInfo == null || pExceptionInfo.Length == 0)
-            {
-                return RadDbgHResult.E_POINTER;
-            }
-            pExceptionInfo[0] = this.exceptionInfo;
-            return RadDbgHResult.S_OK;
-        }
-
-        public int GetExceptionDescription(out string pbstrDescription)
-        {
-            pbstrDescription = this.description;
-            return RadDbgHResult.S_OK;
-        }
-
-        public int CanPassToDebuggee()
-        {
-            return RadDbgHResult.S_FALSE;
-        }
-
-        public int PassToDebuggee(int fPass)
-        {
-            return RadDbgHResult.S_OK;
-        }
-    }
-
-    internal static class RadDbgEventFactory
-    {
-        internal static IDebugEvent2? Create(RadDbgNativeEvent nativeEvent)
-        {
-            Guid iid = nativeEvent.EventIid;
-            if (iid == typeof(IDebugLoadCompleteEvent2).GUID)
-            {
-                return new RadDbgLoadCompleteEvent(nativeEvent.Attributes);
-            }
-            if (iid == typeof(IDebugProgramDestroyEvent2).GUID)
-            {
-                return new RadDbgProgramDestroyEvent(nativeEvent.Attributes, nativeEvent.ExitCode, nativeEvent.Sequence);
-            }
-            if (iid == typeof(IDebugThreadCreateEvent2).GUID)
-            {
-                return new RadDbgThreadCreateEvent(nativeEvent.Attributes);
-            }
-            if (iid == typeof(IDebugThreadDestroyEvent2).GUID)
-            {
-                return new RadDbgThreadDestroyEvent(nativeEvent.Attributes, nativeEvent.ExitCode);
-            }
-            if (iid == typeof(IDebugStopCompleteEvent2).GUID)
-            {
-                return new RadDbgStopCompleteEvent(nativeEvent.Attributes);
-            }
-            if (iid == typeof(IDebugBreakEvent2).GUID)
-            {
-                return new RadDbgBreakEvent(nativeEvent.Attributes);
-            }
-            if (iid == typeof(IDebugExceptionEvent2).GUID)
-            {
-                return new RadDbgExceptionEvent(nativeEvent.Attributes, nativeEvent.ExceptionInfo, nativeEvent.Text);
-            }
-            if (iid == typeof(IDebugOutputStringEvent2).GUID)
-            {
-                return new RadDbgOutputStringEvent(nativeEvent.Attributes, nativeEvent.Text);
-            }
-            return null;
+            return 0;
         }
     }
 }

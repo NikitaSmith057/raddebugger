@@ -12,9 +12,9 @@ namespace RAD
     [Guid(PackageGuidString)]
     [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
     [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
-    [ProvideMenuResource("Menus.ctmenu", 1)] // debug engine picker menu
-    [ProvideObject(typeof(RadDbgEngine))]
-    [ProvideRadDbgEngine(typeof(RadDbgEngine), RadDbgEngine.EngineIdString)]
+    [ProvideMenuResource("Menus.ctmenu", 1)]                                 // debug engine picker menu
+    [ProvideObject(typeof(RadDbgEngine))]                                    // register the engine object type
+    [ProvideRadDbgEngine(typeof(RadDbgEngine), RadDbgEngine.EngineIdString)] // register the engine object identifier
     public sealed class RadDbgPackage : AsyncPackage
     {
         public const string PackageGuidString = "78083fc7-5620-4c90-a77f-fdf476429014";
@@ -25,37 +25,29 @@ namespace RAD
 
         private RadCommandHandler? commandHandler;
         private uint               commandTargetCookie;
-        private Guid?              selectedDebugEngineId;
+        private bool               useRadDbgEngine;
         
-        internal Guid? SelectedDebugEngineId
+        internal bool UseRadDbgEngine
         {
-            get => this.selectedDebugEngineId;
+            get => this.useRadDbgEngine;
 
             set
             {
                 ThreadHelper.ThrowIfNotOnUIThread();
 
-                if (this.selectedDebugEngineId == value) { return; }
+                // value already set? -> exit
+                if (this.useRadDbgEngine == value) { return;  }
 
-                this.selectedDebugEngineId = value;
+                this.useRadDbgEngine = value;
                 using (RegistryKey settings = this.UserRegistryRoot.CreateSubKey("RAD"))
                 {
-                    if (value.HasValue)
-                    {
-                        settings.SetValue("SelectedDebugEngineId", value.Value.ToString("D"), RegistryValueKind.String);
-                    }
-                    else
-                    {
-                        settings.DeleteValue("SelectedDebugEngineId", throwOnMissingValue: false);
-                    }
+                    settings.SetValue("UseRadDbgEngine", value ? 1 : 0, RegistryValueKind.DWord);
                 }
 
-                if (value.HasValue) { this.RegisterDebugCommandTarget();   }
-                else                { this.UnregisterDebugCommandTarget(); }
+                if (value) { this.RegisterDebugCommandTarget();   }
+                else       { this.UnregisterDebugCommandTarget(); }
             }
         }
-
-        internal bool HasSelectedDebugEngine => this.selectedDebugEngineId.HasValue;
 
         internal bool IsDebuggerInDesignMode
         {
@@ -75,15 +67,7 @@ namespace RAD
 
             using (RegistryKey? settings = this.UserRegistryRoot.OpenSubKey("RAD"))
             {
-                if (settings?.GetValue("SelectedDebugEngineId") is string engineId && Guid.TryParse(engineId, out Guid parsedEngineId))
-                {
-                    this.selectedDebugEngineId = parsedEngineId;
-                }
-                else if (settings?.GetValue("UseRadDbgEngine") is int enabled && enabled != 0)
-                {
-                    // Preserve the previously selected RAD engine for existing users.
-                    this.selectedDebugEngineId = new Guid(RadDbgEngine.EngineIdString);
-                }
+                this.useRadDbgEngine = settings?.GetValue("UseRadDbgEngine") is int enabled && enabled != 0;
             }
 
             this.commandHandler = await RadCommandHandler.InitializeAsync(this);
@@ -100,7 +84,7 @@ namespace RAD
             
             await this.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
             
-            if (this.selectedDebugEngineId.HasValue)
+            if (this.useRadDbgEngine)
             {
                 this.RegisterDebugCommandTarget();
             }

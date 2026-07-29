@@ -129,10 +129,6 @@ typedef struct
 typedef void RADVS_ModuleVisitor(void *user_data, DMN_Handle module_handle, const RADVS_Module *module);
 typedef void RADVS_ThreadVisitor(void *user_data, DMN_Handle thread_handle, const RADVS_Thread *thread);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 RADVS_Result radvs_engine_alloc                           (RADVS_SymbolService *symbol_service, RADVS_Engine **out_engine);
 RADVS_Result radvs_engine_release                         (RADVS_Engine *engine);
 RADVS_Result radvs_engine_session_alloc                   (RADVS_Engine *engine, RADVS_EngineSession **out_session);
@@ -168,8 +164,4 @@ RADVS_Result radvs_engine_session_terminate_process       (RADVS_EngineSession *
 void         radvs_engine_session_close_event_wait        (RADVS_EngineSession *session);
 RADVS_Result radvs_engine_session_wait_event              (RADVS_EngineSession *session, U64 timeout_us);
 RADVS_Result radvs_engine_session_poll_event              (RADVS_EngineSession *session, RADVS_Event *event_out);
-
-#ifdef __cplusplus
-}
-#endif
 
