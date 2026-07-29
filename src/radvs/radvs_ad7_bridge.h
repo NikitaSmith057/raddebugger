@@ -4,7 +4,10 @@
 #pragma once
 
 #include <windows.h>
+#pragma warning(push)
+#pragma warning(disable: 5287)
 #include <msdbg.h>
+#pragma warning(pop)
 
 #include "base/base_inc.h"
 
