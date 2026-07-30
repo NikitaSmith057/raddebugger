@@ -88,4 +88,6 @@ internal B32 process_join(Process process, U64 endt_us, U64 *exit_code_out);
 internal void process_detach(Process process);
 internal B32 process_kill(Process process);
 
+internal ProcessLaunchParams * process_launch_params_copy(Arena *arena, ProcessLaunchParams *src);
+
 #endif // BASE_PROCESSES_H

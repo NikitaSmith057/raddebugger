@@ -113,3 +113,14 @@ launch_cmd_linef(char *fmt, ...)
   scratch_end(scratch);
   return result;
 }
+
+internal ProcessLaunchParams *
+process_launch_params_copy(Arena *arena, ProcessLaunchParams *src)
+{
+  ProcessLaunchParams *dst = push_array(arena, ProcessLaunchParams, 1);
+  *dst          = *src;
+  dst->path     = str8_copy(arena, src->path);
+  dst->cmd_line = str8_list_copy(arena, &src->cmd_line);
+  dst->env      = str8_list_copy(arena, &src->env);
+  return dst;
+}

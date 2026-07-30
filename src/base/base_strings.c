@@ -1227,10 +1227,9 @@ internal String8List
 str8_list_copy(Arena *arena, String8List *list)
 {
   String8List result = {0};
-  for(String8Node *node = list->first; node != 0; node = node->next)
-  {
-    String8Node *new_node = push_array_no_zero(arena, String8Node, 1);
-    String8 new_string = push_str8_copy(arena, node->string);
+  for EachNode(n, String8Node, list->first) {
+    String8Node *new_node   = push_array_no_zero(arena, String8Node, 1);
+    String8      new_string = str8_copy(arena, n->string);
     str8_list_push_node_set_string(&result, new_node, new_string);
   }
   return result;

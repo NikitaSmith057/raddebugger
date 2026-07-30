@@ -153,8 +153,6 @@ if "%parse_inline_sites%"=="1"         set didbuild=1 && %compile% ..\src\scratc
 if "%strip_lib_debug%"=="1"            set didbuild=1 && %compile% ..\src\strip_lib_debug\strip_lib_debug.c                  %compile_link% %out%strip_lib_debug.exe || exit /b 1
 if "%mule_main%"=="1"                  set didbuild=1 && del vc*.pdb mule*.pdb && %compile_release% %only_compile% ..\src\mule\mule_inline.cpp %obj_out%mule_inline.obj && %compile_release% %only_compile% ..\src\mule\mule_o2.cpp %obj_out%mule_o2.obj && %compile_debug% %EHsc% ..\src\mule\mule_main.cpp ..\src\mule\mule_c.c mule_inline.obj mule_o2.obj %compile_link% %no_aslr% %out%mule_main.exe || exit /b 1
 if "%mule_module%"=="1"                set didbuild=1 && %compile% ..\src\mule\mule_module.cpp                               %link_dll% %out%mule_module.dll || exit /b 1
-if "%radvs%"=="1"                      set didbuild=1 && %compile% -DBUILD_DLL_INTERFACE=1 -DNO_WIN32_RIO=1 ..\src\radvs\radvs_bridge_main.c %link_dll% %out%RadDbg.dll || exit /b 1
-if "%radvs_cli%"=="1"                  set didbuild=1 && %compile% -DNO_WIN32_RIO=1 ..\src\radvs\radvs_cli.c               %compile_link% %out%radvs_cli.exe || exit /b 1
 if "%mule_hotload%"=="1"               set didbuild=1 && %compile% ..\src\mule\mule_hotload_main.c %compile_link% %out%mule_hotload.exe & %compile% ..\src\mule\mule_hotload_module_main.c %compile_link% %link_dll% %out%mule_hotload_module.dll || exit /b 1
 if "%torture%"=="1"                    set didbuild=1 && %compile% ..\src\torture\torture_main.c                             %compile_link% %out%torture.exe || exit /b1
 if "%dwarf_expr_test%"=="1"            set didbuild=1 && %compile% ..\src\torture\dwarf_expr_test.c                          %compile_link% %out%dwarf_expr_test.exe || exit /b1
@@ -167,6 +165,9 @@ if "%mule_peb_trample%"=="1" (
   %compile% ..\src\mule\mule_peb_trample.c %compile_link% %out%mule_peb_trample_new.exe || exit /b 1
   move mule_peb_trample_new.exe mule_peb_trample.exe
 )
+if "%radvs_radvs_first_version%"=="1" set didbuild=1 && %compile% -DBUILD_DLL_INTERFACE=1 ..\src\radvs\radvs-first-version\radvs_bridge_main.c %link_dll% %out%RadDbg.dll || exit /b 1
+if "%radvs%"=="1"                      set didbuild=1 && %compile% -DBUILD_DLL_INTERFACE=1 ..\src\radvs\rvs_main.c %link_dll% %out%RadVs.dll || exit /b 1
+if "%radvs_cli%"=="1"                  set didbuild=1 && %compile% -DNO_WIN32_RIO=1 ..\src\radvs\radvs_cli.c               %compile_link% %out%radvs_cli.exe || exit /b 1
 popd
 
 :: --- Set Up Debugger Com Shim -----------------------------------------------
