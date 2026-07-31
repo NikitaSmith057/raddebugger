@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="RadShim.csproj">
+    <Deploy />
+  </Project>
+</Solution>

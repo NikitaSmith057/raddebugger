@@ -1,0 +1,83 @@
+﻿<Project>
+
+  <PropertyGroup>
+    <BaseOutputPath>..\..\..\build\radvs\bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>..\..\..\build\radvs\obj\</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+  </PropertyGroup>
+
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>14</LangVersion>
+
+    <!-- VSIX settings -->
+    <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
+    <GeneratePkgDefFile>true</GeneratePkgDefFile>
+    <RadDbgBridgeHeaderPath>..\radvs_bridge.h</RadDbgBridgeHeaderPath>
+    <RadVsDefaultBridgePath>$(MSBuildProjectDirectory)\..\..\..\build\RadDbg.dll</RadVsDefaultBridgePath>
+    <RadVsBridgePath Condition="'$(RadVsBridgePath)' == ''">$(RadVsDefaultBridgePath)</RadVsBridgePath>
+    <RadVsBridgePdbPath Condition="'$(RadVsBridgePdbPath)' == '' and '$(RadVsBridgePath)' != ''">$([System.IO.Path]::ChangeExtension('$(RadVsBridgePath)', '.pdb'))</RadVsBridgePdbPath>
+    <BuildRadVsBridge Condition="'$(BuildRadVsBridge)' == '' and '$(RadVsBridgePath)' == '$(RadVsDefaultBridgePath)'">true</BuildRadVsBridge>
+    <BuildRadVsBridge Condition="'$(BuildRadVsBridge)' == ''">false</BuildRadVsBridge>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Remove="RADPackage.vsct" />
+  </ItemGroup>
+
+  <Target Name="PrepareRadVsBridge" BeforeTargets="PrepareForBuild">
+    <ItemGroup>
+      <Content Include="$(RadVsBridgePath)">
+        <Link>RadDbg.dll</Link>
+      </Content>
+    </ItemGroup>
+    <ItemGroup Condition="'$(RadVsBridgePdbPath)' != '' and Exists('$(RadVsBridgePdbPath)')">
+      <Content Include="$(RadVsBridgePdbPath)">
+        <Link>RadDbg.pdb</Link>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+  <Target Name="GenerateRadDbgBridgeVersion" BeforeTargets="CoreCompile">
+    <Error Condition="!Exists('$(RadDbgBridgeHeaderPath)')" Text="RAD Visual Studio bridge header was not found: $(RadDbgBridgeHeaderPath)." />
+    <ReadLinesFromFile File="$(RadDbgBridgeHeaderPath)">
+      <Output TaskParameter="Lines" ItemName="_RadDbgBridgeHeaderLine" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <_RadDbgBridgeVersionLine Include="@(_RadDbgBridgeHeaderLine)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(Identity)', '^\s*#define\s+RADVS_BRIDGE_ABI_VERSION\s+[0-9]+u?\s*$'))" />
+    </ItemGroup>
+    <PropertyGroup>
+      <RadDbgBridgeVersionLine>@(_RadDbgBridgeVersionLine)</RadDbgBridgeVersionLine>
+      <RadDbgBridgeAbiVersion>$([System.Text.RegularExpressions.Regex]::Replace('$(RadDbgBridgeVersionLine)', '^\s*#define\s+RADVS_BRIDGE_ABI_VERSION\s+([0-9]+)u?\s*$', '$1'))</RadDbgBridgeAbiVersion>
+      <RadDbgBridgeVersionGeneratedFile>$(IntermediateOutputPath)RadDbgBridgeVersion.g.cs</RadDbgBridgeVersionGeneratedFile>
+    </PropertyGroup>
+    <Error Condition="'$(RadDbgBridgeAbiVersion)' == '' or '$(RadDbgBridgeAbiVersion)' == '$(RadDbgBridgeVersionLine)'" Text="Could not parse RADVS_BRIDGE_ABI_VERSION from $(RadDbgBridgeHeaderPath)." />
+    <WriteLinesToFile File="$(RadDbgBridgeVersionGeneratedFile)" Lines="namespace RAD { internal static class RadDbgBridgeVersion { internal const uint ExpectedAbiVersion = $(RadDbgBridgeAbiVersion)%3B } }" Overwrite="true" />
+    <ItemGroup>
+      <Compile Include="$(RadDbgBridgeVersionGeneratedFile)" />
+      <FileWrites Include="$(RadDbgBridgeVersionGeneratedFile)" />
+    </ItemGroup>
+  </Target>
+
+  <ItemGroup>
+    <ProjectCapability Include="CreateVsixContainer" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.14.40265" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VisualStudio.VCProjectEngine" Version="17.14.40264" />
+    <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="18.8.739" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="System.Design" />
+  </ItemGroup>
+  <ItemGroup>
+    <VSCTCompile Include="RADPackage.vsct">
+      <ResourceName>Menus.ctmenu</ResourceName>
+    </VSCTCompile>
+  </ItemGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>

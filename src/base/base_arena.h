@@ -59,6 +59,13 @@ struct Temp
   U64 pos;
 };
 
+typedef struct ArenaNode ArenaNode;
+struct ArenaNode
+{
+  ArenaNode *next;
+  Arena *v;
+};
+
 ////////////////////////////////
 //~ rjf: Arena Functions
 

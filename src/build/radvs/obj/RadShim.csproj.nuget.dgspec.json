@@ -1,0 +1,70 @@
+{
+  "format": 1,
+  "restore": {
+    "C:\\devel\\radvs\\src\\radvs\\radvs-first-version\\plugin\\RadShim.csproj": {}
+  },
+  "projects": {
+    "C:\\devel\\radvs\\src\\radvs\\radvs-first-version\\plugin\\RadShim.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\devel\\radvs\\src\\radvs\\radvs-first-version\\plugin\\RadShim.csproj",
+        "projectName": "RadShim",
+        "projectPath": "C:\\devel\\radvs\\src\\radvs\\radvs-first-version\\plugin\\RadShim.csproj",
+        "packagesPath": "C:\\Users\\nikita.smith\\.nuget\\packages\\",
+        "outputPath": "C:\\devel\\radvs\\src\\build\\radvs\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\Users\\nikita.smith\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+        ],
+        "originalTargetFrameworks": [
+          "net472"
+        ],
+        "sources": {
+          "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net472": {
+            "framework": "net472",
+            "targetAlias": "net472",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.300"
+      },
+      "frameworks": {
+        "net472": {
+          "framework": "net472",
+          "targetAlias": "net472",
+          "dependencies": {
+            "Microsoft.VSSDK.BuildTools": {
+              "target": "Package",
+              "version": "[18.8.739, )"
+            },
+            "Microsoft.VisualStudio.SDK": {
+              "include": "Compile, Build, Native, ContentFiles, Analyzers, BuildTransitive",
+              "target": "Package",
+              "version": "[17.14.40265, )"
+            },
+            "Microsoft.VisualStudio.VCProjectEngine": {
+              "target": "Package",
+              "version": "[17.14.40264, )"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.302\\RuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

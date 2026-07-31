@@ -166,8 +166,9 @@ if "%mule_peb_trample%"=="1" (
   move mule_peb_trample_new.exe mule_peb_trample.exe
 )
 if "%radvs_radvs_first_version%"=="1" set didbuild=1 && %compile% -DBUILD_DLL_INTERFACE=1 ..\src\radvs\radvs-first-version\radvs_bridge_main.c %link_dll% %out%RadDbg.dll || exit /b 1
-if "%radvs%"=="1"                      set didbuild=1 && %compile% -DBUILD_DLL_INTERFACE=1 ..\src\radvs\rvs_main.c %link_dll% %out%RadVs.dll || exit /b 1
-if "%radvs_cli%"=="1"                  set didbuild=1 && %compile% -DNO_WIN32_RIO=1 ..\src\radvs\radvs_cli.c               %compile_link% %out%radvs_cli.exe || exit /b 1
+if "%radvs_cli%"=="1"                 set didbuild=1 && %compile% -DNO_WIN32_RIO=1 ..\src\radvs\radvs_cli.c               %compile_link% %out%radvs_cli.exe || exit /b 1
+if "%rvs_dll%"=="1"                       set didbuild=1 && %compile% ..\src\radvs\rvs_main.c %link_dll% %out%RadVs.dll || exit /b 1
+if "%rvs_cli%"=="1"                       set didbuild=1 && %compile% ..\src\radvs\rvs_cli.c %compile_link% %out%rci.exe || exit /b 1
 popd
 
 :: --- Set Up Debugger Com Shim -----------------------------------------------
