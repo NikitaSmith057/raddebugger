@@ -10,8 +10,25 @@ typedef struct RVS_Engine RVS_Engine;
 
 typedef enum
 {
+  RVS_EngineCommandKind_Null,
+  RVS_EngineCommandKind_Launch,
+} RVS_EngineCommandKind;
+
+typedef struct
+{
+  RVS_EngineCommandKind kind;
+  RVS_MessageID         request_id;
+  union {
+    struct {
+      ProcessLaunchParams params;
+    } launch;
+  };
+} RVS_EngineCommand;
+
+typedef enum
+{
   RVS_EngineMessageType_Null,
-  RVS_EngineMessageType_Launch,
+  RVS_EngineMessageType_Command,
   RVS_EngineMessageType_DemonOutput,
   RVS_EngineMessageType_Shutdown,
 } RVS_EngineMessageType;
@@ -20,11 +37,8 @@ typedef struct
 {
   RVS_QueueNode          base;
   RVS_EngineMessageType  type;
-  RVS_MessageID          request_id;
   union {
-    struct {
-      ProcessLaunchParams params;
-    } launch;
+    RVS_EngineCommand command;
     struct {
       RVS_Demon        *source;
       RVS_DemonOutput  *output;
