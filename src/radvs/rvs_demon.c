@@ -26,18 +26,22 @@ rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon
   if (state == RVS_ThreadState_Null) {
     dmn.state          = RVS_ThreadState_Initing;
     dmn.arena          = arena_alloc();
+    dmn.message_arena  = arena_alloc();
     dmn.mutex          = mutex_alloc();
     dmn.reply_callback = reply_callback;
     dmn.reply_ud       = reply_ud;
     dmn.queue          = rvs_queue_alloc(dmn.arena, sizeof(RVS_DemonMessage), AlignOf(RVS_DemonMessage));
-    dmn.worker         = thread_launch(rvs_demon_worker, 0);
+    dmn.worker         = thread_launch(rvs_demon_worker, &dmn);
     if ( ! MemoryIsZeroStruct(&dmn.worker)) {
       result = RVS_Result_Ok;
     }
   }
 
-  // wait for the DEMON thread to boot
-  for (; ins_atomic_u32_eval(&dmn.state) != RVS_ThreadState_Initing; ) { sleep_ms(1); }
+  // Wait until the worker has initialized the platform control context.
+  while (ins_atomic_u32_eval(&dmn.state) == RVS_ThreadState_Initing) { sleep_ms(1); }
+  if (ins_atomic_u32_eval(&dmn.state) != RVS_ThreadState_Running) {
+    result = RVS_Result_Error;
+  }
 
   if (dmn_out) {
     *dmn_out = &dmn;
@@ -60,12 +64,12 @@ rvs_demon_recycle_request(RVS_QueueMessage *request)
   NotImplemented;
 }
 
-internal RVS_DemonMessage *
-rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *src)
+internal void
+rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *src)
 {
-  RVS_DemonMessage *dst = push_array_no_zero(arena, RVS_DemonMessage, 1);
-
+  RVS_QueueMessage base = dst->base;
   *dst = *src;
+  dst->base = base;
   switch (src->type) {
   case RVS_DemonMessage_Launch: {
     dst->launch.params = *process_launch_params_copy(arena, &src->launch.params);
@@ -86,7 +90,6 @@ rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *src)
   default: { InvalidPath; } break;
   }
 
-  return dst;
 }
 
 internal RVS_Result
@@ -98,9 +101,8 @@ rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec, RVS_MessageID *rep
     // alloc new DEMON message
     RVS_DemonMessage *message = (RVS_DemonMessage *)rvs_queue_alloc_message(dmn->queue);
 
-    // copy message contents
-    message = rvs_demon_message_copy(dmn->message_arena, &spec);
-    if (result != RVS_Result_Ok) { goto exit; }
+    // Copy the request into the queue-owned message without replacing its ID.
+    rvs_demon_message_copy(dmn->message_arena, message, &spec);
 
     // send message to the DEMON worker
     result = rvs_queue_push(dmn->queue, &message->base);
@@ -111,10 +113,6 @@ rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec, RVS_MessageID *rep
     }
 
     exit:;
-    if (result != RVS_Result_Ok) {
-      // TODO: free message
-      NotImplemented;
-    }
   }
 
   return result;
@@ -140,6 +138,7 @@ rvs_demon_worker(void *user_data)
 
   // grant current thread access to the DEMON API
   DMN_CtrlCtx *ctrl_ctx = dmn_ctrl_begin();
+  ins_atomic_u32_eval_assign(&dmn->state, RVS_ThreadState_Running);
 
   for (;;) {
     // wait for the requests from the engine thread
@@ -156,7 +155,9 @@ rvs_demon_worker(void *user_data)
     }
 
     // reply to the engine thread
-    dmn->reply_callback(message->base.reply_id, &reply, dmn->reply_ud);
+    RVS_MessageID reply_id = message->reply_to ? message->reply_to : message->base.reply_id;
+    dmn->reply_callback(reply_id, &reply, dmn->reply_ud);
+    rvs_queue_recycle(dmn->queue, &message->base);
   }
 }
 

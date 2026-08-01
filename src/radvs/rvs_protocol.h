@@ -57,8 +57,9 @@ internal RVS_QueueMessage *rvs_queue_alloc_message(RVS_Queue *q);
 internal void rvs_queue_recycle (RVS_Queue *q, RVS_QueueMessage *r);
 internal RVS_Result rvs_queue_push(RVS_Queue *q, RVS_QueueMessage *r);
 internal B32  rvs_queue_wait_for(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us);
-internal B32  rvs_queue_send_message(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us);
+internal RVS_Result rvs_queue_send_message(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us);
 internal RVS_QueueMessage *rvs_queue_pop (RVS_Queue *q, U64 wait_us);
-#define rvs_queue_alloc_struct(q, T) (T*)rvs_queue_alloc(q, sizeof(T), AlignOf(T))
-#define rvs_queue_pop_struct(q, T)   (T*)rvs_queue_pop(q)
+internal B32 rvs_queue_complete(RVS_Queue *q, RVS_QueueMessage *r, RVS_Result result);
+#define rvs_queue_alloc_struct(q, T) ((T*)rvs_queue_alloc_message(q))
+#define rvs_queue_pop_struct(q, T)   ((T*)rvs_queue_pop(q, max_U64))
 

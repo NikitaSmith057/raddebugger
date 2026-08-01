@@ -96,7 +96,8 @@ entry_point(CmdLine *cmdline)
 {
   RVS_Engine *engine = 0;
   if (rvs_engine_init(&engine) != RVS_Result_Ok) { InvalidPath; }
-  g_rci.engine = engine;
+  g_rci.engine       = engine;
+  g_rci.output_mutex = mutex_alloc();
 
   for (;;) {
     Temp scratch = scratch_begin(0,0);
@@ -107,7 +108,7 @@ entry_point(CmdLine *cmdline)
     if (fgets(line_buffer, sizeof(line_buffer), stdin) == 0) {
       break;
     }
-    String8     input       = str8_cstring_capped(line_buffer, line_buffer+sizeof(line_buffer));
+    String8     input       = str8_skip_chop_whitespace(str8_cstring_capped(line_buffer, line_buffer+sizeof(line_buffer)));
     String8List input_split = str8_split_by_string_chars(scratch.arena, input, str8_lit(" "), 0);
     String8     cmd         = str8_list_first(&input_split);
 
@@ -128,25 +129,21 @@ entry_point(CmdLine *cmdline)
       }
 
 
-      // pump a debug event
-      RVS_Event event = {0};
-      if ( ! rvs_engine_wait_for_event(engine, max_U64, &event)) {
-        InvalidPath;
+      RVS_Reply reply = {0};
+      RVS_Result reply_result = rvs_engine_wait_for_reply(scratch.arena, engine, launch_reply_id, max_U64, &reply);
+      if (reply_result != RVS_Result_Ok) {
+        rci_fprintf(stdout, "launch: request failed, error code %u\n", reply_result);
+        continue;
+      }
+      if (reply.reply_id != launch_reply_id || reply.kind != RVS_ReplyKind_LaunchAck) {
+        rci_fprintf(stdout, "launch: received an invalid completion\n");
+        continue;
       }
 
-      Assert(event.source_type == RVS_EventSource_Message);
-      Assert(event.source.reply_id == launch_reply_id);
+      rci_fprintf(stdout, "launch: program %llu started with pid %u\n", reply.launch_ack.program_id, reply.launch_ack.pid);
     } else {
       rci_fprintf(stdout, "unknown command: %S", cmd);
     }
-
-#if 0
-    switch (event.kind) {
-    case RVS_EventKind_LaunchAck: {
-      rci_fprintf(stdout, "program %d launched with pid %d\n", event.launch.program_id, event.launch.pid);
-    } break;
-    }
-#endif
 
     scratch_end(scratch);
   }

@@ -3,75 +3,84 @@
 
 #pragma once
 
+#include "radvs/rvs_demon.h"
+
 typedef U64 RVS_ProgramID;
 typedef struct RVS_Engine RVS_Engine;
 
 typedef enum
 {
   RVS_EngineMessageType_Null,
+  RVS_EngineMessageType_Launch,
   RVS_EngineMessageType_DemonReply,
 } RVS_EngineMessageType;
 
 typedef struct
 {
-  RVS_EngineMessageType type;
+  RVS_QueueMessage       base;
+  RVS_EngineMessageType  type;
   union {
-    RVS_DemonMessage demon_reply; // snapshot of a demon reply message
+    struct {
+      ProcessLaunchParams params;
+    } launch;
+    struct {
+      RVS_DemonMessage message;
+      RVS_MessageID    reply_id;
+    } demon_reply;
   };
 } RVS_EngineMessage;
+
+typedef enum
+{
+  RVS_ReplyKind_Null,
+  RVS_ReplyKind_LaunchAck,
+} RVS_ReplyKind;
+
+typedef struct
+{
+  RVS_MessageID reply_id;
+  RVS_Result    result;
+  RVS_ReplyKind kind;
+  union {
+    struct {
+      RVS_ProgramID program_id;
+      U32           pid;
+    } launch_ack;
+  };
+} RVS_Reply;
 
 typedef struct RVS_EngineReply RVS_EngineReply;
 struct RVS_EngineReply
 {
-  RVS_EngineReply  *next;
-  RVS_EngineReply  *prev;
-  RVS_EngineMessage message;
-  RVS_MessageID       id;
-  RVS_Result        result;
+  RVS_EngineReply *next;
+  RVS_EngineReply *prev;
+  RVS_Reply        reply;
 };
 
 typedef struct RVS_Program RVS_Program;
 struct RVS_Program
 {
-  RVS_Program *next;
-  Arena       *arena;
-  U32          pid;
+  RVS_Program   *next;
+  Arena         *arena;
+  RVS_ProgramID  id;
+  U32            pid;
 };
-
-#define RVS_EVENT_XLIST  \
-  X(Launch, "LaunchAck") \
 
 typedef enum
 {
-#define X(id, ...) RVS_EventKind_##id,
-  RVS_EVENT_XLIST
-#undef X
+  RVS_EventKind_Null,
 } RVS_EventKind;
 
 typedef struct
 {
   RVS_EventKind kind;
-  struct {
-    RVS_MessageID reply_id; // message identifier for the completion reply
-    U32           pid;
-  } launch_ack;
 } RVS_Event;
 
-typedef enum
-{
-  RVS_NotificationKind_Null,
-  RVS_NotificationKind_Reply,
-  RVS_NotificationKind_Event
-} RVS_NotificationKind;
+RVS_Result rvs_engine_init(RVS_Engine **engine_out);
+void       rvs_engine_shutdown(RVS_Engine *engine);
 
-typedef struct
-{
-  RVS_NotificationKind kind;
-  union {
-    RVS_Reply reply;
-    RVS_Event event;
-  };
-} RVS_Notification;
+RVS_Result rvs_engine_launch_async(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_MessageID *reply_id_out);
+RVS_Result rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID reply_id, U64 wait_us, RVS_Reply *reply_out);
+RVS_Result rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, U64 wait_us, U32 *pid_out);
 
-RVS_Result rvs_engine_wait_for_notification(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Notification *notification_out);
-
+RVS_Result rvs_engine_wait_for_event(RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);

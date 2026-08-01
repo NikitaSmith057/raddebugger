@@ -23,6 +23,7 @@ typedef struct
 {
   RVS_QueueMessage     base;
   RVS_DemonMessageType type;
+  RVS_MessageID        reply_to; // engine request that owns this completion
   struct {
     ProcessLaunchParams params;   // process launch params
   } launch;
@@ -51,6 +52,7 @@ RVS_Result rvs_demon_shutdown(void);
 
 internal RVS_Result rvs_demon_alloc       (void);
 internal RVS_Result rvs_demon_release     (void);
+internal void       rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *src);
 internal RVS_Result rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage message_spec, RVS_MessageID *reply_id_out);
 
 

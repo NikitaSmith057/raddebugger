@@ -15,14 +15,6 @@ rvs_queue_message_list_push_node(RVS_QueueMessageList *l, RVS_QueueMessage *r)
 }
 
 internal RVS_QueueMessage *
-rvs_queue_message_list_push(Arena *arena, RVS_QueueMessageList *l)
-{
-  RVS_QueueMessage *r = push_array(arena, RVS_QueueMessage, 1);
-  rvs_queue_message_list_push_node(l, r);
-  return r;
-}
-
-internal RVS_QueueMessage *
 rvs_queue_message_list_pop(RVS_QueueMessageList *l)
 {
   if (l->count) {
@@ -56,16 +48,21 @@ rvs_queue_release(RVS_Queue *q)
 internal RVS_QueueMessage *
 rvs_queue_alloc_message(RVS_Queue *q)
 {
-  RVS_QueueMessage *r = r = rvs_queue_message_list_pop(&q->free_list);
+  mutex_take(q->mutex);
+
+  RVS_QueueMessage *r = rvs_queue_message_list_pop(&q->free_list);
   if (r) {
     CondVar complete_cv = r->complete_cv;
     MemoryZero(r, q->message_size);
     r->complete_cv = complete_cv;
   } else {
-    r = arena_push(q->arena, q->message_size, Max(8, q->message_size), 1);
+    r = arena_push(q->arena, q->message_size, q->message_align, 1);
     r->complete_cv = cond_var_alloc();
   }
+  r->queue    = q;
   r->reply_id = ins_atomic_u64_inc_eval(&q->next_reply_id);
+
+  mutex_drop(q->mutex);
   return r;
 }
 
@@ -79,18 +76,24 @@ rvs_queue_message_release(RVS_QueueMessage *r)
 internal void
 rvs_queue_recycle(RVS_Queue *q, RVS_QueueMessage *r)
 {
-  MutexScope(r->queue->mutex) {
-    rvs_queue_message_list_push_node(&r->queue->free_list, r);
-  }
+  AssertAlways(r->queue == q);
+  mutex_take(q->mutex);
+  rvs_queue_message_list_push_node(&q->free_list, r);
+  mutex_drop(q->mutex);
 }
 
 internal RVS_Result
 rvs_queue_push(RVS_Queue *q, RVS_QueueMessage *r)
 {
+  AssertAlways(r->queue == q);
+
+  mutex_take(q->mutex);
   AssertAlways(r->status == RVS_QueueMessageStatus_Null);
   r->status = RVS_QueueMessageStatus_Pending;
   rvs_queue_message_list_push_node(&q->messages, r);
   cond_var_broadcast(q->available_cv);
+  mutex_drop(q->mutex);
+
   return RVS_Result_Ok;
 }
 
@@ -98,46 +101,71 @@ internal RVS_QueueMessage *
 rvs_queue_pop(RVS_Queue *q, U64 wait_us)
 {
   RVS_QueueMessage *result = 0;
-  U64 endt_us = now_time_us() + wait_us;
-  if (q->messages.count == 0) {
-    if (cond_var_wait(q->available_cv, q->mutex, endt_us)) {
-      result = rvs_queue_message_list_pop(&q->messages);
+  U64 endt_us = max_U64;
+  if (wait_us != max_U64) {
+    U64 now_us = now_time_us();
+    endt_us = now_us + Min(wait_us, max_U64 - now_us);
+  }
+
+  mutex_take(q->mutex);
+  while (q->messages.count == 0) {
+    if ( ! cond_var_wait(q->available_cv, q->mutex, endt_us)) {
+      break;
     }
   }
+  result = rvs_queue_message_list_pop(&q->messages);
+  mutex_drop(q->mutex);
+
   return result;
 }
 
 internal B32
-rvs_queue_wait_for_message_to_complete(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us)
+rvs_queue_wait_for(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us)
 {
-  for (U64 endt_us = now_time_us() + wait_us; r->status == RVS_QueueMessageStatus_Pending; ) {
-    if (wait_us != max_U64 && now_time_us() >= endt_us) {
-      rvs_queue_complete(q, r, RVS_Result_Timeout);
+  U64 endt_us = max_U64;
+  if (wait_us != max_U64) {
+    U64 now_us = now_time_us();
+    endt_us = now_us + Min(wait_us, max_U64 - now_us);
+  }
+
+  mutex_take(q->mutex);
+  while (r->status == RVS_QueueMessageStatus_Pending) {
+    if ( ! cond_var_wait(r->complete_cv, q->mutex, endt_us)) {
+      mutex_drop(q->mutex);
       return 0;
     }
-    cond_var_wait(r->complete_cv, q->mutex, endt_us);
   }
-  return 1;
+  mutex_drop(q->mutex);
+  return r->status == RVS_QueueMessageStatus_Complete;
 }
 
 internal RVS_Result
 rvs_queue_send_message(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us)
 {
-  B32 is_ok = rvs_queue_push(q, r);
-  if (is_ok) {
-    is_ok = rvs_queue_wait(q, r, wait_us);
+  RVS_Result result = rvs_queue_push(q, r);
+  if (result != RVS_Result_Ok) {
+    return result;
   }
-  return is_ok;
+  if ( ! rvs_queue_wait_for(q, r, wait_us)) {
+    return RVS_Result_Timeout;
+  }
+  return r->result;
 }
 
 internal B32
 rvs_queue_complete(RVS_Queue *q, RVS_QueueMessage *r, RVS_Result result)
 {
   B32 is_completed = 0;
-  MutexScope(q->mutex) {
+
+  mutex_take(q->mutex);
+  if (r->status == RVS_QueueMessageStatus_Pending) {
     r->result = result;
     r->status = RVS_QueueMessageStatus_Complete;
     cond_var_broadcast(r->complete_cv);
+    is_completed = 1;
   }
+  mutex_drop(q->mutex);
+
+  return is_completed;
 }
 
