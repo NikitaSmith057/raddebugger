@@ -12,7 +12,6 @@ typedef enum
 {
   RVS_DemonMessage_Null,
   RVS_DemonMessage_Launch,
-  RVS_DemonMessage_LaunchAck,
   RVS_DemonMessage_Run,
   RVS_DemonMessage_Halt,
   RVS_DemonMessage_Terminate,
@@ -23,13 +22,10 @@ typedef struct
 {
   RVS_QueueMessage     base;
   RVS_DemonMessageType type;
-  RVS_MessageID        reply_to; // engine request that owns this completion
+  RVS_MessageID        request_id; // engine request that owns this completion
   struct {
     ProcessLaunchParams params;   // process launch params
   } launch;
-  struct {
-    U32 pid;
-  } launch_ack;
   struct {
     // processes for DEMON to schedule for a run
     DMN_Handle *process_handles;
@@ -45,14 +41,57 @@ typedef struct
   } terminate;
 } RVS_DemonMessage;
 
-typedef void (RVS_DemonReplyCallback)(RVS_MessageID reply_id, RVS_DemonMessage *reply, void *ud);
+typedef enum
+{
+  RVS_DemonReplyKind_Null,
+  RVS_DemonReplyKind_Launch,
+  RVS_DemonReplyKind_Run,
+  RVS_DemonReplyKind_Halt,
+  RVS_DemonReplyKind_Terminate,
+} RVS_DemonReplyKind;
 
-RVS_Result rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out);
+typedef struct
+{
+  RVS_DemonReplyKind kind;
+  union {
+    struct {
+      U32 pid;
+    } launch;
+  };
+} RVS_DemonReply;
+
+typedef enum
+{
+  RVS_DemonOutputKind_Null,
+  RVS_DemonOutputKind_Reply,
+  RVS_DemonOutputKind_EventBatch,
+} RVS_DemonOutputKind;
+
+typedef struct
+{
+  RVS_DemonOutputKind kind;
+  RVS_MessageID       request_id;
+  union {
+    struct {
+      RVS_Result      result;
+      RVS_DemonReply  reply;
+    } reply;
+    struct {
+      DMN_EventList events;
+    } event_batch;
+  };
+} RVS_DemonOutput;
+
+typedef void (RVS_DemonOutputCallback)(RVS_Demon *demon, RVS_DemonOutput *output, void *ud);
+
+RVS_Result rvs_demon_init(void *output_ud, RVS_DemonOutputCallback *output_callback, RVS_Demon **dmn_out);
 RVS_Result rvs_demon_shutdown(RVS_Demon *dmn);
 
 internal RVS_Result rvs_demon_alloc       (void);
 internal RVS_Result rvs_demon_release     (void);
 internal void       rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *src);
+internal void       rvs_demon_event_copy  (Arena *arena, DMN_Event *dst, DMN_Event *src);
+internal void       rvs_demon_output_copy (Arena *arena, RVS_DemonOutput *dst, RVS_DemonOutput *src);
 internal RVS_Result rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage message_spec, RVS_MessageID *reply_id_out);
 
 

@@ -12,7 +12,7 @@ typedef enum
 {
   RVS_EngineMessageType_Null,
   RVS_EngineMessageType_Launch,
-  RVS_EngineMessageType_DemonReply,
+  RVS_EngineMessageType_DemonOutput,
   RVS_EngineMessageType_Shutdown,
 } RVS_EngineMessageType;
 
@@ -25,10 +25,10 @@ typedef struct
       ProcessLaunchParams params;
     } launch;
     struct {
-      RVS_DemonMessage *message;
+      RVS_Demon        *source;
+      RVS_DemonOutput  *output;
       ArenaNode        *arena_node;
-      RVS_MessageID     reply_id;
-    } demon_reply;
+    } demon_output;
   };
 } RVS_EngineMessage;
 
@@ -68,21 +68,13 @@ struct RVS_Program
   U32            pid;
 };
 
-typedef enum
-{
-  RVS_EventKind_Null,
-} RVS_EventKind;
-
-typedef struct
-{
-  RVS_EventKind kind;
-} RVS_Event;
+typedef DMN_Event RVS_Event;
 
 RVS_Result rvs_engine_init(RVS_Engine **engine_out);
 void       rvs_engine_shutdown(RVS_Engine *engine);
 
 RVS_Result rvs_engine_launch_async(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_MessageID *reply_id_out);
-RVS_Result rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID reply_id, U64 wait_us, RVS_Reply *reply_out);
 RVS_Result rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, U64 wait_us, U32 *pid_out);
+RVS_Result rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID reply_id, U64 wait_us, RVS_Reply *reply_out);
+RVS_Result rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);
 
-RVS_Result rvs_engine_wait_for_event(RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);

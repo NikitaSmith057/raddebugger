@@ -10,8 +10,8 @@ typedef struct RVS_Demon
   RVS_Queue              *queue;
   RVS_ThreadState         state;
   Thread                  worker;
-  RVS_DemonReplyCallback *reply_callback;
-  void                   *reply_ud;
+  RVS_DemonOutputCallback *output_callback;
+  void                    *output_ud;
 } RVS_Demon;
 
 global RVS_Demon g_rvs_demon;
@@ -20,7 +20,7 @@ internal void rvs_demon_worker(void *user_data);
 internal RVS_Result rvs_demon_push_message(RVS_Demon *dmn, RVS_DemonMessage *spec, RVS_MessageID *reply_id_out);
 
 RVS_Result
-rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out)
+rvs_demon_init(void *output_ud, RVS_DemonOutputCallback *output_callback, RVS_Demon **dmn_out)
 {
   RVS_Demon *dmn = &g_rvs_demon;
   
@@ -31,8 +31,8 @@ rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon
     dmn->arena          = arena_alloc();
     dmn->message_arena  = arena_alloc();
     dmn->mutex          = mutex_alloc();
-    dmn->reply_callback = reply_callback;
-    dmn->reply_ud       = reply_ud;
+    dmn->output_callback = output_callback;
+    dmn->output_ud       = output_ud;
     dmn->queue          = rvs_queue_alloc(dmn->arena, sizeof(RVS_DemonMessage), AlignOf(RVS_DemonMessage));
     dmn->worker         = thread_launch(rvs_demon_worker, dmn);
     if ( ! MemoryIsZeroStruct(&dmn->worker)) {
@@ -104,8 +104,6 @@ rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *sr
   case RVS_DemonMessage_Launch: {
     dst->launch.params = *process_launch_params_copy(arena, &src->launch.params);
   } break;
-  case RVS_DemonMessage_LaunchAck: {
-  } break;
   case RVS_DemonMessage_Run: {
     dst->run.process_handles = push_array(arena, DMN_Handle, src->run.process_count);
     dst->run.process_count   = src->run.process_count;
@@ -118,6 +116,37 @@ rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *sr
     dst->terminate.process_count   = src->terminate.process_count;
   } break;
   case RVS_DemonMessage_Shutdown: {
+  } break;
+  default: { InvalidPath; } break;
+  }
+}
+
+internal void
+rvs_demon_event_copy(Arena *arena, DMN_Event *dst, DMN_Event *src)
+{
+  *dst = *src;
+  dst->string = str8_copy(arena, src->string);
+  if (src->module_info) {
+    dst->module_info = push_array(arena, DMN_ModuleInfo, 1);
+    *dst->module_info = *src->module_info;
+    dst->module_info->module_path     = str8_copy(arena, src->module_info->module_path);
+    dst->module_info->debug_info_path = str8_copy(arena, src->module_info->debug_info_path);
+  }
+}
+
+internal void
+rvs_demon_output_copy(Arena *arena, RVS_DemonOutput *dst, RVS_DemonOutput *src)
+{
+  *dst = *src;
+  switch (src->kind) {
+  case RVS_DemonOutputKind_Reply: {
+  } break;
+  case RVS_DemonOutputKind_EventBatch: {
+    dst->event_batch.events = (DMN_EventList){0};
+    for EachNode(n, DMN_EventNode, src->event_batch.events.first) {
+      DMN_Event *event = dmn_event_list_push(arena, &dst->event_batch.events);
+      rvs_demon_event_copy(arena, event, &n->v);
+    }
   } break;
   default: { InvalidPath; } break;
   }
@@ -176,12 +205,15 @@ rvs_demon_worker(void *user_data)
     RVS_DemonMessage *message = (RVS_DemonMessage *)rvs_queue_pop(dmn->queue, max_U64);
 
     // process the message
-    RVS_DemonMessage reply = {0};
+    RVS_DemonOutput output = {0};
     B32 should_exit = 0;
     switch (message->type) {
     case RVS_DemonMessage_Launch: {
-      reply.type           = RVS_DemonMessage_LaunchAck;
-      reply.launch_ack.pid = dmn_ctrl_launch(ctrl_ctx, &message->launch.params);
+      output.kind                 = RVS_DemonOutputKind_Reply;
+      output.request_id           = message->request_id;
+      output.reply.result         = RVS_Result_Ok;
+      output.reply.reply.kind     = RVS_DemonReplyKind_Launch;
+      output.reply.reply.launch.pid = dmn_ctrl_launch(ctrl_ctx, &message->launch.params);
     } break;
     case RVS_DemonMessage_Shutdown: {
       should_exit = 1;
@@ -189,10 +221,9 @@ rvs_demon_worker(void *user_data)
     default: { InvalidPath; } break;
     }
 
-    // reply to the engine thread
-    if (reply.type != RVS_DemonMessage_Null) {
-      RVS_MessageID reply_id = message->reply_to ? message->reply_to : message->base.reply_id;
-      dmn->reply_callback(reply_id, &reply, dmn->reply_ud);
+    // Publish completed commands and event batches through one output callback.
+    if (output.kind != RVS_DemonOutputKind_Null) {
+      dmn->output_callback(dmn, &output, dmn->output_ud);
     }
     rvs_queue_recycle(dmn->queue, &message->base);
     if (should_exit) {
