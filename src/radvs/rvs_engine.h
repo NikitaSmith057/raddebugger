@@ -18,8 +18,9 @@ typedef enum
 
 typedef struct
 {
-  RVS_QueueMessage       base;
+  RVS_QueueNode          base;
   RVS_EngineMessageType  type;
+  RVS_MessageID          request_id;
   union {
     struct {
       ProcessLaunchParams params;

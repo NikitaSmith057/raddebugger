@@ -1,37 +1,25 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-//
-// thread-safe queue for trasnfering messages between the workers
-//
-
 #include "rvs_protocol.h"
 
 internal void
-rvs_queue_message_list_push_node(RVS_QueueMessageList *l, RVS_QueueMessage *r)
+rvs_queue_node_list_push(RVS_QueueNodeList *list, RVS_QueueNode *node)
 {
-  SLLQueuePush(l->first, l->last, r);
-  l->count += 1;
+  SLLQueuePush(list->first, list->last, node);
+  list->count += 1;
 }
 
-internal RVS_QueueMessage *
-rvs_queue_message_list_push(Arena *arena, RVS_QueueMessageList *l)
+internal RVS_QueueNode *
+rvs_queue_node_list_pop(RVS_QueueNodeList *list)
 {
-  RVS_QueueMessage *r = push_array(arena, RVS_QueueMessage, 1);
-  rvs_queue_message_list_push_node(l, r);
-  return r;
-}
-
-internal RVS_QueueMessage *
-rvs_queue_message_list_pop(RVS_QueueMessageList *l)
-{
-  if (l->count) {
-    RVS_QueueMessage *result = l->first;
-    l->count -= 1;
-    SLLQueuePop(l->first, l->last);
-    return result;
+  RVS_QueueNode *result = 0;
+  if (list->count != 0) {
+    result = list->first;
+    list->count -= 1;
+    SLLQueuePop(list->first, list->last);
   }
-  return 0;
+  return result;
 }
 
 internal RVS_Queue *
@@ -53,91 +41,55 @@ rvs_queue_release(RVS_Queue *q)
   mutex_release(q->mutex);
 }
 
-internal RVS_QueueMessage *
-rvs_queue_alloc_message(RVS_Queue *q)
+internal RVS_QueueNode *
+rvs_queue_alloc_item(RVS_Queue *q)
 {
-  RVS_QueueMessage *r = r = rvs_queue_message_list_pop(&q->free_list);
-  if (r) {
-    CondVar complete_cv = r->complete_cv;
-    MemoryZero(r, q->message_size);
-    r->complete_cv = complete_cv;
+  mutex_take(q->mutex);
+  RVS_QueueNode *node = rvs_queue_node_list_pop(&q->free_list);
+  if (node) {
+    MemoryZero(node, q->message_size);
   } else {
-    r = arena_push(q->arena, q->message_size, Max(8, q->message_size), 1);
-    r->complete_cv = cond_var_alloc();
+    node = arena_push(q->arena, q->message_size, q->message_align, 1);
   }
-  r->reply_id = ins_atomic_u64_inc_eval(&q->next_reply_id);
-  return r;
+  mutex_drop(q->mutex);
+  return node;
 }
 
 internal void
-rvs_queue_message_release(RVS_QueueMessage *r)
+rvs_queue_recycle(RVS_Queue *q, RVS_QueueNode *node)
 {
-  cond_var_release(r->complete_cv);
-  MemoryZeroStruct(r);
-}
-
-internal void
-rvs_queue_recycle(RVS_Queue *q, RVS_QueueMessage *r)
-{
-  MutexScope(r->queue->mutex) {
-    rvs_queue_message_list_push_node(&r->queue->free_list, r);
-  }
+  mutex_take(q->mutex);
+  rvs_queue_node_list_push(&q->free_list, node);
+  mutex_drop(q->mutex);
 }
 
 internal RVS_Result
-rvs_queue_push(RVS_Queue *q, RVS_QueueMessage *r)
+rvs_queue_push(RVS_Queue *q, RVS_QueueNode *node)
 {
-  AssertAlways(r->status == RVS_QueueMessageStatus_Null);
-  r->status = RVS_QueueMessageStatus_Pending;
-  rvs_queue_message_list_push_node(&q->messages, r);
+  mutex_take(q->mutex);
+  rvs_queue_node_list_push(&q->messages, node);
   cond_var_broadcast(q->available_cv);
+  mutex_drop(q->mutex);
   return RVS_Result_Ok;
 }
 
-internal RVS_QueueMessage *
+internal RVS_QueueNode *
 rvs_queue_pop(RVS_Queue *q, U64 wait_us)
 {
-  RVS_QueueMessage *result = 0;
-  U64 endt_us = wait_us != max_U64 ? now_time_us() + wait_us : wait_us;
-  if (q->messages.count == 0) {
-    if (cond_var_wait(q->available_cv, q->mutex, endt_us)) {
-      result = rvs_queue_message_list_pop(&q->messages);
+  U64 endt_us = max_U64;
+  if (wait_us != max_U64) {
+    U64 now_us = now_time_us();
+    endt_us = now_us + Min(wait_us, max_U64 - now_us);
+  }
+
+  mutex_take(q->mutex);
+  while (q->messages.count == 0) {
+    if ( ! cond_var_wait(q->available_cv, q->mutex, endt_us)) {
+      break;
     }
   }
-  return result;
-}
+  RVS_QueueNode *node = rvs_queue_node_list_pop(&q->messages);
+  mutex_drop(q->mutex);
 
-internal B32
-rvs_queue_wait_for_message_to_complete(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us)
-{
-  for (U64 endt_us = now_time_us() + wait_us; r->status == RVS_QueueMessageStatus_Pending; ) {
-    if (wait_us != max_U64 && now_time_us() >= endt_us) {
-      rvs_queue_complete(q, r, RVS_Result_Timeout);
-      return 0;
-    }
-    cond_var_wait(r->complete_cv, q->mutex, endt_us);
-  }
-  return 1;
+  return node;
 }
-
-internal RVS_Result
-rvs_queue_send_message(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us)
-{
-  B32 is_ok = rvs_queue_push(q, r);
-  if (is_ok) {
-    is_ok = rvs_queue_wait(q, r, wait_us);
-  }
-  return is_ok;
-}
-
-internal B32
-rvs_queue_complete(RVS_Queue *q, RVS_QueueMessage *r, RVS_Result result)
-{
-  B32 is_completed = 0;
-  MutexScope(q->mutex) {
-    r->result = result;
-    r->status = RVS_QueueMessageStatus_Complete;
-    cond_var_broadcast(r->complete_cv);
-  }
-}
-
