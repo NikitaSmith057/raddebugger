@@ -147,4 +147,7 @@ entry_point(CmdLine *cmdline)
 
     scratch_end(scratch);
   }
+
+  rvs_engine_shutdown(engine);
+  mutex_release(g_rci.output_mutex);
 }

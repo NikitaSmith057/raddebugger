@@ -13,6 +13,7 @@ typedef enum
   RVS_EngineMessageType_Null,
   RVS_EngineMessageType_Launch,
   RVS_EngineMessageType_DemonReply,
+  RVS_EngineMessageType_Shutdown,
 } RVS_EngineMessageType;
 
 typedef struct
@@ -24,8 +25,9 @@ typedef struct
       ProcessLaunchParams params;
     } launch;
     struct {
-      RVS_DemonMessage message;
-      RVS_MessageID    reply_id;
+      RVS_DemonMessage *message;
+      ArenaNode        *arena_node;
+      RVS_MessageID     reply_id;
     } demon_reply;
   };
 } RVS_EngineMessage;

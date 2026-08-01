@@ -45,10 +45,10 @@ typedef struct
   } terminate;
 } RVS_DemonMessage;
 
-typedef RVS_MessageID (RVS_DemonReplyCallback)(RVS_MessageID reply_id, RVS_DemonMessage *reply, void *ud);
+typedef void (RVS_DemonReplyCallback)(RVS_MessageID reply_id, RVS_DemonMessage *reply, void *ud);
 
 RVS_Result rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out);
-RVS_Result rvs_demon_shutdown(void);
+RVS_Result rvs_demon_shutdown(RVS_Demon *dmn);
 
 internal RVS_Result rvs_demon_alloc       (void);
 internal RVS_Result rvs_demon_release     (void);
