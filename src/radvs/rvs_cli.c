@@ -120,27 +120,26 @@ entry_point(CmdLine *cmdline)
       }
 
       String8       exe_path        = input_split.first->next->string;
-      RVS_MessageID launch_reply_id = 0;
-      RVS_Result    launch_result   = rvs_engine_launch_async(engine, exe_path, str8_zero(), &launch_reply_id);
+      RVS_MessageID launch_request_id = 0;
+      RVS_Result    launch_result     = rvs_engine_launch_async(engine, exe_path, str8_zero(), &launch_request_id);
 
       if (launch_result != RVS_Result_Ok) {
         rci_fprintf(stdout, "launch: failed to launch program %S, error code %u\n", exe_path, launch_result);
         continue;
       }
 
-
-      RVS_Reply reply = {0};
-      RVS_Result reply_result = rvs_engine_wait_for_reply(scratch.arena, engine, launch_reply_id, max_U64, &reply);
+      RVS_EngineReply reply        = {0};
+      RVS_Result      reply_result = rvs_engine_wait_for_reply(scratch.arena, engine, launch_request_id, max_U64, &reply);
       if (reply_result != RVS_Result_Ok) {
         rci_fprintf(stdout, "launch: request failed, error code %u\n", reply_result);
         continue;
       }
-      if (reply.reply_id != launch_reply_id || reply.kind != RVS_ReplyKind_LaunchAck) {
+      if (reply.request_id != launch_request_id || reply.kind != RVS_EngineReplyKind_Launch) {
         rci_fprintf(stdout, "launch: received an invalid completion\n");
         continue;
       }
 
-      rci_fprintf(stdout, "launch: program %llu started with pid %u\n", reply.launch_ack.program_id, reply.launch_ack.pid);
+      rci_fprintf(stdout, "launch: program %llu started with pid %u\n", reply.launch.program_id, reply.launch.pid);
     } else {
       rci_fprintf(stdout, "unknown command: %S", cmd);
     }

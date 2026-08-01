@@ -21,11 +21,11 @@ struct RVS_Engine
   RVS_Program   *first_program;
   RVS_Program   *last_program;
 
-  CondVar          reply_cv;
-  Mutex            reply_mutex;
-  RVS_EngineReply *reply_first;
-  RVS_EngineReply *reply_last;
-  RVS_EngineReply *reply_free_list;
+  CondVar              reply_cv;
+  Mutex                reply_mutex;
+  RVS_EngineReplyNode *reply_first;
+  RVS_EngineReplyNode *reply_last;
+  RVS_EngineReplyNode *reply_free_list;
 
   // DEMON
   RVS_Demon *demon;
@@ -34,6 +34,9 @@ struct RVS_Engine
   ArenaNode *demon_output_arena_active_list;
   ArenaNode *demon_output_arena_free_list;
 };
+
+internal RVS_EngineReplyNode *rvs_engine_reply_alloc(RVS_Engine *engine);
+internal void                 rvs_engine_reply_node_recycle(RVS_Engine *engine, RVS_EngineReplyNode *node);
 
 internal void
 rvs_engine_command_copy(Arena *arena, RVS_EngineCommand *dst, RVS_EngineCommand *src)
@@ -46,6 +49,71 @@ rvs_engine_command_copy(Arena *arena, RVS_EngineCommand *dst, RVS_EngineCommand 
   } break;
   default: { InvalidPath; } break;
   }
+}
+
+internal void
+rvs_engine_message_copy(Arena *arena, RVS_EngineMessage *dst, RVS_EngineMessage *src)
+{
+  RVS_QueueNode base = dst->base;
+  *dst = *src;
+  dst->base = base;
+
+  switch (src->type) {
+  case RVS_EngineMessageType_Command: {
+    rvs_engine_command_copy(arena, &dst->command, &src->command);
+  } break;
+  case RVS_EngineMessageType_DemonOutput: {
+  } break;
+  case RVS_EngineMessageType_Shutdown: {
+  } break;
+  default: { InvalidPath; } break;
+  }
+}
+
+internal RVS_Result
+rvs_engine_send_message_locked(RVS_Engine *engine, RVS_EngineMessage *spec)
+{
+  RVS_EngineMessage *message = rvs_queue_alloc_struct(engine->queue, RVS_EngineMessage);
+  rvs_engine_message_copy(engine->arena, message, spec);
+  return rvs_queue_push(engine->queue, &message->base);
+}
+
+internal RVS_Result
+rvs_engine_send_message(RVS_Engine *engine, RVS_EngineMessage *spec)
+{
+  mutex_take(engine->message_mutex);
+  RVS_Result result = rvs_engine_send_message_locked(engine, spec);
+  mutex_drop(engine->message_mutex);
+  return result;
+}
+
+RVS_Result
+rvs_engine_send_command(RVS_Engine *engine, RVS_EngineCommand spec, RVS_MessageID *request_id_out)
+{
+  RVS_Result result = RVS_Result_Error;
+  mutex_take(engine->message_mutex);
+
+  if (ins_atomic_u32_eval(&engine->state) == RVS_ThreadState_Running) {
+    RVS_EngineReplyNode *reply      = rvs_engine_reply_alloc(engine);
+    RVS_MessageID        request_id = reply->reply.request_id;
+
+    RVS_EngineMessage message = {
+      .type    = RVS_EngineMessageType_Command,
+      .command = spec,
+    };
+    message.command.request_id = request_id;
+
+    result = rvs_engine_send_message_locked(engine, &message);
+
+    if (result == RVS_Result_Ok) {
+      *request_id_out = request_id;
+    } else {
+      rvs_engine_reply_node_recycle(engine, reply);
+    }
+  }
+
+  mutex_drop(engine->message_mutex);
+  return result;
 }
 
 internal void
@@ -85,15 +153,15 @@ rvs_engine_push_demon_output(RVS_Engine *engine, RVS_Demon *source, RVS_DemonOut
   rvs_demon_output_copy(arena_node->v, output_copy, output);
   SLLStackPush(engine->demon_output_arena_active_list, arena_node);
 
-  // Queue allocation also uses engine->arena, so serialize it with API requests.
-  mutex_take(engine->message_mutex);
-  RVS_EngineMessage *message = rvs_queue_alloc_struct(engine->queue, RVS_EngineMessage);
-  message->type                    = RVS_EngineMessageType_DemonOutput;
-  message->demon_output.source     = source;
-  message->demon_output.output     = output_copy;
-  message->demon_output.arena_node = arena_node;
-  RVS_Result result = rvs_queue_push(engine->queue, &message->base);
-  mutex_drop(engine->message_mutex);
+  RVS_EngineMessage message = {
+    .type = RVS_EngineMessageType_DemonOutput,
+    .demon_output = {
+      .source     = source,
+      .output     = output_copy,
+      .arena_node = arena_node,
+    },
+  };
+  RVS_Result result = rvs_engine_send_message(engine, &message);
 
   // on failure, put resources on the free lists
   if (result != RVS_Result_Ok) {
@@ -118,48 +186,52 @@ rvs_engine_push_event(RVS_Engine *engine, RVS_Event *event)
   return result;
 }
 
-internal RVS_Result
-rvs_engine_push_shutdown(RVS_Engine *engine)
+internal RVS_EngineReplyNode *
+rvs_engine_reply_alloc_locked(RVS_Engine *engine)
 {
-  mutex_take(engine->message_mutex);
-  RVS_EngineMessage *message = rvs_queue_alloc_struct(engine->queue, RVS_EngineMessage);
-  message->type = RVS_EngineMessageType_Shutdown;
-  RVS_Result result = rvs_queue_push(engine->queue, &message->base);
-  mutex_drop(engine->message_mutex);
-  return result;
-}
-
-internal RVS_EngineReply *
-rvs_engine_reply_alloc(RVS_Engine *engine)
-{
-  RVS_EngineReply *reply = engine->reply_free_list;
+  RVS_EngineReplyNode *reply = engine->reply_free_list;
   if (reply) {
     SLLStackPop(engine->reply_free_list);
     MemoryZeroStruct(reply);
   } else {
-    reply = push_array(engine->arena, RVS_EngineReply, 1);
+    reply = push_array(engine->arena, RVS_EngineReplyNode, 1);
   }
-  reply->reply.reply_id = ins_atomic_u64_inc_eval(&engine->next_request_id);
-  reply->reply.result   = RVS_Result_Null;
+  reply->reply.request_id = ins_atomic_u64_inc_eval(&engine->next_request_id);
+  reply->reply.result     = RVS_Result_Null;
   DLLPushBack(engine->reply_first, engine->reply_last, reply);
   return reply;
 }
 
-internal RVS_EngineReply *
-rvs_engine_reply_alloc_locked(RVS_Engine *engine)
+internal RVS_EngineReplyNode *
+rvs_engine_reply_alloc(RVS_Engine *engine)
 {
   mutex_take(engine->reply_mutex);
-  RVS_EngineReply *reply = rvs_engine_reply_alloc(engine);
+  RVS_EngineReplyNode *reply = rvs_engine_reply_alloc_locked(engine);
   mutex_drop(engine->reply_mutex);
   return reply;
 }
 
 internal void
-rvs_engine_complete_reply(RVS_Engine *engine, RVS_Reply reply)
+rvs_engine_reply_node_recycle_locked(RVS_Engine *engine, RVS_EngineReplyNode *node)
+{
+  DLLRemove(engine->reply_first, engine->reply_last, node);
+  SLLStackPush(engine->reply_free_list, node);
+}
+
+internal void
+rvs_engine_reply_node_recycle(RVS_Engine *engine, RVS_EngineReplyNode *node)
 {
   mutex_take(engine->reply_mutex);
-  for EachNode(n, RVS_EngineReply, engine->reply_first) {
-    if (n->reply.reply_id == reply.reply_id) {
+  rvs_engine_reply_node_recycle_locked(engine, node);
+  mutex_drop(engine->reply_mutex);
+}
+
+internal void
+rvs_engine_complete_reply(RVS_Engine *engine, RVS_EngineReply reply)
+{
+  mutex_take(engine->reply_mutex);
+  for EachNode(n, RVS_EngineReplyNode, engine->reply_first) {
+    if (n->reply.request_id == reply.request_id) {
       n->reply = reply;
       cond_var_broadcast(engine->reply_cv);
       break;
@@ -196,10 +268,10 @@ rvs_engine_worker(void *user_data)
 
         // failed to send a message to the DEMON thread -- relpy ack with the error code
         if (result != RVS_Result_Ok) {
-          rvs_engine_complete_reply(engine, (RVS_Reply){
-            .reply_id = message->command.request_id,
+          rvs_engine_complete_reply(engine, (RVS_EngineReply){
+            .request_id = message->command.request_id,
             .result   = result,
-            .kind     = RVS_ReplyKind_LaunchAck,
+            .kind     = RVS_EngineReplyKind_Launch,
           });
         }
       } break;
@@ -213,10 +285,10 @@ rvs_engine_worker(void *user_data)
       case RVS_DemonOutputKind_Reply: {
         switch (output->reply.reply.kind) {
         case RVS_DemonReplyKind_Launch: {
-          RVS_Reply reply = {
-            .reply_id = output->request_id,
+          RVS_EngineReply reply = {
+            .request_id = output->request_id,
             .result   = output->reply.result,
-            .kind     = RVS_ReplyKind_LaunchAck,
+            .kind     = RVS_EngineReplyKind_Launch,
           };
 
           if (reply.result == RVS_Result_Ok) {
@@ -226,8 +298,8 @@ rvs_engine_worker(void *user_data)
             prog->pid   = output->reply.reply.launch.pid;
             SLLQueuePush(engine->first_program, engine->last_program, prog);
 
-            reply.launch_ack.program_id = prog->id;
-            reply.launch_ack.pid        = prog->pid;
+            reply.launch.program_id = prog->id;
+            reply.launch.pid        = prog->pid;
           }
 
           rvs_engine_complete_reply(engine, reply);
@@ -318,7 +390,8 @@ rvs_engine_shutdown(RVS_Engine *engine)
   AssertAlways(rvs_demon_shutdown(engine->demon) == RVS_Result_Ok);
 
   // shutdown the engine thread
-  AssertAlways(rvs_engine_push_shutdown(engine) == RVS_Result_Ok);
+  RVS_EngineMessage shutdown = { .type = RVS_EngineMessageType_Shutdown };
+  AssertAlways(rvs_engine_send_message(engine, &shutdown) == RVS_Result_Ok);
   thread_join(engine->thread, max_U64);
 
   // release arenas for DEMON outputs after both workers have drained them
@@ -344,41 +417,8 @@ rvs_engine_shutdown(RVS_Engine *engine)
   MemoryZeroStruct(engine);
 }
 
-internal RVS_Result
-rvs_engine_send_command(RVS_Engine *engine, RVS_EngineCommand spec, RVS_MessageID *reply_id_out)
-{
-  RVS_Result result = RVS_Result_Error;
-  mutex_take(engine->message_mutex);
-
-  if (ins_atomic_u32_eval(&engine->state) == RVS_ThreadState_Running) {
-    RVS_EngineReply *reply = rvs_engine_reply_alloc_locked(engine);
-    RVS_MessageID reply_id = reply->reply.reply_id;
-
-    RVS_EngineMessage *message = rvs_queue_alloc_struct(engine->queue, RVS_EngineMessage);
-    message->type = RVS_EngineMessageType_Command;
-    rvs_engine_command_copy(engine->arena, &message->command, &spec);
-    message->command.request_id = reply_id;
-
-    result = rvs_queue_push(engine->queue, &message->base);
-    
-    if (result == RVS_Result_Ok) {
-      if (reply_id_out) {
-        *reply_id_out = reply_id;
-      }
-    } else {
-      mutex_take(engine->reply_mutex);
-      DLLRemove(engine->reply_first, engine->reply_last, reply);
-      SLLStackPush(engine->reply_free_list, reply);
-      mutex_drop(engine->reply_mutex);
-    }
-  }
-
-  mutex_drop(engine->message_mutex);
-  return result;
-}
-
 RVS_Result
-rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID reply_id, U64 wait_us, RVS_Reply *reply_out)
+rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID request_id, U64 wait_us, RVS_EngineReply *reply_out)
 {
   (void)arena;
 
@@ -390,9 +430,9 @@ rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID reply_
 
   mutex_take(engine->reply_mutex);
 
-  RVS_EngineReply *reply = 0;
-  for EachNode(n, RVS_EngineReply, engine->reply_first) {
-    if (n->reply.reply_id == reply_id) {
+  RVS_EngineReplyNode *reply = 0;
+  for EachNode(n, RVS_EngineReplyNode, engine->reply_first) {
+    if (n->reply.request_id == request_id) {
       reply = n;
       break;
     }
@@ -413,15 +453,14 @@ rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID reply_
   if (reply_out) {
     *reply_out = reply->reply;
   }
-  DLLRemove(engine->reply_first, engine->reply_last, reply);
-  SLLStackPush(engine->reply_free_list, reply);
+  rvs_engine_reply_node_recycle_locked(engine, reply);
   mutex_drop(engine->reply_mutex);
 
   return result;
 }
 
 RVS_Result
-rvs_engine_launch_async(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_MessageID *reply_id_out)
+rvs_engine_launch_async(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_MessageID *request_id_out)
 {
   Temp scratch = scratch_begin(0, 0);
   String8List cmd_line = str8_split_by_string_chars(scratch.arena, cmdl, str8_lit(" "), 0);
@@ -429,7 +468,7 @@ rvs_engine_launch_async(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_Mess
     .kind   = RVS_EngineCommandKind_Launch,
     .launch = { .params = { .cmd_line = cmd_line, .path = wdir } },
   };
-  RVS_Result result = rvs_engine_send_command(engine, command, reply_id_out);
+  RVS_Result result = rvs_engine_send_command(engine, command, request_id_out);
   scratch_end(scratch);
   return result;
 }
@@ -438,13 +477,13 @@ RVS_Result
 rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, U64 wait_us, U32 *pid_out)
 {
   Temp scratch = scratch_begin(0, 0);
-  RVS_MessageID reply_id = 0;
-  RVS_Result    result   = rvs_engine_launch_async(engine, cmdl, wdir, &reply_id);
+  RVS_MessageID request_id = 0;
+  RVS_Result    result     = rvs_engine_launch_async(engine, cmdl, wdir, &request_id);
   if (result == RVS_Result_Ok) {
-    RVS_Reply reply = {0};
-    result = rvs_engine_wait_for_reply(scratch.arena, engine, reply_id, wait_us, &reply);
-    if (result == RVS_Result_Ok && reply.kind == RVS_ReplyKind_LaunchAck && pid_out) {
-      *pid_out = reply.launch_ack.pid;
+    RVS_EngineReply reply = {0};
+    result = rvs_engine_wait_for_reply(scratch.arena, engine, request_id, wait_us, &reply);
+    if (result == RVS_Result_Ok && reply.kind == RVS_EngineReplyKind_Launch && pid_out) {
+      *pid_out = reply.launch.pid;
     }
   }
   scratch_end(scratch);
