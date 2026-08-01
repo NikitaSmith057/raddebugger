@@ -4,20 +4,20 @@
 
 typedef struct RVS_Demon
 {
-  Arena             *arena;
-  Arena             *message_arena;
-  Mutex              mutex;
-  RVS_Queue         *queue;
-  RVS_ThreadState    state;
-  Thread             worker;
-  RVS_ReplyCallback *reply_callback;
-  void              *reply_ud;
+  Arena                  *arena;
+  Arena                  *message_arena;
+  Mutex                   mutex;
+  RVS_Queue              *queue;
+  RVS_ThreadState         state;
+  Thread                  worker;
+  RVS_DemonReplyCallback *reply_callback;
+  void                   *reply_ud;
 } RVS_Demon;
 
 internal void rvs_demon_worker(void *user_data);
 
 RVS_Result
-rvs_demon_init(void *reply_ud, RVS_ReplyCallback *reply_callback, RVS_Demon **dmn_out)
+rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out)
 {
   local_persist RVS_Demon dmn;
   
@@ -29,14 +29,15 @@ rvs_demon_init(void *reply_ud, RVS_ReplyCallback *reply_callback, RVS_Demon **dm
     dmn.mutex          = mutex_alloc();
     dmn.reply_callback = reply_callback;
     dmn.reply_ud       = reply_ud;
-    rvs_queue_init(dmn.queue, dmn.arena);
-    dmn.worker = thread_launch(rvs_demon_worker, 0);
+    dmn.queue          = rvs_queue_alloc(dmn.arena, sizeof(RVS_DemonMessage), AlignOf(RVS_DemonMessage));
+    dmn.worker         = thread_launch(rvs_demon_worker, 0);
     if ( ! MemoryIsZeroStruct(&dmn.worker)) {
       result = RVS_Result_Ok;
     }
-  } else {
-    for (; ins_atomic_u32_eval(&dmn.state) != RVS_ThreadState_Initing; ) { sleep_ms(1); }
   }
+
+  // wait for the DEMON thread to boot
+  for (; ins_atomic_u32_eval(&dmn.state) != RVS_ThreadState_Initing; ) { sleep_ms(1); }
 
   if (dmn_out) {
     *dmn_out = &dmn;
@@ -59,33 +60,37 @@ rvs_demon_recycle_request(RVS_QueueMessage *request)
   NotImplemented;
 }
 
-internal RVS_Result
-rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *src)
+internal RVS_DemonMessage *
+rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *src)
 {
-  RVS_Result result = RVS_Result_Ok;
-  dst->type = src->type;
+  RVS_DemonMessage *dst = push_array_no_zero(arena, RVS_DemonMessage, 1);
+
+  *dst = *src;
   switch (src->type) {
-  case RVS_DemonRequest_Launch: {
+  case RVS_DemonMessage_Launch: {
     dst->launch.params = *process_launch_params_copy(arena, &src->launch.params);
   } break;
-  case RVS_DemonRequest_Run: {
+  case RVS_DemonMessage_LaunchAck: {
+  } break;
+  case RVS_DemonMessage_Run: {
     dst->run.process_handles = push_array(arena, DMN_Handle, src->run.process_count);
     dst->run.process_count   = src->run.process_count;
     MemoryCopyTyped(dst->run.process_handles, src->run.process_handles, src->run.process_count);
   } break;
-  case RVS_DemonRequest_Halt: {
+  case RVS_DemonMessage_Halt: {
   } break;
-  case RVS_DemonRequest_Terminate: {
+  case RVS_DemonMessage_Terminate: {
     dst->terminate.process_handles = push_array_no_zero(arena, DMN_Handle, src->terminate.process_count);
     dst->terminate.process_count   = src->terminate.process_count;
   } break;
-  default: { result = RVS_Result_Error; } break;
+  default: { InvalidPath; } break;
   }
-  return result;
+
+  return dst;
 }
 
 internal RVS_Result
-rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec, RVS_ReplyID *reply_id_out)
+rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec, RVS_MessageID *reply_id_out)
 {
   RVS_Result result = RVS_Result_Error;
 
@@ -94,11 +99,11 @@ rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec, RVS_ReplyID *reply
     RVS_DemonMessage *message = (RVS_DemonMessage *)rvs_queue_alloc_message(dmn->queue);
 
     // copy message contents
-    result = rvs_demon_message_copy(dmn->message_arena, message, &spec);
+    message = rvs_demon_message_copy(dmn->message_arena, &spec);
     if (result != RVS_Result_Ok) { goto exit; }
 
     // send message to the DEMON worker
-    result = rvs_queue_send_message(dmn->queue, &message->base, max_U64);
+    result = rvs_queue_push(dmn->queue, &message->base);
     if (result != RVS_Result_Ok) { goto exit; }
 
     if (reply_id_out) {
@@ -116,10 +121,10 @@ rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec, RVS_ReplyID *reply
 }
 
 internal RVS_Result
-rvs_demon_launch(RVS_Demon *dmn, ProcessLaunchParams params, RVS_ReplyID *reply_id_out)
+rvs_demon_launch(RVS_Demon *dmn, ProcessLaunchParams params, RVS_MessageID *reply_id_out)
 {
   RVS_DemonMessage spec = {
-    .type   = RVS_DemonRequest_Launch,
+    .type   = RVS_DemonMessage_Launch,
     .launch = { .params = params }
   };
   return rvs_demon_send_message(dmn, spec, reply_id_out);
@@ -141,17 +146,17 @@ rvs_demon_worker(void *user_data)
     RVS_DemonMessage *message = (RVS_DemonMessage *)rvs_queue_pop(dmn->queue, max_U64);
 
     // process the message
-    RVS_DemonReply reply = {0};
+    RVS_DemonMessage reply = {0};
     switch (message->type) {
-    case RVS_DemonRequest_Launch: {
-      reply.type           = RVS_DemonReplyType_LaunchAck;
+    case RVS_DemonMessage_Launch: {
+      reply.type           = RVS_DemonMessage_LaunchAck;
       reply.launch_ack.pid = dmn_ctrl_launch(ctrl_ctx, &message->launch.params);
     } break;
     default: { InvalidPath; } break;
     }
 
-    // reply to dispatcher of the message
-    dmn->reply_callback(message->base.reply_id, str8_struct(&reply), dmn->reply_ud);
+    // reply to the engine thread
+    dmn->reply_callback(message->base.reply_id, &reply, dmn->reply_ud);
   }
 }
 

@@ -63,6 +63,10 @@
   </Target>
 
   <ItemGroup>
+    <Compile Include="..\radvs-first-version\plugin\RadDbgPort.cs" Link="RadDbgPort.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectCapability Include="CreateVsixContainer" />
   </ItemGroup>
   <ItemGroup>

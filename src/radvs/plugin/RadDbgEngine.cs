@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Debugger.Interop;
+using System.Security.Cryptography;
 
 namespace RAD
 {
@@ -16,53 +17,92 @@ namespace RAD
         private static readonly Guid EngineId = new Guid(EngineIdString);
 
         private RadDbgBridge? bridgeSession;
-        private IDebugProcess2? launchProcess;
         private IDebugEventCallback2? callback;
-        private RadDbgProgram? program;
-        private uint launchSystemProcessId;
 
         private readonly object programLock = new object();
         private readonly object breakpointLock = new object();
         private readonly Dictionary<ulong, RadDbgProgram> programs = new Dictionary<ulong, RadDbgProgram>();
         private readonly Dictionary<ulong, RadDbgProgramNode> programNodes = new Dictionary<ulong, RadDbgProgramNode>();
         private readonly Dictionary<ulong, RadDbgBoundBreakpoint> boundBreakpoints = new Dictionary<ulong, RadDbgBoundBreakpoint>();
-        public int LaunchSuspended(string pszServer, IDebugPort2 pPort, string pszExe, string pszArgs, string pszDir, string bstrEnv, string pszOptions, enum_LAUNCH_FLAGS dwLaunchFlags, uint hStdInput, uint hStdOutput, uint hStdError, IDebugEventCallback2 pCallback, out IDebugProcess2 ppProcess)
+        public int LaunchSuspended(string pszServer,
+                                   IDebugPort2 pPort,
+                                   string pszExe,
+                                   string pszArgs,
+                                   string pszDir,
+                                   string bstrEnv,
+                                   string pszOptions,
+                                   enum_LAUNCH_FLAGS dwLaunchFlags,
+                                   uint hStdInput,
+                                   uint hStdOutput,
+                                   uint hStdError,
+                                   IDebugEventCallback2 pCallback,
+                                   out IDebugProcess2 ppProcess)
         {
-            ppProcess = null!;
-            if (this.bridgeSession != null)
+            ppProcess = null;
+
+            // TODO: set bstrEnv
+
+            RadDbgBridge? bridgeSession;
+            uint dwProcessId;
+
+            if (dwLaunchFlags == enum_LAUNCH_FLAGS.DEBUG)
             {
+                int launchResult = RadDbgBridge.LaunchSuspended(
+                    pszExe,
+                    pszArgs ?? string.Empty,
+                    pszDir ?? string.Empty,
+                    out bridgeSession,
+                    out dwProcessId);
+
+                if (launchResult != VSConstants.S_OK)
+                {
+                    return launchResult;
+                }
+            }
+            else if (dwLaunchFlags == enum_LAUNCH_FLAGS.NODEBUG)
+            {
+                // TODO: launch debuggee without attaching to it
+                return VSConstants.E_FAIL;
+            }
+            else
+            {
+                // no support:
                 return VSConstants.E_FAIL;
             }
 
-            int result = RadDbgBridge.LaunchSuspended(pszExe, pszArgs ?? string.Empty, pszDir ?? string.Empty, out RadDbgBridge? session, out uint processId);
-            if (result != VSConstants.S_OK)
-            {
-                return result;
-            }
-
+            // query process object from the port using PID we got after process launched
             AD_PROCESS_ID adProcessId = new AD_PROCESS_ID
             {
                 ProcessIdType = (uint)enum_AD_PROCESS_ID.AD_PROCESS_ID_SYSTEM,
-                dwProcessId = processId,
+                dwProcessId   = dwProcessId,
             };
-            int processResult = pPort.GetProcess(adProcessId, out IDebugProcess2 debugProcess);
-            if (processResult < 0)
+            getProcessResult = pPort.GetProcess(adProcessId, out IDebugProcess2 launchProcess);
+
+            // if port is not found terminate the bridge session
+            if (getProcessResult < 0)
             {
-                session!.Terminate(0);
-                session.Dispose();
+                bridgeSession.Terminate(0);
+                bridgeSession.Dispose();
                 return processResult;
             }
-
-            this.bridgeSession = session;
-            this.launchProcess = debugProcess;
-            this.launchSystemProcessId = processId;
+            
+            // share with SDM the launched process
+            ppProcess = launchProcess;
+            
+            this.bridgeSession = bridgeSession;
             this.callback = pCallback;
-            ppProcess = debugProcess;
+
+            lock (this.programLock)
+            {
+                this.programs.Add(dwProcessId, new RadDbgProgram(this, launchProcess, Guid.New()));
+            }
+            
             return VSConstants.S_OK;
         }
 
         public int Attach(IDebugProgram2[] rgpPrograms, IDebugProgramNode2[] rgpProgramNodes, uint celtPrograms, IDebugEventCallback2 pCallback, enum_ATTACH_REASON dwReason)
         {
+            /* TODO:
             if (celtPrograms != 1 || rgpPrograms == null || rgpPrograms.Length == 0 || this.bridgeSession == null || this.program != null)
             {
                 return VSConstants.E_FAIL;
@@ -96,6 +136,8 @@ namespace RAD
             this.SendEvent(null, new RadEngineCreateEvent(this), typeof(IDebugEngineCreateEvent2).GUID, null);
             this.SendEvent(this.program, new RadProgramCreateEvent(), typeof(IDebugProgramCreateEvent2).GUID, null);
             return VSConstants.S_OK;
+            */
+            return VSConstants.E_FAIL;
         }
 
         public int ContinueFromSynchronousEvent(IDebugEvent2 pEvent)

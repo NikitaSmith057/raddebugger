@@ -94,9 +94,9 @@ rci_fprintf(FILE *f, char *fmt, ...)
 internal void
 entry_point(CmdLine *cmdline)
 {
-  RVS_Engine *engine = g_rci.engine;
-
-  if (rvs_engine_init(&g_rci.engine) != RVS_Result_Ok) { InvalidPath; }
+  RVS_Engine *engine = 0;
+  if (rvs_engine_init(&engine) != RVS_Result_Ok) { InvalidPath; }
+  g_rci.engine = engine;
 
   for (;;) {
     Temp scratch = scratch_begin(0,0);
@@ -118,27 +118,35 @@ entry_point(CmdLine *cmdline)
         continue;
       }
 
-      String8    exe_path      = input_split.first->next->string;
-      U32        pid           = 0;
-      RVS_Result launch_result = rvs_engine_launch(engine, exe_path, str8_zero(), max_U64, &pid);
+      String8       exe_path        = input_split.first->next->string;
+      RVS_MessageID launch_reply_id = 0;
+      RVS_Result    launch_result   = rvs_engine_launch_async(engine, exe_path, str8_zero(), &launch_reply_id);
+
       if (launch_result != RVS_Result_Ok) {
         rci_fprintf(stdout, "launch: failed to launch program %S, error code %u\n", exe_path, launch_result);
         continue;
       }
+
+
+      // pump a debug event
+      RVS_Event event = {0};
+      if ( ! rvs_engine_wait_for_event(engine, max_U64, &event)) {
+        InvalidPath;
+      }
+
+      Assert(event.source_type == RVS_EventSource_Message);
+      Assert(event.source.reply_id == launch_reply_id);
     } else {
       rci_fprintf(stdout, "unknown command: %S", cmd);
     }
 
-    RVS_Event event = {0};
-    if (!rvs_wait_for_event(engine, max_U64, &event)) {
-      InvalidPath;
-    }
-
+#if 0
     switch (event.kind) {
-    case RVS_EventKind_Launch: {
+    case RVS_EventKind_LaunchAck: {
       rci_fprintf(stdout, "program %d launched with pid %d\n", event.launch.program_id, event.launch.pid);
     } break;
     }
+#endif
 
     scratch_end(scratch);
   }

@@ -10,22 +10,25 @@ typedef struct RVS_Demon RVS_Demon;
 
 typedef enum
 {
-  RVS_DemonRequest_Null,
-  RVS_DemonRequest_Launch,
-  RVS_DemonRequest_Run,
-  RVS_DemonRequest_Halt,
-  RVS_DemonRequest_Terminate,
-  RVS_DemonRequest_Shutdown
-} RVS_DemonRequestType;
+  RVS_DemonMessage_Null,
+  RVS_DemonMessage_Launch,
+  RVS_DemonMessage_LaunchAck,
+  RVS_DemonMessage_Run,
+  RVS_DemonMessage_Halt,
+  RVS_DemonMessage_Terminate,
+  RVS_DemonMessage_Shutdown
+} RVS_DemonMessageType;
 
 typedef struct
 {
   RVS_QueueMessage     base;
-  RVS_DemonRequestType type;
+  RVS_DemonMessageType type;
   struct {
     ProcessLaunchParams params;   // process launch params
-    U32                 *pid_out; // PID of the launched processs
   } launch;
+  struct {
+    U32 pid;
+  } launch_ack;
   struct {
     // processes for DEMON to schedule for a run
     DMN_Handle *process_handles;
@@ -41,29 +44,14 @@ typedef struct
   } terminate;
 } RVS_DemonMessage;
 
-typedef enum
-{
-  RVS_DemonReplyType_Null,
-  RVS_DemonReplyType_LaunchAck,
-} RVS_DemonReplyType;
+typedef RVS_MessageID (RVS_DemonReplyCallback)(RVS_MessageID reply_id, RVS_DemonMessage *reply, void *ud);
 
-typedef struct
-{
-  RVS_ReplyID        id;
-  RVS_DemonReplyType type;
-  union {
-    struct {
-      U32 pid;
-    } launch_ack;
-  };
-} RVS_DemonReply;
-
-RVS_Result rvs_demon_init(void *reply_ud, RVS_ReplyCallback *reply_callback, RVS_Demon **dmn_out);
+RVS_Result rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out);
 RVS_Result rvs_demon_shutdown(void);
 
 internal RVS_Result rvs_demon_alloc       (void);
 internal RVS_Result rvs_demon_release     (void);
-internal RVS_Result rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage message_spec, RVS_ReplyID *reply_id_out);
+internal RVS_Result rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage message_spec, RVS_MessageID *reply_id_out);
 
 
 

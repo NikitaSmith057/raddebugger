@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("RadShim")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+913049099338716d11344988c835ee35a22d5ddc")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f3f41491b5fa2da1128926dbe3e1818eae2816df")]
 [assembly: System.Reflection.AssemblyProductAttribute("RadShim")]
 [assembly: System.Reflection.AssemblyTitleAttribute("RadShim")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

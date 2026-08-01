@@ -34,14 +34,16 @@ rvs_queue_message_list_pop(RVS_QueueMessageList *l)
   return 0;
 }
 
-internal void
-rvs_queue_alloc(RVS_Queue *q, Arena *a, U64 message_size, U64 message_align)
+internal RVS_Queue *
+rvs_queue_alloc(Arena *arena, U64 message_size, U64 message_align)
 {
-  q->arena         = a;
+  RVS_Queue *q = push_array(arena, RVS_Queue, 1);
+  q->arena         = arena;
   q->mutex         = mutex_alloc();
   q->available_cv  = cond_var_alloc();
   q->message_size  = message_size;
   q->message_align = message_align;
+  return q;
 }
 
 internal void
@@ -82,14 +84,14 @@ rvs_queue_recycle(RVS_Queue *q, RVS_QueueMessage *r)
   }
 }
 
-internal B32
+internal RVS_Result
 rvs_queue_push(RVS_Queue *q, RVS_QueueMessage *r)
 {
   AssertAlways(r->status == RVS_QueueMessageStatus_Null);
   r->status = RVS_QueueMessageStatus_Pending;
   rvs_queue_message_list_push_node(&q->messages, r);
   cond_var_broadcast(q->available_cv);
-  return 1;
+  return RVS_Result_Ok;
 }
 
 internal RVS_QueueMessage *
@@ -118,7 +120,7 @@ rvs_queue_wait_for_message_to_complete(RVS_Queue *q, RVS_QueueMessage *r, U64 wa
   return 1;
 }
 
-internal B32
+internal RVS_Result
 rvs_queue_send_message(RVS_Queue *q, RVS_QueueMessage *r, U64 wait_us)
 {
   B32 is_ok = rvs_queue_push(q, r);

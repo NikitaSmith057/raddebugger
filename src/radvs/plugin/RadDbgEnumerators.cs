@@ -3,6 +3,71 @@ using Microsoft.VisualStudio.Debugger.Interop;
 
 namespace RAD
 {
+    internal sealed class RadDbgProcessEnumerator : IEnumDebugProcesses2
+    {
+        private readonly IDebugProcess2[] processes;
+        private uint position;
+
+        internal RadDbgProcessEnumerator(IDebugProcess2 process)
+            : this(new[] { process }, 0)
+        { 
+        }
+
+        internal RadDbgProcessEnumerator(IDebugProcess2[] processes, uint position)
+        {
+            this.processes = processes;
+            this.position = position;
+        }
+
+        public int Next(uint celt, IDebugProcess2[] rgelt, ref uint pceltFetched)
+        {
+            pceltFetched = 0;
+            if (rgelt == null)
+            {
+                return RadDbgHResult.E_POINTER;
+            }
+            if (celt > (uint)rgelt.Length)
+            {
+                return RadDbgHResult.E_INVALIDARG;
+            }
+
+            while (pceltFetched < celt && this.position < (uint)this.processes.Length)
+            {
+                rgelt[pceltFetched] = this.processes[this.position];
+                ++pceltFetched;
+                ++this.position;
+            }
+            return pceltFetched == celt ? RadDbgHResult.S_OK : RadDbgHResult.S_FALSE;
+        }
+
+        public int Skip(uint celt)
+        {
+            uint remaining = (uint)this.processes.Length - this.position;
+            uint skipped = Math.Min(celt, remaining);
+            this.position += skipped;
+            return skipped == celt ? RadDbgHResult.S_OK : RadDbgHResult.S_FALSE;
+        }
+
+        public int Reset()
+        {
+            this.position = 0;
+            return RadDbgHResult.S_OK;
+        }
+
+        public int Clone(out IEnumDebugProcesses2 ppEnum)
+        {
+            ppEnum = new RadDbgProcessEnumerator(this.processes, this.position);
+            return RadDbgHResult.S_OK;
+        }
+
+        public int GetCount(out uint pcelt)
+        {
+            pcelt = (uint)this.processes.Length;
+            return RadDbgHResult.S_OK;
+        }
+
+    }
+
     internal sealed class RadDbgProgramEnumerator : IEnumDebugPrograms2
     {
         private readonly IDebugProgram2[] programs;
