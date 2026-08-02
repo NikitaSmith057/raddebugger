@@ -3,58 +3,57 @@
 
 #pragma once
 
-#include "radvs/rvs_demon.h"
+#include "demon/demon_core.h"
+#include "radvs/rvs.h"
 
 ////////////////////////////////
 // Types
 
 typedef struct RVS_Engine RVS_Engine;
-typedef U64 RVS_ProgramID;
+typedef struct RVS_Request RVS_Request;
+typedef struct RVS_RequestControl RVS_RequestControl;
+// Opaque generational DEMON process handle; valid only for an engine-known program.
+typedef DMN_Handle RVS_ProgramID;
 
 ////////////////////////////////
-// Commands
+// Submission
 
 typedef enum
 {
-  RVS_EngineCommandKind_Null,
-  RVS_EngineCommandKind_Launch,
-} RVS_EngineCommandKind;
-
-typedef struct
-{
-  RVS_EngineCommandKind kind;
-  RVS_MessageID         request_id;
-  union {
-    struct {
-      ProcessLaunchParams params;
-    } launch;
-  };
-} RVS_EngineCommand;
-
-////////////////////////////////
-// Inbox Messages
+  RVS_RequestPolicy_Independent,
+  RVS_RequestPolicy_JoinIfEqual,
+  RVS_RequestPolicy_RejectIfPending,
+} RVS_RequestPolicy;
 
 typedef enum
 {
-  RVS_EngineMessageType_Null,
-  RVS_EngineMessageType_Command,
-  RVS_EngineMessageType_DemonOutput,
-  RVS_EngineMessageType_Shutdown,
-} RVS_EngineMessageType;
+  RVS_OperationClass_Null,
+  RVS_OperationClass_ReadOnly,
+  RVS_OperationClass_ProgramExecution,
+  RVS_OperationClass_SessionLifecycle,
+} RVS_OperationClass;
 
 typedef struct
 {
-  RVS_QueueNode         base;
-  RVS_EngineMessageType type;
-  union {
-    RVS_EngineCommand command;
-    struct {
-      RVS_Demon       *source;
-      RVS_DemonOutput *output;
-      ArenaNode       *arena_node;
-    } demon_output;
-  };
-} RVS_EngineMessage;
+  // ReadOnly and ProgramExecution require a known program in this engine session.
+  // SessionLifecycle intentionally has no program ID.
+  RVS_OperationClass operation_class;
+  U64                session_id;
+  RVS_ProgramID      program_id;
+  U64                operation_id;
+} RVS_OperationKey;
+
+typedef struct
+{
+  RVS_RequestPolicy policy;
+  RVS_OperationKey  key;
+} RVS_SubmitOptions;
+
+typedef struct
+{
+  RVS_Request        *request;
+  RVS_RequestControl *control;
+} RVS_SubmitInfo;
 
 ////////////////////////////////
 // Replies
@@ -63,12 +62,14 @@ typedef enum
 {
   RVS_EngineReplyKind_Null,
   RVS_EngineReplyKind_Launch,
+  RVS_EngineReplyKind_Run,
 } RVS_EngineReplyKind;
 
 typedef struct
 {
   RVS_MessageID       request_id;
   RVS_Result          result;
+  U64                 program_state_epoch;
   RVS_EngineReplyKind kind;
   union {
     struct {
@@ -78,39 +79,34 @@ typedef struct
   };
 } RVS_EngineReply;
 
-typedef struct RVS_EngineReplyNode RVS_EngineReplyNode;
-struct RVS_EngineReplyNode
-{
-  RVS_EngineReplyNode *next;
-  RVS_EngineReplyNode *prev;
-  RVS_EngineReply      reply;
-};
-
-////////////////////////////////
-// Programs
-
-typedef struct RVS_Program RVS_Program;
-struct RVS_Program
-{
-  RVS_Program   *next;
-  Arena         *arena;
-  RVS_ProgramID  id;
-  U32            pid;
-};
-
 ////////////////////////////////
 // Events
 
 typedef DMN_Event RVS_Event;
 
 ////////////////////////////////
-// API
+// Engine API
 
 RVS_Result rvs_engine_init(RVS_Engine **engine_out);
 void       rvs_engine_shutdown(RVS_Engine *engine);
 
-RVS_Result rvs_engine_send_command(RVS_Engine *engine, RVS_EngineCommand command, RVS_MessageID *request_id_out);
-RVS_Result rvs_engine_launch_async(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_MessageID *request_id_out);
-RVS_Result rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, U64 wait_us, U32 *pid_out);
-RVS_Result rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID request_id, U64 wait_us, RVS_EngineReply *reply_out);
+// A zeroed options value submits an independent request. The initial submission receives control.
+RVS_Result rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out);
+// Run always addresses one known program. An independent submission derives its ProgramExecution key.
+RVS_Result rvs_engine_run(RVS_Engine *engine, RVS_ProgramID program_id, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out);
+
+////////////////////////////////
+// Request API
+
+void       rvs_request_retain(RVS_Request *request);
+void       rvs_request_release(RVS_Request *request);
+RVS_Result rvs_request_wait(RVS_Request *request, U64 wait_us, RVS_EngineReply *reply_out);
+
+// Only the creator receives this pre-dispatch cancellation capability.
+void       rvs_request_control_release(RVS_RequestControl *control);
+RVS_Result rvs_request_control_cancel(RVS_RequestControl *control);
+
+////////////////////////////////
+// Event API
+
 RVS_Result rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);

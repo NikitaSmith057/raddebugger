@@ -5,8 +5,6 @@
 
 #include "radvs/rvs.h"
 
-typedef U64 RVS_MessageID;
-
 typedef struct RVS_QueueNode RVS_QueueNode;
 struct RVS_QueueNode
 {

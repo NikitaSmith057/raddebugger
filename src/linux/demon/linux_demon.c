@@ -1506,10 +1506,10 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
         for EachNode(thread, LNX_DMN_Thread, process->first_thread)
         {
           //- rjf: determine if this thread is frozen
-          B32 is_frozen = 0;
+          B32 is_frozen = ctrls->freeze_all;
           
           // rjf: not single-stepping? determine based on run controls freezing info
-          if(dmn_handle_match(dmn_handle_zero(), ctrls->single_step_thread))
+          if(!is_frozen && dmn_handle_match(dmn_handle_zero(), ctrls->single_step_thread))
           {
             if(ctrls->run_entities_are_processes)
             {
@@ -1533,7 +1533,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
           }
           
           // rjf: single-step? freeze if not the single-step thread.
-          else
+          else if(!is_frozen)
           {
             is_frozen = !dmn_handle_match(lnx_dmn_handle_from_thread(thread), ctrls->single_step_thread);
           }

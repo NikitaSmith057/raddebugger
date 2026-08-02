@@ -190,6 +190,7 @@ struct DMN_RunCtrls
   B8 ignore_previous_exception;
   B8 run_entities_are_unfrozen;
   B8 run_entities_are_processes;
+  B8 freeze_all;
 };
 
 ////////////////////////////////
@@ -250,6 +251,7 @@ internal B32 dmn_ctrl_attach(DMN_CtrlCtx *ctx, U32 pid);
 internal B32 dmn_ctrl_kill(DMN_CtrlCtx *ctx, DMN_Handle process, U32 exit_code);
 internal B32 dmn_ctrl_detach(DMN_CtrlCtx *ctx, DMN_Handle process);
 internal DMN_EventList dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls);
+internal DMN_EventList dmn_ctrl_pump(Arena *arena, DMN_CtrlCtx *ctx);
 
 ////////////////////////////////
 //~ rjf: @dmn_os_hooks Halting (Implemented Per-OS)

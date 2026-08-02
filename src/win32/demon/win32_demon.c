@@ -1916,7 +1916,8 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
             if(thread->kind != W32_DMN_EntityKind_Thread) {continue;}
             
             //- rjf: determine if this thread is frozen
-            B32 is_frozen = 0;
+            B32 is_frozen = ctrls->freeze_all;
+            if(!is_frozen)
             {
               // rjf: single-step? freeze if not the single-step thread.
               if(!dmn_handle_match(dmn_handle_zero(), ctrls->single_step_thread))

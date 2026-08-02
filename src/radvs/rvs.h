@@ -3,12 +3,20 @@
 
 #pragma once
 
+typedef U64 RVS_MessageID;
+
 typedef enum
 {
   RVS_Result_Null,
   RVS_Result_Ok,
   RVS_Result_Timeout,
   RVS_Result_Error,
+  RVS_Result_Pending,
+  RVS_Result_AlreadyPending,
+  RVS_Result_Cancelled,
+  RVS_Result_EngineStopped,
+  RVS_Result_Unsupported,
+  RVS_Result_StaleState,
 } RVS_Result;
 
 typedef enum
@@ -20,5 +28,4 @@ typedef enum
   RVS_ThreadState_Terminating,
   RVS_ThreadState_Exited
 } RVS_ThreadState;
-
 

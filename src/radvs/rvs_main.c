@@ -28,7 +28,7 @@
 #include "arch/arch_inc.c"
 #include "demon/demon_inc.c"
 
-#include "radvs/rvs_queue.c"
+#include "radvs/rvs_protocol.c"
 #include "radvs/rvs_demon.c"
 #include "radvs/rvs_engine.c"
 

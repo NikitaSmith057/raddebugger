@@ -12,6 +12,7 @@ typedef enum
 {
   RVS_DemonMessage_Null,
   RVS_DemonMessage_Launch,
+  RVS_DemonMessage_Pump,
   RVS_DemonMessage_Run,
   RVS_DemonMessage_Halt,
   RVS_DemonMessage_Terminate,
@@ -27,13 +28,8 @@ typedef struct
     ProcessLaunchParams params;   // process launch params
   } launch;
   struct {
-    // processes for DEMON to schedule for a run
-    DMN_Handle *process_handles;
-    U64         process_count;
-
-    // run traps
-    DMN_Trap *traps;
-    U64       trap_count;
+    DMN_Handle *processes;
+    U64         processes_count;
   } run;
   struct {
     DMN_Handle *process_handles;
@@ -53,16 +49,12 @@ typedef enum
 typedef struct
 {
   RVS_DemonReplyKind kind;
-  union {
-    struct {
-      U32 pid;
-    } launch;
-  };
 } RVS_DemonReply;
 
 typedef enum
 {
   RVS_DemonOutputKind_Null,
+  RVS_DemonOutputKind_LaunchStarted,
   RVS_DemonOutputKind_Reply,
   RVS_DemonOutputKind_EventBatch,
 } RVS_DemonOutputKind;
@@ -72,6 +64,9 @@ typedef struct
   RVS_DemonOutputKind kind;
   RVS_MessageID       request_id;
   union {
+    struct {
+      U32 pid;
+    } launch_started;
     struct {
       RVS_Result      result;
       RVS_DemonReply  reply;
