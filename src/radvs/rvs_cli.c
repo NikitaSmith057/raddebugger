@@ -97,6 +97,10 @@ entry_point(CmdLine *cmdline)
 {
   RVS_Engine *engine = 0;
   if (rvs_engine_init(&engine) != RVS_Result_Ok) { InvalidPath; }
+
+  RVS_Session *session = 0;
+  if (rvs_engine_create_session(engine, &session) != RVS_Result_Ok) { InvalidPath; }
+
   g_rci.engine       = engine;
   g_rci.output_mutex = mutex_alloc();
 
@@ -124,9 +128,9 @@ entry_point(CmdLine *cmdline)
         continue;
       }
 
-      RVS_SubmitInfo submit        = {0};
+      RVS_SubmitInfo submit;
       String8        exe_path       = input_split.first->next->string;
-      RVS_Result     launch_result  = rvs_engine_launch(engine, exe_path, str8_zero(), (RVS_SubmitOptions){0}, &submit);
+      RVS_Result     launch_result  = rvs_session_launch(session, exe_path, str8_zero(), &submit);
 
       if (launch_result != RVS_Result_Ok) {
         rci_fprintf(stdout, "launch: failed to launch program %S, error code %u\n", exe_path, launch_result);
@@ -137,6 +141,7 @@ entry_point(CmdLine *cmdline)
       RVS_Result reply_result = rvs_request_wait(submit.request, max_U64, &reply);
       rvs_request_release(submit.request);
       rvs_request_control_release(submit.control);
+
       if (reply_result != RVS_Result_Ok) {
         rci_fprintf(stdout, "launch: request failed, error code %u\n", reply_result);
         continue;
@@ -167,7 +172,7 @@ entry_point(CmdLine *cmdline)
       RVS_ProgramID program_id = { .u64 = { program_id_u64 } };
 
       RVS_SubmitInfo submit = {0};
-      RVS_Result run_result = rvs_engine_run(engine, program_id, (RVS_SubmitOptions){0}, &submit);
+      RVS_Result run_result = rvs_session_run(session, program_id, (RVS_SubmitOptions){0}, &submit);
       if (run_result != RVS_Result_Ok) {
         rci_fprintf(stdout, "run: failed to submit program %llu, error code %u\n", program_id.u64[0], run_result);
         continue;
@@ -191,6 +196,7 @@ entry_point(CmdLine *cmdline)
     scratch_end(scratch);
   }
 
+  rvs_session_release(session);
   rvs_engine_shutdown(engine);
   mutex_release(g_rci.output_mutex);
 }

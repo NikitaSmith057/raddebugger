@@ -10,6 +10,7 @@
 // Types
 
 typedef struct RVS_Engine RVS_Engine;
+typedef struct RVS_Session RVS_Session;
 typedef struct RVS_Request RVS_Request;
 typedef struct RVS_RequestControl RVS_RequestControl;
 // Opaque generational DEMON process handle; valid only for an engine-known program.
@@ -35,10 +36,9 @@ typedef enum
 
 typedef struct
 {
-  // ReadOnly and ProgramExecution require a known program in this engine session.
+  // ReadOnly and ProgramExecution require a known program in this session.
   // SessionLifecycle intentionally has no program ID.
   RVS_OperationClass operation_class;
-  U64                session_id;
   RVS_ProgramID      program_id;
   U64                operation_id;
 } RVS_OperationKey;
@@ -90,10 +90,15 @@ typedef DMN_Event RVS_Event;
 RVS_Result rvs_engine_init(RVS_Engine **engine_out);
 void       rvs_engine_shutdown(RVS_Engine *engine);
 
-// A zeroed options value submits an independent request. The initial submission receives control.
-RVS_Result rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out);
+// The singleton-backed DEMON implementation supports one active session per engine.
+RVS_Result rvs_engine_create_session(RVS_Engine *engine, RVS_Session **session_out);
+void       rvs_session_retain(RVS_Session *session);
+void       rvs_session_release(RVS_Session *session);
+
+// Launch is the canonical SessionLifecycle operation and rejects a concurrent launch.
+RVS_Result rvs_session_launch(RVS_Session *session, String8 cmdl, String8 wdir, RVS_SubmitInfo *submit_out);
 // Run always addresses one known program. An independent submission derives its ProgramExecution key.
-RVS_Result rvs_engine_run(RVS_Engine *engine, RVS_ProgramID program_id, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out);
 
 ////////////////////////////////
 // Request API
@@ -109,4 +114,4 @@ RVS_Result rvs_request_control_cancel(RVS_RequestControl *control);
 ////////////////////////////////
 // Event API
 
-RVS_Result rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);
+RVS_Result rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out);

@@ -23,6 +23,8 @@ typedef struct
   Arena             *arena;
   Mutex              mutex;
   CondVar            available_cv;
+  B32                is_closed;
+  U32                waiter_count;
   RVS_QueueNodeList  messages;
   RVS_QueueNodeList  free_list;
   U64                message_size;
@@ -30,6 +32,7 @@ typedef struct
 } RVS_Queue;
 
 internal RVS_Queue *rvs_queue_alloc(Arena *arena, U64 message_size, U64 message_align);
+internal void       rvs_queue_close(RVS_Queue *q);
 internal void       rvs_queue_release(RVS_Queue *q);
 
 internal RVS_QueueNode *rvs_queue_alloc_item(RVS_Queue *q);

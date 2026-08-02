@@ -6,17 +6,33 @@
 
 typedef struct RVS_Program RVS_Program;
 
+#define RVS_ENGINE_COMMAND_XLIST \
+  X(Launch, RVS_OperationClass_SessionLifecycle) \
+  X(Run,    RVS_OperationClass_ProgramExecution)
+
 typedef enum
 {
   RVS_EngineCommandKind_Null,
-  RVS_EngineCommandKind_Launch,
-  RVS_EngineCommandKind_Run,
+#define X(kind, ...) RVS_EngineCommandKind_##kind,
+  RVS_ENGINE_COMMAND_XLIST
+#undef X
 } RVS_EngineCommandKind;
+
+internal RVS_OperationClass
+rvs_operation_class_from_engine_command_kind(RVS_EngineCommandKind kind)
+{
+  switch (kind) {
+  case RVS_EngineCommandKind_Null: return RVS_OperationClass_Null;
+#define X(kind, operation_class) case RVS_EngineCommandKind_##kind: return operation_class;
+  RVS_ENGINE_COMMAND_XLIST
+#undef X
+  }
+  return RVS_OperationClass_Null;
+}
 
 typedef struct
 {
   RVS_EngineCommandKind kind;
-  RVS_MessageID         request_id;
   union {
     struct {
       ProcessLaunchParams params;
@@ -28,6 +44,31 @@ typedef struct
   };
 } RVS_EngineCommand;
 
+typedef struct
+{
+  RVS_EngineCommand command;
+  RVS_RequestPolicy policy;
+  RVS_OperationKey  key;
+} RVS_EngineSubmission;
+
+internal B32
+rvs_engine_submission_from_fixed_command(RVS_EngineCommand command, RVS_RequestPolicy policy, RVS_EngineSubmission *submission_out)
+{
+  RVS_OperationClass operation_class = rvs_operation_class_from_engine_command_kind(command.kind);
+  if (operation_class != RVS_OperationClass_SessionLifecycle) {
+    return 0;
+  }
+  *submission_out = (RVS_EngineSubmission){
+    .command = command,
+    .policy  = policy,
+    .key     = {
+      .operation_class = operation_class,
+      .operation_id    = command.kind,
+    },
+  };
+  return 1;
+}
+
 typedef enum
 {
   RVS_EngineMessageType_Null,
@@ -38,10 +79,14 @@ typedef enum
 
 typedef struct
 {
-  RVS_QueueNode         base;
-  RVS_EngineMessageType type;
+  RVS_QueueNode          base;
+  RVS_EngineMessageType  type;
+  RVS_Session           *session;
   union {
-    RVS_EngineCommand command;
+    struct {
+      RVS_EngineCommand command;
+      RVS_MessageID     request_id;
+    };
     struct {
       RVS_Demon       *source;
       RVS_DemonOutput *output;
@@ -55,7 +100,6 @@ struct RVS_Program
   RVS_Program   *next;
   Arena         *arena;
   RVS_ProgramID  id;
-  U64            session_id;
   U32            pid;
   DMN_Handle     process;
   U64            state_epoch;
@@ -87,11 +131,28 @@ typedef struct
 struct RVS_RequestControl
 {
   Arena             *arena;
-  RVS_Engine        *engine;
+  RVS_Session       *session;
   RVS_EngineControl *control;
   RVS_Request       *request;
   RVS_OperationKey   key;
   B32                registered;
+};
+
+struct RVS_Session
+{
+  Arena             *arena;
+  RVS_Engine        *engine;
+  RVS_EngineControl *control;
+  U32                ref_count;
+  B32                engine_released;
+  RVS_Queue         *event_queue;
+  Arena             *program_arena;
+  RVS_Program       *first_program;
+  RVS_Program       *last_program;
+  RVS_Request       *request_first;
+  RVS_Request       *request_last;
+  RVS_Request       *key_first;
+  RVS_Request       *key_last;
 };
 
 struct RVS_Request
@@ -101,6 +162,7 @@ struct RVS_Request
   RVS_Request       *key_next;
   RVS_Request       *key_prev;
   RVS_RequestPool   *pool;
+  RVS_Session       *session;
   Mutex              mutex;
   CondVar            cv;
   U32                ref_count;
@@ -116,45 +178,23 @@ struct RVS_Request
 
 struct RVS_Engine
 {
-  // inbox and event queues
   Arena          *arena;
   Mutex           arena_mutex;
   RVS_Queue      *inbox_queue;
-  RVS_Queue      *event_queue;
   RVS_MessageID   next_request_id;
-  U64             session_id;
   RVS_ThreadState state;
   Thread          thread;
 
-  // live programs
-  Arena         *program_arena;
-  RVS_Program   *first_program;
-  RVS_Program   *last_program;
-
-  // engine requests
   RVS_EngineControl *control;
-  RVS_RequestPool *request_pool;
-  RVS_Request     *request_first;
-  RVS_Request     *request_last;
-  RVS_Request     *key_first;
-  RVS_Request     *key_last;
+  RVS_RequestPool   *request_pool;
+  RVS_Session       *session;
 
-  // DEMON
   RVS_Demon *demon;
   Arena     *demon_output_arena;
   Mutex      demon_output_mutex;
   ArenaNode *demon_output_arena_active_list;
   ArenaNode *demon_output_arena_free_list;
 
-#if RVS_ENGINE_TESTING
-  Mutex   test_mutex;
-  CondVar test_cv;
-  B32     test_hold_before_dispatch;
-  B32     test_hold_after_dispatch;
-  B32     test_command_dispatched;
-  B32     test_suppress_launch_pump;
-  B32     test_fail_launch_pump;
-#endif
 };
 
 ////////////////////////////////
@@ -231,15 +271,12 @@ rvs_engine_send_message(RVS_Engine *engine, RVS_EngineMessage *spec)
 internal B32
 rvs_operation_key_is_complete(RVS_OperationKey key)
 {
-  return key.session_id != 0 && key.operation_id != 0;
+  return key.operation_id != 0;
 }
 
 internal B32
 rvs_operation_key_is_well_formed_for_policy(RVS_RequestPolicy policy, RVS_OperationKey key)
 {
-  if (key.operation_class != RVS_OperationClass_Null && key.session_id == 0) {
-    return 0;
-  }
   if ((key.operation_class == RVS_OperationClass_ReadOnly ||
        key.operation_class == RVS_OperationClass_ProgramExecution) &&
       dmn_handle_match(key.program_id, dmn_handle_zero())) {
@@ -250,15 +287,18 @@ rvs_operation_key_is_well_formed_for_policy(RVS_RequestPolicy policy, RVS_Operat
   if (policy == RVS_RequestPolicy_JoinIfEqual) {
     return 1;
   }
-  return key.operation_class == RVS_OperationClass_SessionLifecycle ||
-          (key.operation_class == RVS_OperationClass_ProgramExecution && !dmn_handle_match(key.program_id, dmn_handle_zero()));
+  if (policy == RVS_RequestPolicy_RejectIfPending) {
+    return key.operation_class == RVS_OperationClass_SessionLifecycle ||
+            (key.operation_class == RVS_OperationClass_ProgramExecution && !dmn_handle_match(key.program_id, dmn_handle_zero()));
+  }
+  return 0;
 }
 
 internal RVS_Program *
-rvs_engine_program_from_id_locked(RVS_Engine *engine, U64 session_id, RVS_ProgramID program_id)
+rvs_session_program_from_id_locked(RVS_Session *session, RVS_ProgramID program_id)
 {
-  for EachNode(program, RVS_Program, engine->first_program) {
-    if (program->session_id == session_id && dmn_handle_match(program->id, program_id)) {
+  for EachNode(program, RVS_Program, session->first_program) {
+    if (dmn_handle_match(program->id, program_id)) {
       return program;
     }
   }
@@ -268,11 +308,11 @@ rvs_engine_program_from_id_locked(RVS_Engine *engine, U64 session_id, RVS_Progra
 // Program State
 
 internal U64
-rvs_engine_program_state_epoch_locked(RVS_Engine *engine, U64 session_id, RVS_ProgramID program_id)
+rvs_session_program_state_epoch_locked(RVS_Session *session, RVS_ProgramID program_id)
 {
   ProfBeginFunction();
   U64 result = 0;
-  RVS_Program *program = rvs_engine_program_from_id_locked(engine, session_id, program_id);
+  RVS_Program *program = rvs_session_program_from_id_locked(session, program_id);
   if (program) {
     result = program->state_epoch;
   }
@@ -281,10 +321,10 @@ rvs_engine_program_state_epoch_locked(RVS_Engine *engine, U64 session_id, RVS_Pr
 }
 
 internal void
-rvs_engine_bump_program_state_epoch_locked(RVS_Engine *engine, U64 session_id, RVS_ProgramID program_id)
+rvs_session_bump_program_state_epoch_locked(RVS_Session *session, RVS_ProgramID program_id)
 {
   ProfBeginFunction();
-  RVS_Program *program = rvs_engine_program_from_id_locked(engine, session_id, program_id);
+  RVS_Program *program = rvs_session_program_from_id_locked(session, program_id);
   if (program) {
     program->state_epoch += 1;
   }
@@ -292,38 +332,32 @@ rvs_engine_bump_program_state_epoch_locked(RVS_Engine *engine, U64 session_id, R
 }
 
 internal void
-rvs_engine_bump_session_program_state_epochs_locked(RVS_Engine *engine, U64 session_id)
+rvs_session_bump_program_state_epochs_locked(RVS_Session *session)
 {
   ProfBeginFunction();
-  for EachNode(program, RVS_Program, engine->first_program) {
-    if (program->session_id == session_id) {
-      program->state_epoch += 1;
-    }
+  for EachNode(program, RVS_Program, session->first_program) {
+    program->state_epoch += 1;
   }
   ProfEnd();
 }
 
 internal B32
-rvs_engine_operation_key_resolves_locked(RVS_Engine *engine, RVS_OperationKey key)
+rvs_session_operation_key_resolves_locked(RVS_Session *session, RVS_OperationKey key)
 {
   if (key.operation_class == RVS_OperationClass_Null) {
     return 1;
-  }
-  if (key.session_id != engine->session_id) {
-    return 0;
   }
   if (key.operation_class == RVS_OperationClass_SessionLifecycle) {
     return 1;
   }
 
-  return rvs_engine_program_from_id_locked(engine, key.session_id, key.program_id) != 0;
+  return rvs_session_program_from_id_locked(session, key.program_id) != 0;
 }
 
 internal B32
 rvs_operation_key_match(RVS_OperationKey a, RVS_OperationKey b)
 {
   return a.operation_class == b.operation_class &&
-         a.session_id   == b.session_id &&
           dmn_handle_match(a.program_id, b.program_id) &&
          a.operation_id == b.operation_id;
 }
@@ -331,7 +365,6 @@ rvs_operation_key_match(RVS_OperationKey a, RVS_OperationKey b)
 internal B32
 rvs_operation_keys_conflict(RVS_OperationKey a, RVS_OperationKey b)
 {
-  if (a.session_id != b.session_id) { return 0; }
   if (a.operation_class == RVS_OperationClass_SessionLifecycle || b.operation_class == RVS_OperationClass_SessionLifecycle) {
     return 1;
   }
@@ -347,12 +380,12 @@ rvs_operation_keys_conflict(RVS_OperationKey a, RVS_OperationKey b)
 // Request Pool
 
 internal B32
-rvs_engine_has_conflicting_operation_locked(RVS_Engine *engine, RVS_OperationKey key)
+rvs_session_has_conflicting_operation_locked(RVS_Session *session, RVS_OperationKey key)
 {
   ProfBeginFunction();
   B32 result = 0;
   if (key.operation_class != RVS_OperationClass_Null) {
-    for EachNode(request, RVS_Request, engine->request_first) {
+    for EachNode(request, RVS_Request, session->request_first) {
       if (request->key.operation_class != RVS_OperationClass_Null && rvs_operation_keys_conflict(request->key, key)) {
         result = 1;
         break;
@@ -486,15 +519,56 @@ rvs_engine_control_release(RVS_EngineControl *control)
   ProfEnd();
 }
 
+internal RVS_Session *
+rvs_session_alloc(RVS_Engine *engine)
+{
+  Arena *arena = arena_alloc(.name = "Session");
+  RVS_Session *session = push_array(arena, RVS_Session, 1);
+  session->arena = arena;
+  session->engine = engine;
+  session->control = engine->control;
+  session->ref_count = 2; // engine ownership plus the returned handle
+  session->event_queue = rvs_queue_alloc(arena, sizeof(RVS_EngineEventMessage), AlignOf(RVS_EngineEventMessage));
+  session->program_arena = arena_alloc(.name = "Session Programs");
+  rvs_engine_control_retain(session->control);
+  return session;
+}
+
+internal void
+rvs_session_release_ref(RVS_Session *session)
+{
+  if (ins_atomic_u32_dec_eval(&session->ref_count) == 0) {
+    AssertAlways(session->engine_released);
+    rvs_queue_release(session->event_queue);
+    rvs_engine_control_release(session->control);
+    arena_release(session->arena);
+  }
+}
+
+internal void
+rvs_session_release_engine(RVS_Session *session)
+{
+  for EachNode(program, RVS_Program, session->first_program) {
+    arena_release(program->arena);
+  }
+  arena_release(session->program_arena);
+  session->program_arena = 0;
+  session->first_program = 0;
+  session->last_program = 0;
+  session->engine = 0;
+  session->engine_released = 1;
+  rvs_session_release_ref(session); // drop engine ownership
+}
+
 internal RVS_RequestControl *
-rvs_request_control_alloc(RVS_Engine *engine, RVS_Request *request, RVS_OperationKey key, B32 registered)
+rvs_request_control_alloc(RVS_Session *session, RVS_Request *request, RVS_OperationKey key, B32 registered)
 {
   ProfBeginFunction();
   Arena *arena = arena_alloc(.name = "Engine Operation Owner");
   RVS_RequestControl *owner = push_array(arena, RVS_RequestControl, 1);
   owner->arena      = arena;
-  owner->engine     = engine;
-  owner->control    = engine->control;
+  owner->session    = session;
+  owner->control    = session->control;
   owner->request    = request;
   owner->key        = key;
   owner->registered = registered;
@@ -507,50 +581,51 @@ rvs_request_control_alloc(RVS_Engine *engine, RVS_Request *request, RVS_Operatio
 // Active Requests
 
 internal RVS_Request *
-rvs_engine_request_alloc_locked(RVS_Engine *engine, RVS_RequestPolicy policy, RVS_OperationKey key)
+rvs_session_request_alloc_locked(RVS_Session *session, RVS_RequestPolicy policy, RVS_OperationKey key)
 {
   ProfBeginFunction();
-  RVS_Request *request = rvs_request_pool_request_alloc(engine->request_pool);
+  RVS_Request *request = rvs_request_pool_request_alloc(session->engine->request_pool);
   request->ref_count        = 2; // engine ownership plus the returned handle
-  request->request_id       = ins_atomic_u64_inc_eval(&engine->next_request_id);
+  request->request_id       = ins_atomic_u64_inc_eval(&session->engine->next_request_id);
+  request->session          = session;
   request->policy           = policy;
   request->key              = key;
   request->reply.request_id = request->request_id;
   request->reply.result     = RVS_Result_Pending;
-  DLLPushBack(engine->request_first, engine->request_last, request);
+  DLLPushBack(session->request_first, session->request_last, request);
   ProfEnd();
   return request;
 }
 
 internal void
-rvs_engine_request_remove_locked(RVS_Engine *engine, RVS_Request *request)
+rvs_session_request_remove_locked(RVS_Session *session, RVS_Request *request)
 {
   ProfBeginFunction();
-  DLLRemove(engine->request_first, engine->request_last, request);
+  DLLRemove(session->request_first, session->request_last, request);
   ProfEnd();
 }
 
 internal void
-rvs_engine_request_key_remove_locked(RVS_Engine *engine, RVS_Request *request)
+rvs_session_request_key_remove_locked(RVS_Session *session, RVS_Request *request)
 {
   ProfBeginFunction();
   if (request->key_prev) { request->key_prev->key_next = request->key_next; }
-  else                   { engine->key_first = request->key_next; }
+  else                   { session->key_first = request->key_next; }
   if (request->key_next) { request->key_next->key_prev = request->key_prev; }
-  else                   { engine->key_last = request->key_prev; }
+  else                   { session->key_last = request->key_prev; }
   request->key_next = 0;
   request->key_prev = 0;
   ProfEnd();
 }
 
 internal RVS_Result
-rvs_engine_register_operation_locked(RVS_Engine *engine, RVS_OperationKey key, RVS_Request *request)
+rvs_session_register_operation_locked(RVS_Session *session, RVS_OperationKey key, RVS_Request *request)
 {
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
-  if (request && request->pool == engine->request_pool && request->policy == RVS_RequestPolicy_JoinIfEqual && rvs_operation_key_is_complete(key)) {
+  if (request && request->pool == session->engine->request_pool && request->policy == RVS_RequestPolicy_JoinIfEqual && rvs_operation_key_is_complete(key)) {
     result = RVS_Result_Ok;
-    for (RVS_Request *n = engine->key_first; n; n = n->key_next) {
+    for (RVS_Request *n = session->key_first; n; n = n->key_next) {
       if (rvs_operation_key_match(n->key, key)) {
         result = RVS_Result_AlreadyPending;
         break;
@@ -559,10 +634,10 @@ rvs_engine_register_operation_locked(RVS_Engine *engine, RVS_OperationKey key, R
     if (result == RVS_Result_Ok) {
       request->key = key;
       rvs_request_retain(request); // retain terminal joins until the bridge unregisters the operation key
-      request->key_prev = engine->key_last;
-      if (engine->key_last) { engine->key_last->key_next = request; }
-      else                  { engine->key_first = request; }
-      engine->key_last = request;
+      request->key_prev = session->key_last;
+      if (session->key_last) { session->key_last->key_next = request; }
+      else                   { session->key_first = request; }
+      session->key_last = request;
     }
   }
   ProfEnd();
@@ -570,14 +645,14 @@ rvs_engine_register_operation_locked(RVS_Engine *engine, RVS_OperationKey key, R
 }
 
 internal RVS_Request *
-rvs_engine_unregister_operation_locked(RVS_Engine *engine, RVS_OperationKey key)
+rvs_session_unregister_operation_locked(RVS_Session *session, RVS_OperationKey key)
 {
   ProfBeginFunction();
   RVS_Request *result = 0;
-  for (RVS_Request *n = engine->key_first; n; n = n->key_next) {
+  for (RVS_Request *n = session->key_first; n; n = n->key_next) {
     if (rvs_operation_key_match(n->key, key)) {
       result = n;
-      rvs_engine_request_key_remove_locked(engine, result);
+      rvs_session_request_key_remove_locked(session, result);
       break;
     }
   }
@@ -602,11 +677,11 @@ rvs_request_complete(RVS_Request *request, RVS_EngineReply reply)
 }
 
 internal RVS_Request *
-rvs_engine_find_active_request_locked(RVS_Engine *engine, RVS_MessageID request_id)
+rvs_session_find_active_request_locked(RVS_Session *session, RVS_MessageID request_id)
 {
   ProfBeginFunction();
   RVS_Request *result = 0;
-  for EachNode(n, RVS_Request, engine->request_first) {
+  for EachNode(n, RVS_Request, session->request_first) {
     if (n->request_id == request_id) {
       result = n;
       break;
@@ -622,13 +697,14 @@ rvs_engine_request_mark_dispatched(RVS_Engine *engine, RVS_MessageID request_id)
   ProfBeginFunction();
   B32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_engine_find_active_request_locked(engine, request_id);
+  RVS_Session *session = engine->session;
+  RVS_Request *request = rvs_session_find_active_request_locked(session, request_id);
   if (request) {
     mutex_take(request->mutex);
     if (request->reply.result == RVS_Result_Pending) {
       request->is_dispatched = 1;
       if (request->key.operation_class == RVS_OperationClass_ProgramExecution) {
-        rvs_engine_bump_program_state_epoch_locked(engine, request->key.session_id, request->key.program_id);
+        rvs_session_bump_program_state_epoch_locked(session, request->key.program_id);
       }
       result = 1;
     }
@@ -645,12 +721,13 @@ rvs_engine_retire_undispatched_request(RVS_Engine *engine, RVS_MessageID request
   ProfBeginFunction();
   RVS_Request *request = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *candidate = rvs_engine_find_active_request_locked(engine, request_id);
+  RVS_Session *session = engine->session;
+  RVS_Request *candidate = rvs_session_find_active_request_locked(session, request_id);
   if (candidate) {
     mutex_take(candidate->mutex);
     if (candidate->reply.result != RVS_Result_Pending && !candidate->is_dispatched) {
       request = candidate;
-      rvs_engine_request_remove_locked(engine, request);
+      rvs_session_request_remove_locked(session, request);
     }
     mutex_drop(candidate->mutex);
   }
@@ -667,7 +744,7 @@ rvs_engine_publish_pending_requests(RVS_Engine *engine, RVS_Result result)
 {
   ProfBeginFunction();
   mutex_take(engine->control->mutex);
-  for EachNode(request, RVS_Request, engine->request_first) {
+  for EachNode(request, RVS_Request, engine->session->request_first) {
     rvs_request_complete(request, (RVS_EngineReply){
       .request_id = request->request_id,
       .result     = result,
@@ -683,9 +760,10 @@ rvs_engine_release_active_requests(RVS_Engine *engine, RVS_Result pending_result
 {
   ProfBeginFunction();
   mutex_take(engine->control->mutex);
-  RVS_Request *first = engine->request_first;
-  engine->request_first = 0;
-  engine->request_last = 0;
+  RVS_Session *session = engine->session;
+  RVS_Request *first = session->request_first;
+  session->request_first = 0;
+  session->request_last = 0;
   mutex_drop(engine->control->mutex);
 
   for (RVS_Request *n = first, *next = 0; n; n = next) {
@@ -707,9 +785,10 @@ rvs_engine_clear_operation_keys(RVS_Engine *engine)
 {
   ProfBeginFunction();
   mutex_take(engine->control->mutex);
-  RVS_Request *first = engine->key_first;
-  engine->key_first = 0;
-  engine->key_last = 0;
+  RVS_Session *session = engine->session;
+  RVS_Request *first = session->key_first;
+  session->key_first = 0;
+  session->key_last = 0;
   mutex_drop(engine->control->mutex);
 
   for (RVS_Request *n = first, *next = 0; n; n = next) {
@@ -724,15 +803,15 @@ rvs_engine_clear_operation_keys(RVS_Engine *engine)
 // Completion
 
 internal void
-rvs_engine_prepare_reply_locked(RVS_Engine *engine, RVS_Request *request, RVS_EngineReply *reply)
+rvs_session_prepare_reply_locked(RVS_Session *session, RVS_Request *request, RVS_EngineReply *reply)
 {
   if (request->key.operation_class == RVS_OperationClass_ReadOnly) {
     reply->program_state_epoch = request->captured_program_state_epoch;
-    if (reply->program_state_epoch != rvs_engine_program_state_epoch_locked(engine, request->key.session_id, request->key.program_id)) {
+    if (reply->program_state_epoch != rvs_session_program_state_epoch_locked(session, request->key.program_id)) {
       reply->result = RVS_Result_StaleState;
     }
   } else if (request->key.operation_class == RVS_OperationClass_SessionLifecycle && reply->result == RVS_Result_Ok) {
-    rvs_engine_bump_session_program_state_epochs_locked(engine, request->key.session_id);
+    rvs_session_bump_program_state_epochs_locked(session);
   }
 }
 
@@ -742,10 +821,11 @@ rvs_engine_complete_reply(RVS_Engine *engine, RVS_EngineReply reply)
   ProfBeginFunction();
   RVS_Request *request = 0;
   mutex_take(engine->control->mutex);
-  request = rvs_engine_find_active_request_locked(engine, reply.request_id);
+  RVS_Session *session = engine->session;
+  request = rvs_session_find_active_request_locked(session, reply.request_id);
   if (request) {
-    rvs_engine_request_remove_locked(engine, request);
-    rvs_engine_prepare_reply_locked(engine, request, &reply);
+    rvs_session_request_remove_locked(session, request);
+    rvs_session_prepare_reply_locked(session, request, &reply);
   }
   mutex_drop(engine->control->mutex);
 
@@ -762,7 +842,7 @@ rvs_engine_begin_launch(RVS_Engine *engine, RVS_MessageID request_id, U32 pid)
   ProfBeginFunction();
   B32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_engine_find_active_request_locked(engine, request_id);
+  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
   if (request) {
     mutex_take(request->mutex);
     if (request->command_kind == RVS_EngineCommandKind_Launch &&
@@ -790,28 +870,28 @@ rvs_engine_complete_launch(RVS_Engine *engine, RVS_MessageID request_id, RVS_Res
   };
 
   mutex_take(engine->control->mutex);
-  RVS_Request *candidate = rvs_engine_find_active_request_locked(engine, request_id);
+  RVS_Session *session = engine->session;
+  RVS_Request *candidate = rvs_session_find_active_request_locked(session, request_id);
   if (candidate) {
     mutex_take(candidate->mutex);
     B32 matching_launch = candidate->command_kind == RVS_EngineCommandKind_Launch &&
                           (result != RVS_Result_Ok || candidate->launch_pid == pid);
     if (candidate->reply.result == RVS_Result_Pending && matching_launch) {
       if (result == RVS_Result_Ok && pid != 0 && !dmn_handle_match(process, dmn_handle_zero())) {
-        RVS_Program *prog = push_array(engine->program_arena, RVS_Program, 1);
+        RVS_Program *prog = push_array(session->program_arena, RVS_Program, 1);
         prog->arena = arena_alloc(.name = "Engine Program");
         prog->id    = process;
-        prog->session_id = engine->session_id;
         prog->pid   = pid;
         prog->process = process;
         prog->state_epoch = 1;
-        SLLQueuePush(engine->first_program, engine->last_program, prog);
+        SLLQueuePush(session->first_program, session->last_program, prog);
         reply.launch.program_id = prog->id;
         reply.launch.pid        = prog->pid;
       } else if (result == RVS_Result_Ok) {
         reply.result = RVS_Result_Error;
       }
-      rvs_engine_prepare_reply_locked(engine, candidate, &reply);
-      rvs_engine_request_remove_locked(engine, candidate);
+      rvs_session_prepare_reply_locked(session, candidate, &reply);
+      rvs_session_request_remove_locked(session, candidate);
       request = candidate;
       completed = 1;
     }
@@ -833,7 +913,7 @@ rvs_engine_launch_is_pending(RVS_Engine *engine, RVS_MessageID request_id)
   ProfBeginFunction();
   B32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_engine_find_active_request_locked(engine, request_id);
+  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
   if (request) {
     mutex_take(request->mutex);
     result = request->command_kind == RVS_EngineCommandKind_Launch &&
@@ -851,7 +931,7 @@ rvs_engine_launch_matches_pid(RVS_Engine *engine, RVS_MessageID request_id, U32 
   ProfBeginFunction();
   B32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_engine_find_active_request_locked(engine, request_id);
+  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
   if (request) {
     mutex_take(request->mutex);
     result = request->command_kind == RVS_EngineCommandKind_Launch &&
@@ -869,7 +949,7 @@ rvs_engine_launch_pid(RVS_Engine *engine, RVS_MessageID request_id)
   ProfBeginFunction();
   U32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_engine_find_active_request_locked(engine, request_id);
+  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
   if (request) {
     mutex_take(request->mutex);
     if (request->command_kind == RVS_EngineCommandKind_Launch && request->reply.result == RVS_Result_Pending) {
@@ -886,22 +966,6 @@ internal void
 rvs_engine_pump_launch(RVS_Engine *engine, RVS_MessageID request_id)
 {
   ProfBeginFunction();
-#if RVS_ENGINE_TESTING
-  mutex_take(engine->test_mutex);
-  B32 suppress = engine->test_suppress_launch_pump;
-  B32 fail = engine->test_fail_launch_pump;
-  engine->test_fail_launch_pump = 0;
-  mutex_drop(engine->test_mutex);
-  if (fail) {
-    rvs_engine_complete_launch(engine, request_id, RVS_Result_Error, 0, dmn_handle_zero());
-    ProfEnd();
-    return;
-  }
-  if (suppress) {
-    ProfEnd();
-    return;
-  }
-#endif
   if (rvs_demon_send_message(engine->demon, (RVS_DemonMessage){
     .type       = RVS_DemonMessage_Pump,
     .request_id = request_id,
@@ -915,14 +979,15 @@ rvs_engine_pump_launch(RVS_Engine *engine, RVS_MessageID request_id)
 // Events
 
 internal RVS_Result
-rvs_engine_push_event(RVS_Engine *engine, RVS_Event *event)
+rvs_session_push_event(RVS_Session *session, RVS_Event *event)
 {
   ProfBeginFunction();
-  mutex_take(engine->arena_mutex);
-  RVS_EngineEventMessage *message = rvs_queue_alloc_struct(engine->event_queue, RVS_EngineEventMessage);
-  rvs_demon_event_copy(engine->arena, &message->event, event);
-  RVS_Result result = rvs_queue_push(engine->event_queue, &message->base);
-  mutex_drop(engine->arena_mutex);
+  RVS_EngineEventMessage *message = rvs_queue_alloc_struct(session->event_queue, RVS_EngineEventMessage);
+  RVS_Result result = RVS_Result_EngineStopped;
+  if (message) {
+    rvs_demon_event_copy(session->arena, &message->event, event);
+    result = rvs_queue_push(session->event_queue, &message->base);
+  }
   ProfEnd();
   return result;
 }
@@ -1004,90 +1069,23 @@ rvs_engine_demon_output_callback(RVS_Demon *demon, RVS_DemonOutput *output, void
 ////////////////////////////////
 // Worker Dispatch
 
-// Test Instrumentation
-
-#if RVS_ENGINE_TESTING
-internal void
-rvs_engine_test_set_dispatch_hold(RVS_Engine *engine, B32 before_dispatch, B32 after_dispatch)
-{
-  mutex_take(engine->test_mutex);
-  engine->test_hold_before_dispatch = before_dispatch;
-  engine->test_hold_after_dispatch = after_dispatch;
-  engine->test_command_dispatched = 0;
-  cond_var_broadcast(engine->test_cv);
-  mutex_drop(engine->test_mutex);
-}
-
-internal void
-rvs_engine_test_wait_until_dispatched(RVS_Engine *engine)
-{
-  mutex_take(engine->test_mutex);
-  while ( ! engine->test_command_dispatched) {
-    cond_var_wait(engine->test_cv, engine->test_mutex, max_U64);
-  }
-  mutex_drop(engine->test_mutex);
-}
-
-internal void
-rvs_engine_test_invalidate_program(RVS_Engine *engine, U64 session_id, RVS_ProgramID program_id)
-{
-  mutex_take(engine->control->mutex);
-  rvs_engine_bump_program_state_epoch_locked(engine, session_id, program_id);
-  mutex_drop(engine->control->mutex);
-}
-
-internal void
-rvs_engine_test_invalidate_session(RVS_Engine *engine, U64 session_id)
-{
-  mutex_take(engine->control->mutex);
-  rvs_engine_bump_session_program_state_epochs_locked(engine, session_id);
-  mutex_drop(engine->control->mutex);
-}
-
-internal void
-rvs_engine_test_set_launch_pump(RVS_Engine *engine, B32 suppress, B32 fail)
-{
-  mutex_take(engine->test_mutex);
-  engine->test_suppress_launch_pump = suppress;
-  engine->test_fail_launch_pump = fail;
-  mutex_drop(engine->test_mutex);
-}
-#endif
-
 // Command and Output Dispatch
 
 internal void
-rvs_engine_process_command(RVS_Engine *engine, RVS_EngineCommand *command)
+rvs_engine_process_command(RVS_Engine *engine, RVS_Session *session, RVS_MessageID request_id, RVS_EngineCommand *command)
 {
   ProfBeginFunction();
-#if RVS_ENGINE_TESTING
-  mutex_take(engine->test_mutex);
-  while (engine->test_hold_before_dispatch) {
-    cond_var_wait(engine->test_cv, engine->test_mutex, max_U64);
-  }
-  mutex_drop(engine->test_mutex);
-#endif
-  if ( ! rvs_engine_request_mark_dispatched(engine, command->request_id)) {
-    rvs_engine_retire_undispatched_request(engine, command->request_id);
+  if ( ! rvs_engine_request_mark_dispatched(engine, request_id)) {
+    rvs_engine_retire_undispatched_request(engine, request_id);
     ProfEnd();
     return;
   }
-
-#if RVS_ENGINE_TESTING
-  mutex_take(engine->test_mutex);
-  engine->test_command_dispatched = 1;
-  cond_var_broadcast(engine->test_cv);
-  while (engine->test_hold_after_dispatch) {
-    cond_var_wait(engine->test_cv, engine->test_mutex, max_U64);
-  }
-  mutex_drop(engine->test_mutex);
-#endif
 
   switch (command->kind) {
   case RVS_EngineCommandKind_Launch: {
     RVS_DemonMessage spec = {
       .type       = RVS_DemonMessage_Launch,
-      .request_id = command->request_id,
+      .request_id = request_id,
       .launch     = { .params = command->launch.params },
     };
 
@@ -1096,7 +1094,7 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_EngineCommand *command)
     // failed to send a message to the DEMON thread -- reply with the error code
     if (result != RVS_Result_Ok) {
       rvs_engine_complete_reply(engine, (RVS_EngineReply){
-        .request_id = command->request_id,
+        .request_id = request_id,
         .result     = result,
         .kind       = RVS_EngineReplyKind_Launch,
       });
@@ -1108,7 +1106,7 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_EngineCommand *command)
     DMN_Handle *processes = push_array(scratch.arena, DMN_Handle, command->run.programs_count);
     for EachIndex(program_idx, command->run.programs_count) {
       RVS_Program *found = 0;
-      for EachNode(program, RVS_Program, engine->first_program) {
+      for EachNode(program, RVS_Program, session->first_program) {
         if (dmn_handle_match(program->id, command->run.programs[program_idx])) {
           found = program;
           break;
@@ -1125,7 +1123,7 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_EngineCommand *command)
     if (all_programs_found) {
       result = rvs_demon_send_message(engine->demon, (RVS_DemonMessage){
         .type       = RVS_DemonMessage_Run,
-        .request_id = command->request_id,
+        .request_id = request_id,
         .run = {
           .processes = processes,
           .processes_count = command->run.programs_count,
@@ -1134,7 +1132,7 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_EngineCommand *command)
     }
     if (result != RVS_Result_Ok) {
       rvs_engine_complete_reply(engine, (RVS_EngineReply){
-        .request_id = command->request_id,
+        .request_id = request_id,
         .result     = result,
         .kind       = RVS_EngineReplyKind_Run,
       });
@@ -1207,7 +1205,8 @@ rvs_engine_process_demon_output(RVS_Engine *engine, RVS_DemonOutput *output)
                            ((launch_event && dmn_handle_match(n->v.process, launch_event->process)) ||
                             (launch_pid != 0 && n->v.system_process_id == launch_pid));
       if (suppress_event) { continue; }
-      AssertAlways(rvs_engine_push_event(engine, &n->v) == RVS_Result_Ok);
+      RVS_Result push_result = rvs_session_push_event(engine->session, &n->v);
+      AssertAlways(push_result == RVS_Result_Ok || push_result == RVS_Result_EngineStopped);
     }
     if (rvs_engine_launch_is_pending(engine, output->request_id)) {
       rvs_engine_pump_launch(engine, output->request_id);
@@ -1232,7 +1231,7 @@ rvs_engine_worker(void *user_data)
     B32 should_exit = 0;
     switch (message->type) {
     case RVS_EngineMessageType_Command: {
-      rvs_engine_process_command(engine, &message->command);
+      rvs_engine_process_command(engine, message->session, message->request_id, &message->command);
     } break;
 
     case RVS_EngineMessageType_DemonOutput: {
@@ -1275,19 +1274,12 @@ rvs_engine_init(RVS_Engine **engine_out)
   }
 
   engine.arena              = arena_alloc(.name = "Engine");
-  engine.session_id         = 1;
-  engine.inbox_queue        = rvs_queue_alloc(engine.arena, sizeof(RVS_EngineMessage),      AlignOf(RVS_EngineMessage));
-  engine.event_queue        = rvs_queue_alloc(engine.arena, sizeof(RVS_EngineEventMessage), AlignOf(RVS_EngineEventMessage));
+  engine.inbox_queue        = rvs_queue_alloc(engine.arena, sizeof(RVS_EngineMessage), AlignOf(RVS_EngineMessage));
   engine.arena_mutex        = mutex_alloc();
-  engine.program_arena      = arena_alloc();
   engine.control            = rvs_engine_control_alloc();
   engine.request_pool       = rvs_request_pool_alloc();
   engine.demon_output_arena = arena_alloc(.name = "Engine DEMON Output Nodes");
   engine.demon_output_mutex = mutex_alloc();
-#if RVS_ENGINE_TESTING
-  engine.test_mutex         = mutex_alloc();
-  engine.test_cv            = cond_var_alloc();
-#endif
 
   result = rvs_demon_init(&engine, rvs_engine_demon_output_callback, &engine.demon);
   if (result != RVS_Result_Ok) {
@@ -1311,6 +1303,28 @@ rvs_engine_init(RVS_Engine **engine_out)
   return result;
 }
 
+RVS_Result
+rvs_engine_create_session(RVS_Engine *engine, RVS_Session **session_out)
+{
+  RVS_Result result = RVS_Result_Error;
+  if (session_out) { *session_out = 0; }
+  if (engine == 0 || session_out == 0) {
+    return result;
+  }
+  mutex_take(engine->control->mutex);
+  if (engine->control->is_shutdown || ins_atomic_u32_eval(&engine->state) != RVS_ThreadState_Running) {
+    result = RVS_Result_EngineStopped;
+  } else if (engine->session) {
+    result = RVS_Result_Unsupported;
+  } else {
+    engine->session = rvs_session_alloc(engine);
+    *session_out = engine->session;
+    result = RVS_Result_Ok;
+  }
+  mutex_drop(engine->control->mutex);
+  return result;
+}
+
 void
 rvs_engine_shutdown(RVS_Engine *engine)
 {
@@ -1321,14 +1335,15 @@ rvs_engine_shutdown(RVS_Engine *engine)
 
   mutex_take(engine->control->mutex);
   engine->control->is_shutdown = 1;
+  if (engine->session) {
+    rvs_queue_close(engine->session->event_queue);
+  }
   mutex_drop(engine->control->mutex);
 
   // Revoke controls before completing only requests that have not reached a terminal reply.
-  rvs_engine_publish_pending_requests(engine, RVS_Result_EngineStopped);
-
-#if RVS_ENGINE_TESTING
-  rvs_engine_test_set_dispatch_hold(engine, 0, 0);
-#endif
+  if (engine->session) {
+    rvs_engine_publish_pending_requests(engine, RVS_Result_EngineStopped);
+  }
 
   // shutdown the DEMON thread
   AssertAlways(rvs_demon_shutdown(engine->demon) == RVS_Result_Ok);
@@ -1339,8 +1354,10 @@ rvs_engine_shutdown(RVS_Engine *engine)
   thread_join(engine->thread, max_U64);
 
   // Release engine ownership; retained requests keep their immutable terminal replies.
-  rvs_engine_release_active_requests(engine, RVS_Result_EngineStopped);
-  rvs_engine_clear_operation_keys(engine);
+  if (engine->session) {
+    rvs_engine_release_active_requests(engine, RVS_Result_EngineStopped);
+    rvs_engine_clear_operation_keys(engine);
+  }
   rvs_request_pool_release_engine(engine->request_pool);
 
   // release arenas for DEMON outputs after both workers have drained them
@@ -1350,20 +1367,17 @@ rvs_engine_shutdown(RVS_Engine *engine)
   engine->demon_output_arena_free_list = 0;
   mutex_drop(engine->demon_output_mutex);
 
-  // release engine programs
-  for EachNode(prog, RVS_Program, engine->first_program) { arena_release(prog->arena); }
-
   // release engine thread resources
   rvs_queue_release(engine->inbox_queue);
-  rvs_queue_release(engine->event_queue);
+  if (engine->session) {
+    mutex_take(engine->control->mutex);
+    rvs_session_release_engine(engine->session);
+    engine->session = 0;
+    mutex_drop(engine->control->mutex);
+  }
   rvs_engine_control_release(engine->control);
   mutex_release(engine->arena_mutex);
   mutex_release(engine->demon_output_mutex);
-#if RVS_ENGINE_TESTING
-  cond_var_release(engine->test_cv);
-  mutex_release(engine->test_mutex);
-#endif
-  arena_release(engine->program_arena);
   arena_release(engine->demon_output_arena);
   arena_release(engine->arena);
   MemoryZeroStruct(engine);
@@ -1372,93 +1386,95 @@ rvs_engine_shutdown(RVS_Engine *engine)
   ProfEnd();
 }
 
+// Public APIs and test helpers construct a complete scheduling submission before calling this.
 internal RVS_Result
-rvs_engine_submit_command(RVS_Engine *engine, RVS_EngineCommand spec, RVS_RequestPolicy policy, RVS_OperationKey key, RVS_Request **request_out, RVS_RequestControl **owner_out)
+rvs_session_submit(RVS_Session *session, RVS_EngineSubmission submission, RVS_SubmitInfo *submit_out)
 {
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
-  if (request_out) { *request_out = 0; }
-  if (owner_out) { *owner_out = 0; }
-  if (engine == 0 || request_out == 0 ||
-      (policy == RVS_RequestPolicy_JoinIfEqual && owner_out == 0) ||
-       !rvs_operation_key_is_well_formed_for_policy(policy, key)) {
-    goto exit;
+  RVS_RequestPolicy policy = submission.policy;
+  RVS_OperationKey key = submission.key;
+
+  AssertAlways(session != 0);
+  AssertAlways(submit_out != 0);
+  AssertAlways(rvs_operation_key_is_well_formed_for_policy(policy, key));
+
+  MemoryZeroStruct(submit_out);
+  mutex_take(session->control->mutex);
+  if (session->control->is_shutdown || session->engine_released || session->engine == 0 ||
+      ins_atomic_u32_eval(&session->engine->state) != RVS_ThreadState_Running) {
+    result = RVS_Result_EngineStopped;
+    goto exit_control_mutex;
   }
+  RVS_Engine *engine = session->engine;
   mutex_take(engine->arena_mutex);
 
-  if (ins_atomic_u32_eval(&engine->state) == RVS_ThreadState_Running) {
-    mutex_take(engine->control->mutex);
-    if ( ! rvs_engine_operation_key_resolves_locked(engine, key)) {
-      mutex_drop(engine->control->mutex);
-      goto exit_arena_mutex;
-    }
-    U64 captured_program_state_epoch = 0;
-    if (key.operation_class == RVS_OperationClass_ReadOnly) {
-      captured_program_state_epoch = rvs_engine_program_state_epoch_locked(engine, key.session_id, key.program_id);
-    }
-    if (policy == RVS_RequestPolicy_JoinIfEqual) {
-      for (RVS_Request *n = engine->key_first; n; n = n->key_next) {
-        if (rvs_operation_key_match(n->key, key) &&
-            (key.operation_class != RVS_OperationClass_ReadOnly ||
-             n->captured_program_state_epoch == captured_program_state_epoch)) {
-          rvs_request_retain(n);
-          *request_out = n;
-          result = RVS_Result_Ok;
-          break;
-        }
-      }
-    }
-    if (result == RVS_Result_Error && rvs_engine_has_conflicting_operation_locked(engine, key)) {
-      result = RVS_Result_AlreadyPending;
-    }
-
-    RVS_Request *request = 0;
-    if (result == RVS_Result_Error) {
-      request = rvs_engine_request_alloc_locked(engine, policy, key);
-      request->command_kind = spec.kind;
-      request->captured_program_state_epoch = captured_program_state_epoch;
-      if (policy == RVS_RequestPolicy_JoinIfEqual) {
-        AssertAlways(rvs_engine_register_operation_locked(engine, key, request) == RVS_Result_Ok);
-      }
-    }
-    mutex_drop(engine->control->mutex);
-
-    if (result == RVS_Result_Ok || result == RVS_Result_AlreadyPending) {
-      goto exit_arena_mutex;
-    }
-
-    RVS_EngineMessage message = {
-      .type    = RVS_EngineMessageType_Command,
-      .command = spec,
-    };
-    message.command.request_id = request->request_id;
-
-    result = rvs_engine_send_message_locked(engine, &message);
-
-    if (result == RVS_Result_Ok) {
-      *request_out = request;
-      if (owner_out) {
-        *owner_out = rvs_request_control_alloc(engine, request, key, policy == RVS_RequestPolicy_JoinIfEqual);
-      }
-    } else {
-      mutex_take(engine->control->mutex);
-      rvs_engine_request_remove_locked(engine, request);
-      RVS_Request *registered_request = 0;
-      if (policy == RVS_RequestPolicy_JoinIfEqual) {
-        registered_request = rvs_engine_unregister_operation_locked(engine, key);
-        AssertAlways(registered_request == request);
-      }
-      mutex_drop(engine->control->mutex);
-      rvs_request_release(request); // drop engine ownership
-      rvs_request_release(request); // drop the unreturned caller ownership
-      if (registered_request) {
-        rvs_request_release(registered_request); // drop operation-key ownership
+  if ( ! rvs_session_operation_key_resolves_locked(session, key)) {
+    goto exit_arena_mutex;
+  }
+  U64 captured_program_state_epoch = 0;
+  if (key.operation_class == RVS_OperationClass_ReadOnly) {
+    captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, key.program_id);
+  }
+  if (policy == RVS_RequestPolicy_JoinIfEqual) {
+    for (RVS_Request *n = session->key_first; n; n = n->key_next) {
+      if (rvs_operation_key_match(n->key, key) &&
+          (key.operation_class != RVS_OperationClass_ReadOnly ||
+           n->captured_program_state_epoch == captured_program_state_epoch)) {
+        rvs_request_retain(n);
+        submit_out->request = n;
+        result = RVS_Result_Ok;
+        break;
       }
     }
   }
+  if (result == RVS_Result_Error && rvs_session_has_conflicting_operation_locked(session, key)) {
+    result = RVS_Result_AlreadyPending;
+  }
 
+  RVS_Request *request = 0;
+  if (result == RVS_Result_Error) {
+    request = rvs_session_request_alloc_locked(session, policy, key);
+    request->command_kind = submission.command.kind;
+    request->captured_program_state_epoch = captured_program_state_epoch;
+    if (policy == RVS_RequestPolicy_JoinIfEqual) {
+      AssertAlways(rvs_session_register_operation_locked(session, key, request) == RVS_Result_Ok);
+    }
+  }
+  if (result == RVS_Result_Ok || result == RVS_Result_AlreadyPending) {
+    goto exit_arena_mutex;
+  }
+
+  RVS_EngineMessage message = {
+    .type    = RVS_EngineMessageType_Command,
+    .session = session,
+    .command = submission.command,
+  };
+  message.request_id = request->request_id;
+
+  result = rvs_engine_send_message_locked(engine, &message);
+
+  if (result == RVS_Result_Ok) {
+    submit_out->request = request;
+    submit_out->control = rvs_request_control_alloc(session, request, key, policy == RVS_RequestPolicy_JoinIfEqual);
+  } else {
+    rvs_session_request_remove_locked(session, request);
+    RVS_Request *registered_request = 0;
+    if (policy == RVS_RequestPolicy_JoinIfEqual) {
+      registered_request = rvs_session_unregister_operation_locked(session, key);
+      AssertAlways(registered_request == request);
+    }
+    rvs_request_release(request); // drop engine ownership
+    rvs_request_release(request); // drop the unreturned caller ownership
+    if (registered_request) {
+      rvs_request_release(registered_request); // drop operation-key ownership
+    }
+  }
   exit_arena_mutex:;
   mutex_drop(engine->arena_mutex);
+
+  exit_control_mutex:;
+  mutex_drop(session->control->mutex);
 
   exit:;
   ProfEnd();
@@ -1466,22 +1482,24 @@ rvs_engine_submit_command(RVS_Engine *engine, RVS_EngineCommand spec, RVS_Reques
 }
 
 RVS_Result
-rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out)
+rvs_session_launch(RVS_Session *session, String8 cmdl, String8 wdir, RVS_SubmitInfo *submit_out)
 {
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
-  if (submit_out == 0) {
+  if (submit_out) { MemoryZeroStruct(submit_out); }
+  if (session == 0 || submit_out == 0) {
     goto exit;
   }
   {
-    MemoryZeroStruct(submit_out);
     Temp scratch = scratch_begin(0, 0);
     String8List cmd_line = str8_split_by_string_chars(scratch.arena, cmdl, str8_lit(" "), 0);
     RVS_EngineCommand command = {
       .kind   = RVS_EngineCommandKind_Launch,
       .launch = { .params = { .cmd_line = cmd_line, .path = wdir } },
     };
-    result = rvs_engine_submit_command(engine, command, options.policy, options.key, &submit_out->request, &submit_out->control);
+    RVS_EngineSubmission submission = {0};
+    AssertAlways(rvs_engine_submission_from_fixed_command(command, RVS_RequestPolicy_RejectIfPending, &submission));
+    result = rvs_session_submit(session, submission, submit_out);
     scratch_end(scratch);
   }
 
@@ -1490,39 +1508,19 @@ rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, RVS_SubmitOpti
   return result;
 }
 
-RVS_Result
-rvs_engine_run(RVS_Engine *engine, RVS_ProgramID program_id, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out)
+void
+rvs_session_retain(RVS_Session *session)
 {
-  ProfBeginFunction();
-  RVS_Result result = RVS_Result_Error;
-  if (submit_out == 0) {
-    goto exit;
-  }
-  MemoryZeroStruct(submit_out);
-  RVS_OperationKey key = options.key;
-  if (options.policy == RVS_RequestPolicy_Independent && key.operation_class == RVS_OperationClass_Null) {
-    key = (RVS_OperationKey){
-      .operation_class = RVS_OperationClass_ProgramExecution,
-      .session_id      = engine ? engine->session_id : 0,
-      .program_id      = program_id,
-    };
-  }
-  if (key.operation_class != RVS_OperationClass_ProgramExecution ||
-      !dmn_handle_match(key.program_id, program_id)) {
-    goto exit;
-  }
-  RVS_EngineCommand command = {
-    .kind = RVS_EngineCommandKind_Run,
-    .run  = {
-      .programs_count = 1,
-      .programs       = &program_id,
-    },
-  };
-  result = rvs_engine_submit_command(engine, command, options.policy, key, &submit_out->request, &submit_out->control);
+  AssertAlways(session != 0);
+  ins_atomic_u32_inc_eval(&session->ref_count);
+}
 
-  exit:;
-  ProfEnd();
-  return result;
+void
+rvs_session_release(RVS_Session *session)
+{
+  if (session) {
+    rvs_session_release_ref(session);
+  }
 }
 
 void
@@ -1543,6 +1541,91 @@ rvs_request_release(RVS_Request *request)
     rvs_request_pool_request_release(request);
   }
   ProfEnd();
+}
+
+RVS_Result
+rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitOptions options, RVS_SubmitInfo *submit_out)
+{
+  ProfBeginFunction();
+  RVS_Result result = RVS_Result_Error;
+  if (submit_out) { MemoryZeroStruct(submit_out); }
+  if (session == 0 || submit_out == 0) {
+    goto exit;
+  }
+  RVS_OperationKey key = options.key;
+  if (options.policy == RVS_RequestPolicy_Independent && key.operation_class == RVS_OperationClass_Null) {
+    key = (RVS_OperationKey){
+      .operation_class = RVS_OperationClass_ProgramExecution,
+      .program_id      = program_id,
+    };
+  }
+  if (key.operation_class != RVS_OperationClass_ProgramExecution ||
+      !dmn_handle_match(key.program_id, program_id) ||
+      !rvs_operation_key_is_well_formed_for_policy(options.policy, key)) {
+    goto exit;
+  }
+  RVS_EngineCommand command = {
+    .kind = RVS_EngineCommandKind_Run,
+    .run  = {
+      .programs_count = 1,
+      .programs       = &program_id,
+    },
+  };
+  RVS_EngineSubmission submission = {
+    .command = command,
+    .policy  = options.policy,
+    .key     = key,
+  };
+  result = rvs_session_submit(session, submission, submit_out);
+
+  exit:;
+  ProfEnd();
+  return result;
+}
+
+RVS_Result
+rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out)
+{
+  ProfBeginFunction();
+
+  RVS_Result result = RVS_Result_Error;
+  if (session == 0) {
+    goto exit;
+  }
+  rvs_session_retain(session);
+  mutex_take(session->control->mutex);
+  B32 is_stopped = session->control->is_shutdown || session->engine_released;
+  RVS_Queue *event_queue = session->event_queue;
+  mutex_drop(session->control->mutex);
+  if (is_stopped) {
+    result = RVS_Result_EngineStopped;
+    goto exit_session;
+  }
+
+  RVS_EngineEventMessage *message = rvs_queue_pop_struct(event_queue, RVS_EngineEventMessage, wait_us);
+  mutex_take(session->control->mutex);
+  is_stopped = session->control->is_shutdown || session->engine_released;
+  mutex_drop(session->control->mutex);
+  if (message) {
+    if ( ! is_stopped) {
+      rvs_demon_event_copy(arena, event_out, &message->event);
+      result = RVS_Result_Ok;
+    }
+    rvs_queue_recycle(event_queue, &message->base);
+  }
+  if (result != RVS_Result_Ok) {
+    if (is_stopped) {
+      result = RVS_Result_EngineStopped;
+    } else {
+      result = RVS_Result_Timeout;
+    }
+  }
+
+  exit_session:;
+  rvs_session_release(session);
+  exit:;
+  ProfEnd();
+  return result;
 }
 
 RVS_Result
@@ -1592,7 +1675,7 @@ rvs_request_control_release(RVS_RequestControl *owner)
   RVS_Request *registered_request = 0;
   mutex_take(owner->control->mutex);
   if (owner->registered && !owner->control->is_shutdown) {
-    registered_request = rvs_engine_unregister_operation_locked(owner->engine, owner->key);
+    registered_request = rvs_session_unregister_operation_locked(owner->session, owner->key);
   }
   mutex_drop(owner->control->mutex);
   if (registered_request) { rvs_request_release(registered_request); }
@@ -1610,17 +1693,16 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
 {
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
-  if (owner == 0 || owner->request == 0 || owner->engine == 0) {
+  if (owner == 0 || owner->request == 0 || owner->session == 0) {
     goto exit;
   }
 
-  RVS_Engine *engine = owner->engine;
   mutex_take(owner->control->mutex);
   if (owner->control->is_shutdown) {
     result = RVS_Result_EngineStopped;
     goto exit_control_mutex;
   }
-  RVS_Request *request = rvs_engine_find_active_request_locked(engine, owner->request->request_id);
+  RVS_Request *request = rvs_session_find_active_request_locked(owner->session, owner->request->request_id);
   if (request == owner->request) {
     mutex_take(request->mutex);
     if (request->is_dispatched) {
@@ -1640,29 +1722,6 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
   mutex_drop(owner->control->mutex);
 
   exit:;
-  ProfEnd();
-  return result;
-}
-
-RVS_Result
-rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out)
-{
-  ProfBeginFunction();
-
-  RVS_Result result;
-  RVS_EngineEventMessage *message = rvs_queue_pop_struct(engine->event_queue, RVS_EngineEventMessage, wait_us);
-  if (message) {
-    // copy out debug event
-    rvs_demon_event_copy(arena, event_out, &message->event);
-
-    // store the message in engines event queue
-    rvs_queue_recycle(engine->event_queue, &message->base);
-
-    result = RVS_Result_Ok;
-  } else {
-    result = RVS_Result_Timeout;
-  }
-
   ProfEnd();
   return result;
 }

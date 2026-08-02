@@ -35,6 +35,15 @@ rvs_queue_alloc(Arena *arena, U64 message_size, U64 message_align)
 }
 
 internal void
+rvs_queue_close(RVS_Queue *q)
+{
+  mutex_take(q->mutex);
+  q->is_closed = 1;
+  cond_var_broadcast(q->available_cv);
+  mutex_drop(q->mutex);
+}
+
+internal void
 rvs_queue_release(RVS_Queue *q)
 {
   cond_var_release(q->available_cv);
@@ -45,11 +54,14 @@ internal RVS_QueueNode *
 rvs_queue_alloc_item(RVS_Queue *q)
 {
   mutex_take(q->mutex);
-  RVS_QueueNode *node = rvs_queue_node_list_pop(&q->free_list);
-  if (node) {
-    MemoryZero(node, q->message_size);
-  } else {
-    node = arena_push(q->arena, q->message_size, q->message_align, 1);
+  RVS_QueueNode *node = 0;
+  if ( ! q->is_closed) {
+    node = rvs_queue_node_list_pop(&q->free_list);
+    if (node) {
+      MemoryZero(node, q->message_size);
+    } else {
+      node = arena_push(q->arena, q->message_size, q->message_align, 1);
+    }
   }
   mutex_drop(q->mutex);
   return node;
@@ -67,10 +79,14 @@ internal RVS_Result
 rvs_queue_push(RVS_Queue *q, RVS_QueueNode *node)
 {
   mutex_take(q->mutex);
-  rvs_queue_node_list_push(&q->messages, node);
-  cond_var_broadcast(q->available_cv);
+  RVS_Result result = RVS_Result_EngineStopped;
+  if ( ! q->is_closed) {
+    rvs_queue_node_list_push(&q->messages, node);
+    cond_var_broadcast(q->available_cv);
+    result = RVS_Result_Ok;
+  }
   mutex_drop(q->mutex);
-  return RVS_Result_Ok;
+  return result;
 }
 
 internal RVS_QueueNode *
@@ -83,8 +99,11 @@ rvs_queue_pop(RVS_Queue *q, U64 wait_us)
   }
 
   mutex_take(q->mutex);
-  while (q->messages.count == 0) {
-    if ( ! cond_var_wait(q->available_cv, q->mutex, endt_us)) {
+  while (q->messages.count == 0 && !q->is_closed) {
+    q->waiter_count += 1;
+    B32 is_signaled = cond_var_wait(q->available_cv, q->mutex, endt_us);
+    q->waiter_count -= 1;
+    if ( ! is_signaled) {
       break;
     }
   }
