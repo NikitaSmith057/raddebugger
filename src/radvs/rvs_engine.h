@@ -5,8 +5,14 @@
 
 #include "radvs/rvs_demon.h"
 
-typedef U64 RVS_ProgramID;
+////////////////////////////////
+// Types
+
 typedef struct RVS_Engine RVS_Engine;
+typedef U64 RVS_ProgramID;
+
+////////////////////////////////
+// Commands
 
 typedef enum
 {
@@ -25,6 +31,9 @@ typedef struct
   };
 } RVS_EngineCommand;
 
+////////////////////////////////
+// Inbox Messages
+
 typedef enum
 {
   RVS_EngineMessageType_Null,
@@ -35,17 +44,20 @@ typedef enum
 
 typedef struct
 {
-  RVS_QueueNode          base;
-  RVS_EngineMessageType  type;
+  RVS_QueueNode         base;
+  RVS_EngineMessageType type;
   union {
     RVS_EngineCommand command;
     struct {
-      RVS_Demon        *source;
-      RVS_DemonOutput  *output;
-      ArenaNode        *arena_node;
+      RVS_Demon       *source;
+      RVS_DemonOutput *output;
+      ArenaNode       *arena_node;
     } demon_output;
   };
 } RVS_EngineMessage;
+
+////////////////////////////////
+// Replies
 
 typedef enum
 {
@@ -74,6 +86,9 @@ struct RVS_EngineReplyNode
   RVS_EngineReply      reply;
 };
 
+////////////////////////////////
+// Programs
+
 typedef struct RVS_Program RVS_Program;
 struct RVS_Program
 {
@@ -83,7 +98,13 @@ struct RVS_Program
   U32            pid;
 };
 
+////////////////////////////////
+// Events
+
 typedef DMN_Event RVS_Event;
+
+////////////////////////////////
+// API
 
 RVS_Result rvs_engine_init(RVS_Engine **engine_out);
 void       rvs_engine_shutdown(RVS_Engine *engine);
@@ -93,4 +114,3 @@ RVS_Result rvs_engine_launch_async(RVS_Engine *engine, String8 cmdl, String8 wdi
 RVS_Result rvs_engine_launch(RVS_Engine *engine, String8 cmdl, String8 wdir, U64 wait_us, U32 *pid_out);
 RVS_Result rvs_engine_wait_for_reply(Arena *arena, RVS_Engine *engine, RVS_MessageID request_id, U64 wait_us, RVS_EngineReply *reply_out);
 RVS_Result rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);
-
