@@ -20,6 +20,7 @@ typedef enum
   RVS_DemonMessage_Launch,
   RVS_DemonMessage_Pump,
   RVS_DemonMessage_Run,
+  RVS_DemonMessage_Resume,
   RVS_DemonMessage_Halt,
   RVS_DemonMessage_Terminate,
   RVS_DemonMessage_Shutdown
@@ -39,6 +40,11 @@ typedef struct
       U64         processes_count;
     } run;
     struct {
+      DMN_Handle     *processes;
+      U64             processes_count;
+      RVS_MessageID   execution_request_id;
+    } resume;
+    struct {
       DMN_Handle *process_handles;
       U64         process_count;
     } terminate;
@@ -47,16 +53,20 @@ typedef struct
 
 typedef enum
 {
+  RVS_DemonAction_Null,
+  RVS_DemonAction_Launch,
+  RVS_DemonAction_Run,
+  RVS_DemonAction_Resume,
+  RVS_DemonAction_Terminate,
+} RVS_DemonAction;
+
+typedef enum
+{
   RVS_DemonReplyKind_Null,
   RVS_DemonReplyKind_LaunchStarted,
-  RVS_DemonReplyKind_Launch,
-  RVS_DemonReplyKind_Run,
-  RVS_DemonReplyKind_RunFinished,
+  RVS_DemonReplyKind_ActionResult,
   RVS_DemonReplyKind_EventBatch,
-  RVS_DemonReplyKind_TerminateAccepted,
-  RVS_DemonReplyKind_InterruptAccepted,
-  RVS_DemonReplyKind_InterruptObserved,
-  RVS_DemonReplyKind_InterruptResumeAccepted,
+  RVS_DemonReplyKind_ExecutionFinished,
 } RVS_DemonReplyKind;
 
 typedef struct
@@ -67,7 +77,10 @@ typedef struct
     struct {
       U32 pid;
     } launch_started;
-    RVS_Result result;
+    struct {
+      RVS_DemonAction action;
+      RVS_Result      result;
+    } action_result;
     struct {
       DMN_EventList events;
     } event_batch;

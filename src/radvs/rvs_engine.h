@@ -14,54 +14,14 @@ typedef struct RVS_Session RVS_Session;
 typedef struct RVS_Request RVS_Request;
 typedef struct RVS_RequestControl RVS_RequestControl;
 typedef DMN_Handle RVS_ProgramID;
-
-////////////////////////////////
-// Submission
+typedef DMN_Handle RVS_ThreadID;
 
 typedef enum
 {
-  RVS_RequestPolicy_Null,
-
-  // A conflicting keyed request is rejected with RVS_Result_AlreadyPending.
-  RVS_RequestPolicy_RejectIfPending,
-
-  // A request with duplicate key is joined; other conflicts are rejected with RVS_Result_AlreadyPending.
-  RVS_RequestPolicy_JoinIfEqual,
-} RVS_RequestPolicy;
-
-typedef enum
-{
-  RVS_OperationClass_Null,
-
-  // Request observes state for one known program without taking execution control.
-  // It remains admissible while program execution is active and relies on epoch freshness.
-  // It does not conflict with other read-only requests.
-  // It does not conflict with execution requests.
-  // It becomes stale when the target's captured state, topology, or configuration changes.
-  RVS_OperationClass_ReadOnly,
-
-  // Operation mutates session topology, including launch and attach.
-  RVS_OperationClass_Topology,
-
-  // Workflow holds execution leases for selected stopped targets.
-  RVS_OperationClass_ExecutionWorkflow,
-
-  // Temporarily transitions selected actively executing targets to stopped state.
-  RVS_OperationClass_InterruptTransition,
-
-  // Permanently terminates selected targets and fences them from new target work.
-  RVS_OperationClass_Termination,
-
-  // Mutates target-local backend configuration, such as physical breakpoint bindings.
-  RVS_OperationClass_TargetConfiguration,
-} RVS_OperationClass;
-
-typedef struct
-{
-  RVS_OperationClass operation_class;
-  RVS_ProgramID      program_id;
-  U64                operation_id;
-} RVS_OperationKey;
+  RVS_StepKind_Into,
+  RVS_StepKind_Over,
+  RVS_StepKind_Out,
+} RVS_StepKind;
 
 typedef struct
 {
@@ -79,9 +39,9 @@ typedef struct
 // Command
 
 #define RVS_ENGINE_COMMAND_XLIST \
-  X(Launch, RVS_OperationClass_Topology,          RVS_RequestPolicy_RejectIfPending, "Launch program and stop at the entry point") \
-  X(Run,    RVS_OperationClass_ExecutionWorkflow, RVS_RequestPolicy_RejectIfPending, "Run selected programs") \
-  X(Interrupt, RVS_OperationClass_InterruptTransition, RVS_RequestPolicy_RejectIfPending, "Interrupt selected running programs")
+  X(Launch, "Launch program and stop at the entry point") \
+  X(Run, "Run selected programs") \
+  X(Interrupt, "Interrupt selected running programs")
 
 typedef enum
 {
@@ -137,6 +97,10 @@ RVS_Result rvs_session_run_many(RVS_Session *session, RVS_ProgramID *programs, U
 RVS_Result rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_interrupt_many(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_interrupt(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_session_select_thread(RVS_Session *session, RVS_ProgramID program_id, RVS_ThreadID thread_id);
+RVS_Result rvs_session_selected_thread(RVS_Session *session, RVS_ProgramID *program_id_out, RVS_ThreadID *thread_id_out);
+RVS_Result rvs_session_continue(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_session_step(RVS_Session *session, RVS_StepKind kind, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out);
 
 ////////////////////////////////
@@ -158,5 +122,3 @@ RVS_Result rvs_request_control_cancel(RVS_RequestControl *control);
 internal RVS_EngineCommandKind rvs_command_kind_from_string(String8 v);
 internal String8               rvs_string_from_command_kind(RVS_EngineCommandKind v);
 internal String8               rvs_help_from_command_kind(RVS_EngineCommandKind v);
-internal RVS_OperationClass    rvs_op_class_from_engine_command_kind(RVS_EngineCommandKind kind);
-internal RVS_RequestPolicy     rvs_request_policy_from_engine_command_kind(RVS_EngineCommandKind v);

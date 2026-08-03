@@ -58,13 +58,31 @@ typedef struct
   U64           value;
 } RVS_QueueTestMessage;
 
+typedef struct
+{
+  RVS_ScheduledOperation *operation;
+  U64                     releases;
+} RVS_OperationReleaseStress;
+
+typedef struct
+{
+  RVS_SchedulerEventKind  kind;
+  RVS_MessageID           source_request_id;
+  U64                     target_index;
+  RVS_SchedulerEffectKind expected_effect;
+  U64                     expected_targets_count;
+} RVS_ReducerEventTest;
+
 internal void rvs_event_wait_test_thread(void *user_data);
 internal void rvs_test_wait_until_event_waiting(RVS_Session *session);
 internal void rvs_engine_shutdown_test_thread(void *user_data);
 internal void rvs_test_wait_until_shutdown(RVS_Session *session);
 internal void rvs_test_wait_until_dispatch_held(RVS_Engine *engine);
 internal void rvs_test_wait_until_execution_state(RVS_Session *session, RVS_ProgramID target, RVS_TargetExecutionState state);
-internal RVS_Request *rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind, RVS_ScheduledOperation **operation_out);
+internal RVS_Request *rvs_test_request_alloc(RVS_Session *session, RVS_SchedulerKey key, RVS_ScheduledOperation **operation_out);
+internal B32 rvs_test_launch_started(RVS_Engine *engine, RVS_MessageID request_id, U32 expected_pid);
+internal B32 rvs_test_launch_event(RVS_Engine *engine, RVS_MessageID request_id, DMN_Event event);
+internal void rvs_operation_release_stress_thread(void *user_data);
 
 internal void
 rvs_request_wait_test_thread(void *user_data)
@@ -114,11 +132,14 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_demon_interrupt_capability(engine->demon) == RVS_DemonInterruptCapability_GlobalWithResume);
   AssertAlways(rvs_demon_interrupt(engine->demon, 1, &(DMN_Handle){0}, 1) == RVS_Result_Error);
   AssertAlways(rvs_demon_send_message(engine->demon, (RVS_DemonMessage){ .type = RVS_DemonMessage_Halt, .request_id = 1 }) == RVS_Result_Unsupported);
+  AssertAlways(rvs_scheduler_operation_rule(RVS_SchedulerOp_Run)->admission_requirement == RVS_AdmissionRequirement_StoppedUnfenced);
+  AssertAlways(rvs_scheduler_operation_rule(RVS_SchedulerOp_Interrupt)->admission_requirement == RVS_AdmissionRequirement_ActiveOneLease);
+  AssertAlways(rvs_scheduler_operation_rule(RVS_SchedulerOp_Terminate)->admission_requirement == RVS_AdmissionRequirement_LiveUnfenced);
   RVS_Session *session = 0;
   AssertAlways(rvs_engine_create_session(engine, &session) == RVS_Result_Ok);
   RVS_Session *second_session = 0;
   AssertAlways(rvs_engine_create_session(engine, &second_session) == RVS_Result_Unsupported);
-  AssertAlways(RVS_RequestPolicy_Null == 0);
+  AssertAlways(RVS_SchedulerOp_Null == 0);
   AssertAlways(str8_match(rvs_string_from_command_kind(RVS_EngineCommandKind_Launch), str8_lit("Launch"), 0));
   AssertAlways(str8_match(rvs_string_from_command_kind(RVS_EngineCommandKind_Run), str8_lit("Run"), 0));
   AssertAlways(rvs_string_from_command_kind(RVS_EngineCommandKind_Null).size == 0);
@@ -154,12 +175,20 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(second_launch_submit.request);
   rvs_request_control_release(second_launch_submit.control);
 
-  RVS_OperationKey lifecycle_key = {
-    .operation_class = RVS_OperationClass_Topology,
-    .operation_id = RVS_EngineCommandKind_Launch,
+  RVS_SubmitInfo third_launch_submit = {0};
+  AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &third_launch_submit) == RVS_Result_Ok);
+  RVS_EngineReply third_launch_reply = {0};
+  AssertAlways(rvs_request_wait(third_launch_submit.request, max_U64, &third_launch_reply) == RVS_Result_Ok);
+  AssertAlways(third_launch_reply.result == RVS_Result_Ok);
+  rvs_request_release(third_launch_submit.request);
+  rvs_request_control_release(third_launch_submit.control);
+
+  RVS_SchedulerKey lifecycle_key = {
+    .op = RVS_SchedulerOp_Launch,
+    .identity = RVS_EngineCommandKind_Launch,
   };
-  RVS_Request *correlated_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch, 0);
-  AssertAlways(rvs_engine_begin_launch(engine, correlated_launch->request_id, 100));
+  RVS_Request *correlated_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
+  AssertAlways(rvs_test_launch_started(engine, correlated_launch->request_id, 100));
   Temp correlation_scratch = scratch_begin(0, 0);
   DMN_EventList correlation_events = {0};
   DMN_Event *wrong_pid_event = dmn_event_list_push(correlation_scratch.arena, &correlation_events);
@@ -173,7 +202,7 @@ entry_point(CmdLine *cmdline)
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_EventBatch,
     .request_id = correlated_launch->request_id,
-    .event_batch.events = correlation_events,
+    .event_batch = { .events = correlation_events },
   });
   RVS_EngineReply correlated_launch_reply = {0};
   AssertAlways(rvs_request_wait(correlated_launch, max_U64, &correlated_launch_reply) == RVS_Result_Ok);
@@ -182,8 +211,8 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(correlated_launch);
   scratch_end(correlation_scratch);
 
-  RVS_Request *exited_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch, 0);
-  AssertAlways(rvs_engine_begin_launch(engine, exited_launch->request_id, 200));
+  RVS_Request *exited_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
+  AssertAlways(rvs_test_launch_started(engine, exited_launch->request_id, 200));
   Temp exit_scratch = scratch_begin(0, 0);
   DMN_EventList exit_events = {0};
   DMN_Event *created_event = dmn_event_list_push(exit_scratch.arena, &exit_events);
@@ -196,7 +225,7 @@ entry_point(CmdLine *cmdline)
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_EventBatch,
     .request_id = exited_launch->request_id,
-    .event_batch.events = exit_events,
+    .event_batch = { .events = exit_events },
   });
   RVS_EngineReply exited_launch_reply = {0};
   AssertAlways(rvs_request_wait(exited_launch, max_U64, &exited_launch_reply) == RVS_Result_Ok);
@@ -204,7 +233,122 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(exited_launch);
   scratch_end(exit_scratch);
 
-  RVS_Request *pump_failure_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch, 0);
+  RVS_Request *duplicate_start_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
+  AssertAlways(rvs_test_launch_started(engine, duplicate_start_launch->request_id, 400));
+  AssertAlways( ! rvs_test_launch_started(engine, duplicate_start_launch->request_id, 400));
+  Temp mismatched_scratch = scratch_begin(0, 0);
+  DMN_EventList mismatched_events = {0};
+  *dmn_event_list_push(mismatched_scratch.arena, &mismatched_events) = (DMN_Event){ .kind = DMN_EventKind_CreateProcess, .system_process_id = 401, .process = { .u64 = { 4 } } };
+  RVS_SchedulerEffectList mismatched_effects = {0};
+  RVS_SchedulerEventDisposition mismatched_dispositions[1] = {0};
+  rvs_engine_apply_scheduler_event(engine, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = { .request_id = duplicate_start_launch->request_id, .events = mismatched_events, .dispositions = mismatched_dispositions, .dispositions_count = 1 },
+  }, &mismatched_effects);
+  AssertAlways(mismatched_effects.first && mismatched_effects.first->kind == RVS_SchedulerEffect_PumpLaunch);
+  rvs_scheduler_effect_list_release(&mismatched_effects);
+  scratch_end(mismatched_scratch);
+  AssertAlways(rvs_test_launch_event(engine, duplicate_start_launch->request_id, (DMN_Event){ .kind = DMN_EventKind_Error, .system_process_id = 400 }));
+  RVS_EngineReply duplicate_start_reply = {0};
+  AssertAlways(rvs_request_wait(duplicate_start_launch, max_U64, &duplicate_start_reply) == RVS_Result_Ok);
+  AssertAlways(duplicate_start_reply.result == RVS_Result_Error);
+  rvs_request_release(duplicate_start_launch);
+
+  RVS_Request *retry_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
+  AssertAlways(rvs_test_launch_started(engine, retry_launch->request_id, 450));
+  RVS_SchedulerEffectList retry_effects = {0};
+  rvs_engine_apply_scheduler_event(engine, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = { .request_id = retry_launch->request_id, .dispositions = (RVS_SchedulerEventDisposition[1]){0}, .dispositions_count = 1 },
+  }, &retry_effects);
+  AssertAlways(retry_effects.first && retry_effects.first->kind == RVS_SchedulerEffect_PumpLaunch);
+  rvs_scheduler_effect_list_release(&retry_effects);
+  AssertAlways(rvs_test_launch_event(engine, retry_launch->request_id, (DMN_Event){ .kind = DMN_EventKind_Error, .system_process_id = 450 }));
+  RVS_EngineReply retry_reply = {0};
+  AssertAlways(rvs_request_wait(retry_launch, max_U64, &retry_reply) == RVS_Result_Ok);
+  AssertAlways(retry_reply.result == RVS_Result_Error);
+  rvs_request_release(retry_launch);
+
+  RVS_Request *suppressed_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
+  AssertAlways(rvs_test_launch_started(engine, suppressed_launch->request_id, 475));
+  Temp suppressed_scratch = scratch_begin(0, 0);
+  DMN_EventList suppressed_events = {0};
+  *dmn_event_list_push(suppressed_scratch.arena, &suppressed_events) = (DMN_Event){ .kind = DMN_EventKind_CreateProcess, .system_process_id = 475, .process = { .u64 = { 6 } } };
+  *dmn_event_list_push(suppressed_scratch.arena, &suppressed_events) = (DMN_Event){ .kind = DMN_EventKind_ExitProcess, .system_process_id = 475, .process = { .u64 = { 6 } } };
+  RVS_SchedulerEventDisposition suppressed_dispositions[2] = {0};
+  RVS_SchedulerEffectList suppressed_effects = {0};
+  rvs_engine_apply_scheduler_event(engine, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = {
+      .request_id = suppressed_launch->request_id,
+      .events = suppressed_events,
+      .dispositions = suppressed_dispositions,
+      .dispositions_count = ArrayCount(suppressed_dispositions),
+    },
+  }, &suppressed_effects);
+  AssertAlways(suppressed_effects.first && suppressed_effects.first->kind == RVS_SchedulerEffect_CompleteRequest);
+  AssertAlways(suppressed_dispositions[0] == RVS_SchedulerEventDisposition_Suppress);
+  AssertAlways(suppressed_dispositions[1] == RVS_SchedulerEventDisposition_Suppress);
+  rvs_engine_execute_scheduler_effects(engine, &suppressed_effects);
+  scratch_end(suppressed_scratch);
+  RVS_EngineReply suppressed_reply = {0};
+  AssertAlways(rvs_request_wait(suppressed_launch, max_U64, &suppressed_reply) == RVS_Result_Ok);
+  AssertAlways(suppressed_reply.result == RVS_Result_Error);
+  rvs_request_release(suppressed_launch);
+
+  RVS_Request *missing_process_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
+  AssertAlways(rvs_test_launch_started(engine, missing_process_launch->request_id, 500));
+  AssertAlways(rvs_test_launch_event(engine, missing_process_launch->request_id, (DMN_Event){ .kind = DMN_EventKind_CreateProcess, .system_process_id = 500 }));
+  RVS_EngineReply missing_process_reply = {0};
+  AssertAlways(rvs_request_wait(missing_process_launch, max_U64, &missing_process_reply) == RVS_Result_Ok);
+  AssertAlways(missing_process_reply.result == RVS_Result_Error);
+  rvs_request_release(missing_process_launch);
+
+  RVS_Request *duplicate_resolve_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
+  DMN_Handle duplicate_resolve_process = { .u64 = { 5 } };
+  AssertAlways(rvs_test_launch_started(engine, duplicate_resolve_launch->request_id, 600));
+  Temp duplicate_create_scratch = scratch_begin(0, 0);
+  DMN_EventList duplicate_create_events = {0};
+  *dmn_event_list_push(duplicate_create_scratch.arena, &duplicate_create_events) = (DMN_Event){ .kind = DMN_EventKind_CreateProcess, .system_process_id = 600, .process = duplicate_resolve_process };
+  *dmn_event_list_push(duplicate_create_scratch.arena, &duplicate_create_events) = (DMN_Event){ .kind = DMN_EventKind_CreateProcess, .system_process_id = 600, .process = { .u64 = { 7 } } };
+  rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
+    .kind = RVS_DemonReplyKind_EventBatch,
+    .request_id = duplicate_resolve_launch->request_id,
+    .event_batch = { .events = duplicate_create_events },
+  });
+  scratch_end(duplicate_create_scratch);
+  RVS_EngineReply duplicate_resolve_reply = {0};
+  AssertAlways(rvs_request_wait(duplicate_resolve_launch, max_U64, &duplicate_resolve_reply) == RVS_Result_Ok);
+  AssertAlways(duplicate_resolve_reply.result == RVS_Result_Ok);
+  AssertAlways(dmn_handle_match(duplicate_resolve_reply.launch.program_id, duplicate_resolve_process));
+  AssertAlways(duplicate_resolve_reply.launch.pid == 600);
+  rvs_request_release(duplicate_resolve_launch);
+
+  Temp retirement_scratch = scratch_begin(0, 0);
+  DMN_EventList retirement_events = {0};
+  *dmn_event_list_push(retirement_scratch.arena, &retirement_events) = (DMN_Event){
+    .kind = DMN_EventKind_ExitProcess,
+    .system_process_id = 600,
+    .process = duplicate_resolve_process,
+    .code = 123,
+  };
+  rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
+    .kind = RVS_DemonReplyKind_EventBatch,
+    .event_batch = { .events = retirement_events },
+  });
+  scratch_end(retirement_scratch);
+  mutex_take(session->control->mutex);
+  RVS_TargetLedgerEntry *retired_entry = rvs_scheduler_target_from_id_locked(&session->scheduler, duplicate_resolve_process);
+  RVS_Program *retired_program = rvs_session_program_from_id_locked(session, duplicate_resolve_process);
+  AssertAlways(retired_entry->state == RVS_TargetState_Removed && retired_entry->is_termination_fenced);
+  AssertAlways(retired_entry->execution_owner == 0 && retired_entry->execution_token == 0);
+  AssertAlways(retired_program && retired_program->lifecycle == RVS_ProgramLifecycle_Removed && retired_program->exit_code == 123);
+  mutex_drop(session->control->mutex);
+  RVS_SubmitInfo retired_run_submit = {0};
+  AssertAlways(rvs_session_run(session, duplicate_resolve_process, &retired_run_submit) == RVS_Result_StaleState);
+  AssertAlways(retired_run_submit.request == 0 && retired_run_submit.control == 0);
+
+  RVS_Request *pump_failure_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
   ins_atomic_u32_eval_assign(&engine->test_fail_demon_message_type, RVS_DemonMessage_Pump);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_LaunchStarted,
@@ -216,16 +360,31 @@ entry_point(CmdLine *cmdline)
   AssertAlways(pump_failure_reply.result == RVS_Result_Error);
   rvs_request_release(pump_failure_launch);
 
-  RVS_OperationKey read_only_key = {
-    .operation_class = RVS_OperationClass_ReadOnly,
-    .program_id = reply.launch.program_id,
-    .operation_id = 1,
+  RVS_ScheduledOperation *malformed_dispatch_operation = 0;
+  RVS_Request *malformed_dispatch_request = rvs_test_request_alloc(session, lifecycle_key, &malformed_dispatch_operation);
+  RVS_ProgramID malformed_dispatch_program = reply.launch.program_id;
+  AssertAlways( ! rvs_engine_request_mark_dispatched(engine, malformed_dispatch_request->request_id,
+                                                      &(RVS_EngineCommand){
+                                                        .kind = RVS_EngineCommandKind_Run,
+                                                        .run = { .programs_count = 1, .programs = &malformed_dispatch_program },
+                                                      }));
+  AssertAlways( ! malformed_dispatch_operation->is_dispatched);
+  mutex_take(session->control->mutex);
+  rvs_scheduler_operation_remove_locked(&session->scheduler, malformed_dispatch_operation);
+  mutex_drop(session->control->mutex);
+  rvs_request_release(malformed_dispatch_request);
+  rvs_scheduler_operation_release(malformed_dispatch_operation);
+
+  RVS_SchedulerKey read_only_key = {
+    .op = RVS_SchedulerOp_ReadOnly,
+    .target = reply.launch.program_id,
+    .identity = 1,
   };
   RVS_ScheduledOperation *stale_operation = 0;
-  RVS_Request *stale_read = rvs_test_request_alloc(session, read_only_key, RVS_EngineCommandKind_Null, &stale_operation);
+  RVS_Request *stale_read = rvs_test_request_alloc(session, read_only_key, &stale_operation);
   mutex_take(session->control->mutex);
-  stale_operation->captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, read_only_key.program_id);
-  rvs_session_bump_program_state_epoch_locked(session, read_only_key.program_id);
+  stale_operation->captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, read_only_key.target);
+  rvs_scheduler_target_from_id_locked(&session->scheduler, read_only_key.target)->revision += 1;
   mutex_drop(session->control->mutex);
   rvs_engine_complete_reply(engine, (RVS_EngineReply){
     .request_id = stale_read->request_id,
@@ -249,12 +408,12 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_session_run_many(session, unknown_programs, ArrayCount(unknown_programs), &unknown_programs_submit) == RVS_Result_Error);
   AssertAlways(unknown_programs_submit.request == 0 && unknown_programs_submit.control == 0);
 
-  RVS_ProgramID run_programs[] = { reply.launch.program_id, second_launch_reply.launch.program_id };
+  RVS_ProgramID run_programs[] = { second_launch_reply.launch.program_id, third_launch_reply.launch.program_id };
   mutex_take(session->control->mutex);
   U64 first_program_epoch = rvs_session_program_state_epoch_locked(session, run_programs[0]);
   U64 second_program_epoch = rvs_session_program_state_epoch_locked(session, run_programs[1]);
-  U64 first_execution_generation = rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[0])->execution_generation;
-  U64 second_execution_generation = rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[1])->execution_generation;
+  U64 first_execution_token = rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[0])->execution_token;
+  U64 second_execution_token = rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[1])->execution_token;
   mutex_drop(session->control->mutex);
   RVS_SubmitInfo valid_run_submit = {0};
   AssertAlways(rvs_session_run_many(session, run_programs, ArrayCount(run_programs), &valid_run_submit) == RVS_Result_Ok);
@@ -270,8 +429,98 @@ entry_point(CmdLine *cmdline)
   mutex_take(session->control->mutex);
   AssertAlways(rvs_session_program_state_epoch_locked(session, run_programs[0]) > first_program_epoch);
   AssertAlways(rvs_session_program_state_epoch_locked(session, run_programs[1]) > second_program_epoch);
-  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[0])->execution_generation > first_execution_generation);
-  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[1])->execution_generation > second_execution_generation);
+  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[0])->execution_token > first_execution_token);
+  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[1])->execution_token > second_execution_token);
+  mutex_drop(session->control->mutex);
+
+  RVS_ThreadID selected_thread = { .u64 = { 0x100 } };
+  Temp thread_scratch = scratch_begin(0, 0);
+  DMN_EventList thread_events = {0};
+  *dmn_event_list_push(thread_scratch.arena, &thread_events) = (DMN_Event){
+    .kind = DMN_EventKind_CreateThread,
+    .process = run_programs[1],
+    .thread = selected_thread,
+  };
+  rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
+    .kind = RVS_DemonReplyKind_EventBatch,
+    .event_batch = { .events = thread_events },
+  });
+  scratch_end(thread_scratch);
+  AssertAlways(rvs_session_select_thread(session, run_programs[1], selected_thread) == RVS_Result_Ok);
+  RVS_ProgramID selected_program = {0};
+  RVS_ThreadID selected_thread_query = {0};
+  AssertAlways(rvs_session_selected_thread(session, &selected_program, &selected_thread_query) == RVS_Result_Ok);
+  AssertAlways(dmn_handle_match(selected_program, run_programs[1]) && dmn_handle_match(selected_thread_query, selected_thread));
+  RVS_SubmitInfo unsupported_step = {0};
+  AssertAlways(rvs_session_step(session, RVS_StepKind_Into, selected_thread, &unsupported_step) == RVS_Result_Unsupported);
+  AssertAlways(unsupported_step.request == 0 && unsupported_step.control == 0);
+  Temp thread_exit_scratch = scratch_begin(0, 0);
+  DMN_EventList thread_exit_events = {0};
+  *dmn_event_list_push(thread_exit_scratch.arena, &thread_exit_events) = (DMN_Event){
+    .kind = DMN_EventKind_ExitThread,
+    .process = run_programs[1],
+    .thread = selected_thread,
+  };
+  rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
+    .kind = RVS_DemonReplyKind_EventBatch,
+    .event_batch = { .events = thread_exit_events },
+  });
+  scratch_end(thread_exit_scratch);
+  AssertAlways(rvs_session_selected_thread(session, &selected_program, &selected_thread_query) == RVS_Result_StaleState);
+
+  // An exception supersedes the active Continue intent after the full backend batch is collected.
+  RVS_MessageID exception_run_request_id = 0x0800;
+  RVS_TargetSnapshot exception_target = { .target = run_programs[0] };
+  mutex_take(session->control->mutex);
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &exception_target, 1, exception_run_request_id));
+  AssertAlways(rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, exception_run_request_id));
+  session->scheduler.phase = RVS_SchedulerPhase_Running;
+  session->scheduler.run_intent = (RVS_RunIntent){
+    .kind = RVS_RunIntentKind_Continue,
+    .state = RVS_RunIntentState_Active,
+    .execution_owner = exception_run_request_id,
+  };
+  U64 exception_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
+  Temp exception_scratch = scratch_begin(0, 0);
+  DMN_EventList exception_events = {0};
+  *dmn_event_list_push(exception_scratch.arena, &exception_events) = (DMN_Event){ .kind = DMN_EventKind_Exception, .process = run_programs[0] };
+  RVS_SchedulerEventDisposition exception_dispositions[1] = {0};
+  RVS_SchedulerEffectList exception_effects = {0};
+  rvs_scheduler_apply_locked(&session->scheduler, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = {
+      .request_id = exception_run_request_id,
+      .events = exception_events,
+      .dispositions = exception_dispositions,
+      .dispositions_count = ArrayCount(exception_dispositions),
+    },
+  }, &exception_effects);
+  AssertAlways(exception_effects.first == 0);
+  AssertAlways(session->scheduler.phase == RVS_SchedulerPhase_Stopped);
+  AssertAlways(session->scheduler.run_intent.state == RVS_RunIntentState_Cancelled);
+  AssertAlways(session->scheduler.run_cycle_epoch == exception_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.cycle_epoch == exception_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.interrupt_attempt == 1);
+  AssertAlways(session->scheduler.stop_transaction.primary_cause == RVS_StopCause_Exception);
+  AssertAlways(exception_dispositions[0] == RVS_SchedulerEventDisposition_Forward);
+  session->scheduler.run_intent.state = RVS_RunIntentState_Active;
+  rvs_scheduler_apply_locked(&session->scheduler, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = {
+      .request_id = exception_run_request_id,
+      .events = exception_events,
+      .dispositions = exception_dispositions,
+      .dispositions_count = ArrayCount(exception_dispositions),
+    },
+  }, &exception_effects);
+  AssertAlways(exception_effects.first == 0);
+  AssertAlways(session->scheduler.phase == RVS_SchedulerPhase_Stopped);
+  AssertAlways(session->scheduler.run_intent.state == RVS_RunIntentState_Active);
+  AssertAlways(session->scheduler.run_cycle_epoch == exception_cycle_epoch);
+  session->scheduler.run_intent.state = RVS_RunIntentState_Cancelled;
+  AssertAlways(rvs_scheduler_finish_run_locked(&session->scheduler, exception_run_request_id));
+  rvs_scheduler_effect_list_release(&exception_effects);
+  scratch_end(exception_scratch);
   mutex_drop(session->control->mutex);
 
   RVS_SubmitInfo invalid_command_submit = {0};
@@ -319,10 +568,10 @@ entry_point(CmdLine *cmdline)
   RVS_SubmitInfo blocked_launch_submit = {0};
   AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &blocked_launch_submit) == RVS_Result_AlreadyPending);
   mutex_take(session->control->mutex);
-  AssertAlways( ! rvs_scheduler_execution_blocks_operation_locked(&session->scheduler, RVS_OperationClass_ReadOnly));
+  AssertAlways( ! rvs_scheduler_execution_blocks_operation_locked(&session->scheduler, RVS_SchedulerOp_ReadOnly));
   mutex_drop(session->control->mutex);
   AssertAlways(rvs_request_control_cancel(cancelled_run_submit.control) == RVS_Result_Ok);
-  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Queued);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
   ins_atomic_u32_eval_assign(&engine->test_hold_before_dispatch, 0);
   RVS_EngineReply cancelled_run_reply = {0};
   AssertAlways(rvs_request_wait(cancelled_run_submit.request, max_U64, &cancelled_run_reply) == RVS_Result_Ok);
@@ -349,25 +598,43 @@ entry_point(CmdLine *cmdline)
   AssertAlways( ! rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, test_run_request_id + 1));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
-    .kind = RVS_DemonReplyKind_Run,
+    .kind = RVS_DemonReplyKind_ActionResult,
     .request_id = test_run_request_id,
-    .result = RVS_Result_Ok,
+    .action_result = { .action = RVS_DemonAction_Run, .result = RVS_Result_Ok },
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_RunInFlight);
-  RVS_OperationKey interrupt_key = {
-    .operation_class = RVS_OperationClass_InterruptTransition,
-    .operation_id = 1,
+  RVS_SchedulerKey interrupt_key = {
+    .op = RVS_SchedulerOp_Interrupt,
+    .identity = 1,
   };
   mutex_take(session->control->mutex);
+  session->scheduler.phase = RVS_SchedulerPhase_Running;
+  U64 interrupt_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
   RVS_SchedulerAdmission interrupt_admission = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, interrupt_key, &reply.launch.program_id, 1, 0, &interrupt_admission) == RVS_Result_Ok);
-  AssertAlways(interrupt_admission.operation->targets[0].execution_generation == rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id)->execution_generation);
-  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id)->execution_state == RVS_TargetExecutionState_InterruptPending);
-  rvs_scheduler_note_interrupt_event_locked(&session->scheduler, &(RVS_Event){
-    .kind = DMN_EventKind_Halt,
-    .process = reply.launch.program_id,
-  });
-  AssertAlways(rvs_scheduler_finish_interrupt_locked(&session->scheduler, interrupt_admission.request->request_id) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_Interrupt, interrupt_key, &reply.launch.program_id, 1, 0, &interrupt_admission) == RVS_Result_Ok);
+  AssertAlways(session->scheduler.run_cycle_epoch == interrupt_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.cycle_epoch == interrupt_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.interrupt_attempt == 1);
+  AssertAlways(interrupt_admission.operation->targets[0].execution_token == rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id)->execution_token);
+  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id)->state == RVS_TargetExecutionState_InterruptPending);
+  Temp stop_scratch = scratch_begin(0, 0);
+  DMN_EventList stop_events = {0};
+  *dmn_event_list_push(stop_scratch.arena, &stop_events) = (DMN_Event){ .kind = DMN_EventKind_Halt, .process = reply.launch.program_id };
+  RVS_SchedulerEffectList stop_effects = {0};
+  rvs_scheduler_apply_locked(&session->scheduler, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = { .request_id = test_run_request_id, .events = stop_events, .dispositions = (RVS_SchedulerEventDisposition[1]){0}, .dispositions_count = 1 },
+  }, &stop_effects);
+  AssertAlways(stop_effects.first && stop_effects.first->kind == RVS_SchedulerEffect_ResumeTargetSubset);
+  AssertAlways(stop_effects.first->targets_count == 0);
+  AssertAlways(session->scheduler.resume_transaction.cycle_epoch == interrupt_cycle_epoch);
+  AssertAlways(session->scheduler.resume_transaction.resume_attempt == 1);
+  AssertAlways(session->scheduler.run_cycle_epoch == interrupt_cycle_epoch);
+  rvs_scheduler_effect_list_release(&stop_effects);
+  scratch_end(stop_scratch);
+  session->scheduler.resume_transaction.acknowledged = 1;
+  AssertAlways(rvs_scheduler_finish_resume_transaction_locked(&session->scheduler, interrupt_admission.request->request_id) == RVS_Result_Ok);
+  AssertAlways(session->scheduler.run_cycle_epoch == interrupt_cycle_epoch);
   rvs_scheduler_operation_remove_locked(&session->scheduler, interrupt_admission.operation);
   rvs_request_release(interrupt_admission.request); // drop unreturned caller ownership
   rvs_scheduler_operation_release(interrupt_admission.operation); // drop active registration ownership
@@ -378,12 +645,12 @@ entry_point(CmdLine *cmdline)
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
-    .kind = RVS_DemonReplyKind_RunFinished,
+    .kind = RVS_DemonReplyKind_ExecutionFinished,
     .request_id = test_run_request_id + 1,
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
-    .kind = RVS_DemonReplyKind_RunFinished,
+    .kind = RVS_DemonReplyKind_ExecutionFinished,
     .request_id = test_run_request_id,
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
@@ -392,37 +659,170 @@ entry_point(CmdLine *cmdline)
   mutex_take(session->control->mutex);
   AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &test_target, 1, test_run_request_id));
   AssertAlways(rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, test_run_request_id));
+  U64 exited_interrupt_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
   RVS_SchedulerAdmission exited_interrupt_admission = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, interrupt_key, &reply.launch.program_id, 1, 0, &exited_interrupt_admission) == RVS_Result_Ok);
-  rvs_scheduler_note_interrupt_event_locked(&session->scheduler, &(RVS_Event){
-    .kind = DMN_EventKind_ExitProcess,
-    .process = reply.launch.program_id,
-  });
-  AssertAlways(rvs_scheduler_finish_interrupt_locked(&session->scheduler, exited_interrupt_admission.request->request_id) == RVS_Result_StaleState);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_Interrupt, interrupt_key, &reply.launch.program_id, 1, 0, &exited_interrupt_admission) == RVS_Result_Ok);
+  AssertAlways(session->scheduler.run_cycle_epoch == exited_interrupt_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.cycle_epoch == exited_interrupt_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.interrupt_attempt == 1);
+  Temp selected_exit_scratch = scratch_begin(0, 0);
+  DMN_EventList selected_exit_events = {0};
+  *dmn_event_list_push(selected_exit_scratch.arena, &selected_exit_events) = (DMN_Event){ .kind = DMN_EventKind_ExitProcess, .process = reply.launch.program_id };
+  RVS_SchedulerEffectList selected_exit_effects = {0};
+  rvs_scheduler_apply_locked(&session->scheduler, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = { .request_id = test_run_request_id, .events = selected_exit_events, .dispositions = (RVS_SchedulerEventDisposition[1]){0}, .dispositions_count = 1 },
+  }, &selected_exit_effects);
+  rvs_scheduler_effect_list_release(&selected_exit_effects);
+  scratch_end(selected_exit_scratch);
+  AssertAlways(session->scheduler.resume_transaction.cycle_epoch == exited_interrupt_cycle_epoch);
+  AssertAlways(session->scheduler.resume_transaction.resume_attempt == 1);
+  session->scheduler.resume_transaction.acknowledged = 1;
+  AssertAlways(rvs_scheduler_finish_resume_transaction_locked(&session->scheduler, exited_interrupt_admission.request->request_id) == RVS_Result_StaleState);
+  AssertAlways(session->scheduler.run_cycle_epoch == exited_interrupt_cycle_epoch);
   rvs_scheduler_operation_remove_locked(&session->scheduler, exited_interrupt_admission.operation);
   rvs_request_release(exited_interrupt_admission.request); // drop unreturned caller ownership
   rvs_scheduler_operation_release(exited_interrupt_admission.operation); // drop active registration ownership
   mutex_drop(session->control->mutex);
 
-  RVS_OperationKey terminate_key = {
-    .operation_class = RVS_OperationClass_Termination,
-    .operation_id = 1,
+  RVS_SchedulerKey terminate_key = {
+    .op = RVS_SchedulerOp_Terminate,
+    .identity = 1,
   };
   mutex_take(session->control->mutex);
-  RVS_TargetLedgerEntry *terminate_entry = rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id);
-  U64 state_generation = terminate_entry->state_generation;
-  U64 topology_generation = terminate_entry->topology_generation;
+  RVS_ProgramID terminate_target = second_launch_reply.launch.program_id;
+  RVS_TargetLedgerEntry *terminate_entry = rvs_scheduler_target_from_id_locked(&session->scheduler, terminate_target);
+  U64 revision = terminate_entry->revision;
   RVS_SchedulerAdmission terminate_admission = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, terminate_key, &reply.launch.program_id, 1, 0, &terminate_admission) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_Terminate, terminate_key, &terminate_target, 1, 0, &terminate_admission) == RVS_Result_Ok);
   AssertAlways(terminate_entry->is_termination_fenced);
-  AssertAlways(terminate_entry->state_generation > state_generation && terminate_entry->topology_generation > topology_generation);
+  AssertAlways(terminate_entry->revision > revision);
   RVS_SchedulerAdmission fenced_query = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, (RVS_OperationKey){ .operation_class = RVS_OperationClass_ReadOnly, .program_id = reply.launch.program_id, .operation_id = 2 }, 0, 0, 0, &fenced_query) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_ReadOnly, (RVS_SchedulerKey){ .op = RVS_SchedulerOp_ReadOnly, .target = terminate_target, .identity = 2 }, 0, 0, 0, &fenced_query) == RVS_Result_Ok);
   AssertAlways(fenced_query.is_terminal && fenced_query.request->reply.result == RVS_Result_StaleState);
   rvs_request_release(fenced_query.request);
   rvs_scheduler_rollback_admission_locked(&session->scheduler, &terminate_admission);
   AssertAlways( ! terminate_entry->is_termination_fenced);
-  AssertAlways(terminate_entry->state_generation == state_generation && terminate_entry->topology_generation == topology_generation);
+  AssertAlways(terminate_entry->revision == revision);
+  mutex_drop(session->control->mutex);
+
+  // Table-drive the GlobalWithResume reducer over a two-target execution lease.
+  RVS_MessageID reducer_run_request_id = 0x2000;
+  mutex_take(session->control->mutex);
+  RVS_TargetSnapshot reducer_run_targets[] = {
+    { .target = run_programs[0] },
+    { .target = run_programs[1] },
+  };
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, reducer_run_targets, ArrayCount(reducer_run_targets), reducer_run_request_id));
+  AssertAlways(rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, reducer_run_request_id));
+  U64 reducer_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
+  RVS_SchedulerAdmission reducer_interrupt_admission = {0};
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
+                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
+                                          interrupt_key, &run_programs[0], 1, 0,
+                                          &reducer_interrupt_admission) == RVS_Result_Ok);
+  AssertAlways(session->scheduler.run_cycle_epoch == reducer_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.cycle_epoch == reducer_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.interrupt_attempt == 1);
+  RVS_ScheduledOperation *reducer_interrupt_operation = reducer_interrupt_admission.operation;
+  RVS_Request *reducer_interrupt_request = reducer_interrupt_operation->request;
+
+  RVS_ReducerEventTest reducer_event_tests[] = {
+    { RVS_SchedulerEvent_DemonEventBatch, reducer_run_request_id + 1, 0, RVS_SchedulerEffect_Null,        0 },
+    { RVS_SchedulerEvent_DemonEventBatch, reducer_run_request_id,     0, RVS_SchedulerEffect_Null,        0 },
+    { RVS_SchedulerEvent_DemonEventBatch, reducer_run_request_id,     0, RVS_SchedulerEffect_Null,        0 },
+    { RVS_SchedulerEvent_DemonEventBatch, reducer_run_request_id,     1, RVS_SchedulerEffect_ResumeTargetSubset, 1 },
+    { RVS_SchedulerEvent_DemonEventBatch, reducer_run_request_id,     1, RVS_SchedulerEffect_Null,        0 },
+    { RVS_SchedulerEvent_ResumeAccepted, reducer_interrupt_request->request_id, 0, RVS_SchedulerEffect_CompleteRequest, 0 },
+    { RVS_SchedulerEvent_ResumeAccepted, reducer_interrupt_request->request_id, 0, RVS_SchedulerEffect_IgnoreStale, 0 },
+  };
+  for EachIndex(test_idx, ArrayCount(reducer_event_tests)) {
+    RVS_ReducerEventTest *test = &reducer_event_tests[test_idx];
+    RVS_SchedulerEffectList effects = {0};
+    RVS_SchedulerEvent event = { .kind = test->kind };
+    RVS_SchedulerEventDisposition dispositions[1] = {0};
+    Temp event_scratch = scratch_begin(0, 0);
+    if (test->kind == RVS_SchedulerEvent_DemonEventBatch) {
+      DMN_EventList events = {0};
+      *dmn_event_list_push(event_scratch.arena, &events) = (DMN_Event){ .kind = DMN_EventKind_Halt, .process = run_programs[test->target_index] };
+      event.demon_events.request_id = test->source_request_id;
+      event.demon_events.events = events;
+      event.demon_events.dispositions = dispositions;
+      event.demon_events.dispositions_count = 1;
+    } else {
+      event.request.request_id = test->source_request_id;
+    }
+    rvs_scheduler_apply_locked(&session->scheduler, event, &effects);
+    AssertAlways((effects.first ? effects.first->kind : RVS_SchedulerEffect_Null) == test->expected_effect);
+    if (effects.first) { AssertAlways(effects.first->targets_count == test->expected_targets_count); }
+    AssertAlways(session->scheduler.run_cycle_epoch == reducer_cycle_epoch);
+    if (test_idx == 0) {
+      AssertAlways(session->scheduler.phase == RVS_SchedulerPhase_Interrupting);
+      for EachIndex(target_idx, reducer_interrupt_operation->targets_count) {
+        AssertAlways( ! reducer_interrupt_operation->targets[target_idx].stop_observed);
+      }
+    } else if (test_idx == 3 || test_idx == 4) {
+      AssertAlways(session->scheduler.resume_transaction.cycle_epoch == reducer_cycle_epoch);
+      AssertAlways(session->scheduler.resume_transaction.resume_attempt == 1);
+    }
+    rvs_scheduler_effect_list_release(&effects);
+    scratch_end(event_scratch);
+  }
+  AssertAlways(rvs_scheduler_finish_run_locked(&session->scheduler, reducer_run_request_id));
+  rvs_request_release(reducer_interrupt_request); // drop the unreturned submit ownership
+
+  RVS_MessageID reducer_exit_run_request_id = reducer_run_request_id + 1;
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, reducer_run_targets, ArrayCount(reducer_run_targets), reducer_exit_run_request_id));
+  AssertAlways(rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, reducer_exit_run_request_id));
+  U64 reducer_exit_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
+  RVS_SchedulerAdmission exit_interrupt_admission = {0};
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
+                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
+                                          interrupt_key, &run_programs[0], 1, 0,
+                                          &exit_interrupt_admission) == RVS_Result_Ok);
+  RVS_ScheduledOperation *exit_interrupt_operation = exit_interrupt_admission.operation;
+  RVS_Request *exit_interrupt_request = exit_interrupt_operation->request;
+  AssertAlways(session->scheduler.run_cycle_epoch == reducer_exit_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.cycle_epoch == reducer_exit_cycle_epoch);
+  AssertAlways(session->scheduler.stop_transaction.interrupt_attempt == 1);
+  RVS_ReducerEventTest exit_event_tests[] = {
+    { RVS_SchedulerEvent_DemonEventBatch, reducer_exit_run_request_id, 1, RVS_SchedulerEffect_Null, 0 },
+    { RVS_SchedulerEvent_DemonEventBatch, reducer_exit_run_request_id, 0, RVS_SchedulerEffect_ResumeTargetSubset, 1 },
+    { RVS_SchedulerEvent_ResumeAccepted, exit_interrupt_request->request_id, 0, RVS_SchedulerEffect_CompleteRequest, 0 },
+  };
+  for EachIndex(test_idx, ArrayCount(exit_event_tests)) {
+    RVS_ReducerEventTest *test = &exit_event_tests[test_idx];
+    RVS_SchedulerEffectList effects = {0};
+    RVS_SchedulerEvent event = { .kind = test->kind };
+    RVS_SchedulerEventDisposition dispositions[1] = {0};
+    Temp event_scratch = scratch_begin(0, 0);
+    if (test->kind == RVS_SchedulerEvent_DemonEventBatch) {
+      DMN_EventList events = {0};
+      *dmn_event_list_push(event_scratch.arena, &events) = (DMN_Event){
+        .kind = test_idx == 0 ? DMN_EventKind_Halt : DMN_EventKind_ExitProcess,
+        .process = run_programs[test->target_index],
+      };
+      event.demon_events.request_id = test->source_request_id;
+      event.demon_events.events = events;
+      event.demon_events.dispositions = dispositions;
+      event.demon_events.dispositions_count = 1;
+    } else {
+      event.request.request_id = test->source_request_id;
+    }
+    rvs_scheduler_apply_locked(&session->scheduler, event, &effects);
+    AssertAlways((effects.first ? effects.first->kind : RVS_SchedulerEffect_Null) == test->expected_effect);
+    if (effects.first) { AssertAlways(effects.first->targets_count == test->expected_targets_count); }
+    AssertAlways(session->scheduler.run_cycle_epoch == reducer_exit_cycle_epoch);
+    if (test_idx == 1) {
+      AssertAlways(session->scheduler.resume_transaction.cycle_epoch == reducer_exit_cycle_epoch);
+      AssertAlways(session->scheduler.resume_transaction.resume_attempt == 1);
+    }
+    if (test->kind == RVS_SchedulerEvent_ResumeAccepted) { AssertAlways(effects.first->reply.result == RVS_Result_StaleState); }
+    rvs_scheduler_effect_list_release(&effects);
+    scratch_end(event_scratch);
+  }
+  AssertAlways(rvs_scheduler_finish_run_locked(&session->scheduler, reducer_exit_run_request_id));
+  rvs_request_release(exit_interrupt_request); // drop the unreturned submit ownership
   mutex_drop(session->control->mutex);
 
   mutex_take(session->control->mutex);
@@ -431,22 +831,21 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &test_target, 1, test_run_request_id));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
-    .kind = RVS_DemonReplyKind_Run,
+    .kind = RVS_DemonReplyKind_ActionResult,
     .request_id = test_run_request_id,
-    .result = RVS_Result_Error,
+    .action_result = { .action = RVS_DemonAction_Run, .result = RVS_Result_Error },
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
-  RVS_OperationKey join_key = {
-    .operation_class = RVS_OperationClass_ReadOnly,
-    .program_id      = reply.launch.program_id,
-    .operation_id    = 1,
+  RVS_SchedulerKey join_key = {
+    .op       = RVS_SchedulerOp_ReadOnly,
+    .target   = reply.launch.program_id,
+    .identity = 1,
   };
   mutex_take(session->control->mutex);
   RVS_ScheduledOperation *join_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
                                                                                    session->engine->request_pool,
                                                                                    ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                                                   RVS_RequestPolicy_RejectIfPending,
                                                                                    join_key, 0, 0, 0);
   RVS_Request *join_request = join_operation->request;
   AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_operation) == RVS_Result_Ok);
@@ -463,9 +862,9 @@ entry_point(CmdLine *cmdline)
   RVS_ScheduledOperation *foreign_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
                                                                                       foreign_pool,
                                                                                       ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                                                      RVS_RequestPolicy_RejectIfPending,
                                                                                       join_key, 0, 0, 0);
   RVS_Request *foreign_request = foreign_operation->request;
+  AssertAlways(foreign_operation == join_operation); // final releases recycle operations across request pools
   AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, foreign_operation) == RVS_Result_Error);
   rvs_scheduler_operation_remove_locked(&session->scheduler, foreign_operation);
   mutex_drop(session->control->mutex);
@@ -473,20 +872,88 @@ entry_point(CmdLine *cmdline)
   rvs_scheduler_operation_release(foreign_operation); // drop active registration ownership
   rvs_request_pool_release_engine(foreign_pool);
 
-  lifecycle_key.operation_id = 2;
-  RVS_OperationKey session_execution_key = {
-    .operation_class = RVS_OperationClass_ExecutionWorkflow,
-    .operation_id = RVS_EngineCommandKind_Run,
+  mutex_take(session->control->mutex);
+  RVS_ScheduledOperation *snapshot_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
+                                                                                       session->engine->request_pool,
+                                                                                       ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                                       join_key, &reply.launch.program_id, 1, 0);
+  RVS_TargetSnapshotStorage *snapshot_storage = snapshot_operation->target_storage;
+  RVS_Request *snapshot_request = snapshot_operation->request;
+  rvs_scheduler_operation_remove_locked(&session->scheduler, snapshot_operation);
+  mutex_drop(session->control->mutex);
+  rvs_request_release(snapshot_request);
+  rvs_scheduler_operation_release(snapshot_operation);
+
+  mutex_take(session->control->mutex);
+  RVS_ScheduledOperation *reused_snapshot_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
+                                                                                              session->engine->request_pool,
+                                                                                              ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                                              join_key, &reply.launch.program_id, 1, 0);
+  AssertAlways(reused_snapshot_operation->target_storage == snapshot_storage);
+  RVS_Request *reused_snapshot_request = reused_snapshot_operation->request;
+  rvs_scheduler_operation_remove_locked(&session->scheduler, reused_snapshot_operation);
+  RVS_SchedulerEffectList recycled_effects = {0};
+  rvs_scheduler_effect_push_locked(&session->scheduler, &recycled_effects, RVS_SchedulerEffect_IgnoreStale, 0, RVS_Result_StaleState);
+  RVS_SchedulerEffect *recycled_effect = recycled_effects.first;
+  rvs_scheduler_effect_list_release(&recycled_effects);
+  rvs_scheduler_effect_push_locked(&session->scheduler, &recycled_effects, RVS_SchedulerEffect_IgnoreStale, 0, RVS_Result_StaleState);
+  AssertAlways(recycled_effects.first == recycled_effect);
+  rvs_scheduler_effect_list_release(&recycled_effects);
+  mutex_drop(session->control->mutex);
+  rvs_request_release(reused_snapshot_request);
+  rvs_scheduler_operation_release(reused_snapshot_operation);
+
+  enum { operation_release_stress_thread_count = 4, operation_release_stress_releases_per_thread = 64 };
+  mutex_take(session->control->mutex);
+  RVS_ScheduledOperation *stress_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
+                                                                                     session->engine->request_pool,
+                                                                                     ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                                     join_key, &reply.launch.program_id, 1, 0);
+  RVS_Request *stress_request = stress_operation->request;
+  rvs_scheduler_operation_remove_locked(&session->scheduler, stress_operation);
+  for EachIndex(ref_idx, operation_release_stress_thread_count*operation_release_stress_releases_per_thread - 1) {
+    rvs_scheduler_operation_addref(stress_operation);
+  }
+  mutex_drop(session->control->mutex);
+  rvs_request_release(stress_request); // the concurrent releases own all remaining operation references
+  RVS_OperationReleaseStress operation_release_stress = {
+    .operation = stress_operation,
+    .releases = operation_release_stress_releases_per_thread,
   };
-  AssertAlways(rvs_operation_keys_conflict(lifecycle_key, session_execution_key));
-  AssertAlways(rvs_operation_keys_conflict(session_execution_key, session_execution_key));
-  RVS_OperationKey query_key = {
-    .operation_class   = RVS_OperationClass_ReadOnly,
-    .program_id        = { .u64 = { 1 } },
-    .operation_id      = 6,
+  Thread operation_release_threads[operation_release_stress_thread_count] = {0};
+  for EachIndex(thread_idx, operation_release_stress_thread_count) {
+    operation_release_threads[thread_idx] = thread_launch(rvs_operation_release_stress_thread, &operation_release_stress);
+    AssertAlways( ! MemoryIsZeroStruct(&operation_release_threads[thread_idx]));
+  }
+  for EachIndex(thread_idx, operation_release_stress_thread_count) {
+    thread_join(operation_release_threads[thread_idx], max_U64);
+  }
+  mutex_take(session->control->mutex);
+  RVS_ScheduledOperation *recycled_stress_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
+                                                                                              session->engine->request_pool,
+                                                                                              ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                                              join_key, &reply.launch.program_id, 1, 0);
+  AssertAlways(recycled_stress_operation == stress_operation);
+  RVS_Request *recycled_stress_request = recycled_stress_operation->request;
+  rvs_scheduler_operation_remove_locked(&session->scheduler, recycled_stress_operation);
+  mutex_drop(session->control->mutex);
+  rvs_request_release(recycled_stress_request);
+  rvs_scheduler_operation_release(recycled_stress_operation);
+
+  lifecycle_key.identity = 2;
+  RVS_SchedulerKey session_execution_key = {
+    .op = RVS_SchedulerOp_Run,
+    .identity = RVS_EngineCommandKind_Run,
   };
-  AssertAlways(rvs_operation_keys_conflict(lifecycle_key, query_key));
-  AssertAlways( ! rvs_operation_keys_conflict(session_execution_key, query_key));
+  AssertAlways(rvs_scheduler_keys_conflict(lifecycle_key, session_execution_key));
+  AssertAlways(rvs_scheduler_keys_conflict(session_execution_key, session_execution_key));
+  RVS_SchedulerKey query_key = {
+    .op       = RVS_SchedulerOp_ReadOnly,
+    .target   = { .u64 = { 1 } },
+    .identity = 6,
+  };
+  AssertAlways(rvs_scheduler_keys_conflict(lifecycle_key, query_key));
+  AssertAlways( ! rvs_scheduler_keys_conflict(session_execution_key, query_key));
 
   RVS_EventWaitTest event_waiter = { .session = session };
   Thread event_thread = thread_launch(rvs_event_wait_test_thread, &event_waiter);
@@ -494,7 +961,7 @@ entry_point(CmdLine *cmdline)
   rvs_test_wait_until_event_waiting(session);
   ins_atomic_u32_eval_assign(&engine->test_hold_before_dispatch, 1);
   RVS_SubmitInfo shutdown_held_run_submit = {0};
-  AssertAlways(rvs_session_run(session, reply.launch.program_id, &shutdown_held_run_submit) == RVS_Result_Ok);
+  AssertAlways(rvs_session_run(session, run_programs[1], &shutdown_held_run_submit) == RVS_Result_Ok);
   rvs_test_wait_until_dispatch_held(engine);
   RVS_EngineShutdownTest shutdown_test = { .engine = engine };
   Thread shutdown_thread = thread_launch(rvs_engine_shutdown_test_thread, &shutdown_test);
@@ -512,7 +979,7 @@ entry_point(CmdLine *cmdline)
   AssertAlways( ! shutdown_held_run_submit.control->operation->is_dispatched);
   rvs_request_release(shutdown_held_run_submit.request);
   rvs_request_control_release(shutdown_held_run_submit.control);
-  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, run_programs[1], RVS_TargetExecutionState_Idle);
   Temp stopped_event_scratch = scratch_begin(0, 0);
   RVS_Event event = {0};
   AssertAlways(rvs_session_wait_for_event(stopped_event_scratch.arena, session, 0, &event) == RVS_Result_EngineStopped);
@@ -552,6 +1019,15 @@ rvs_engine_shutdown_test_thread(void *user_data)
 }
 
 internal void
+rvs_operation_release_stress_thread(void *user_data)
+{
+  RVS_OperationReleaseStress *stress = user_data;
+  for EachIndex(release_idx, stress->releases) {
+    rvs_scheduler_operation_release(stress->operation);
+  }
+}
+
+internal void
 rvs_test_wait_until_shutdown(RVS_Session *session)
 {
   for (;;) {
@@ -577,23 +1053,57 @@ rvs_test_wait_until_execution_state(RVS_Session *session, RVS_ProgramID target, 
   for (;;) {
     mutex_take(session->control->mutex);
     RVS_TargetLedgerEntry *entry = rvs_scheduler_target_from_id_locked(&session->scheduler, target);
-    B32 matches = entry != 0 && entry->execution_state == state;
+    B32 matches = entry != 0 && entry->state == state;
     mutex_drop(session->control->mutex);
     if (matches) { break; }
     sleep_ms(1);
   }
 }
 
+internal B32
+rvs_test_launch_started(RVS_Engine *engine, RVS_MessageID request_id, U32 expected_pid)
+{
+  RVS_SchedulerEffectList effects = {0};
+  rvs_engine_apply_scheduler_event(engine, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_LaunchStarted,
+    .launch_started = { .request_id = request_id, .pid = expected_pid },
+  }, &effects);
+  B32 accepted = effects.first && effects.first->kind == RVS_SchedulerEffect_PumpLaunch;
+  rvs_scheduler_effect_list_release(&effects);
+  return accepted;
+}
+
+internal B32
+rvs_test_launch_event(RVS_Engine *engine, RVS_MessageID request_id, DMN_Event event)
+{
+  Temp scratch = scratch_begin(0, 0);
+  DMN_EventList events = {0};
+  *dmn_event_list_push(scratch.arena, &events) = event;
+  RVS_SchedulerEventDisposition *dispositions = push_array(scratch.arena, RVS_SchedulerEventDisposition, 1);
+  RVS_SchedulerEffectList effects = {0};
+  rvs_engine_apply_scheduler_event(engine, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DemonEventBatch,
+    .demon_events = {
+      .request_id = request_id,
+      .events = events,
+      .dispositions = dispositions,
+      .dispositions_count = 1,
+    },
+  }, &effects);
+  B32 accepted = effects.first && effects.first->kind != RVS_SchedulerEffect_IgnoreStale;
+  rvs_engine_execute_scheduler_effects(engine, &effects);
+  scratch_end(scratch);
+  return accepted;
+}
+
 internal RVS_Request *
-rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind, RVS_ScheduledOperation **operation_out)
+rvs_test_request_alloc(RVS_Session *session, RVS_SchedulerKey key, RVS_ScheduledOperation **operation_out)
 {
   mutex_take(session->control->mutex);
   RVS_ScheduledOperation *operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
-                                                                              session->engine->request_pool,
-                                                                              ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                                              RVS_RequestPolicy_RejectIfPending,
-                                                                              key, 0, 0, 0);
-  operation->command_kind = command_kind;
+                                                                               session->engine->request_pool,
+                                                                               ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                               key, 0, 0, 0);
   mutex_drop(session->control->mutex);
   if (operation_out) { *operation_out = operation; }
   return operation->request;
