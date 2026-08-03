@@ -253,7 +253,7 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
     captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, key.program_id);
   }
   RVS_SchedulerAdmission admission = {0};
-  result = rvs_scheduler_admit_locked(session, engine->request_pool, &engine->next_request_id, policy, key, captured_program_state_epoch, &admission);
+  result = rvs_scheduler_admit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id, policy, key, captured_program_state_epoch, &admission);
   if (result != RVS_Result_Ok) {
     goto exit_arena_mutex;
   }

@@ -365,12 +365,12 @@ entry_point(CmdLine *cmdline)
     .operation_id    = 1,
   };
   mutex_take(session->control->mutex);
-  RVS_Request *join_request = rvs_session_request_alloc_locked(session,
-                                                                 session->engine->request_pool,
-                                                                 ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                                 join_key);
-  AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_Ok);
-  AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_AlreadyPending);
+  RVS_Request *join_request = rvs_scheduler_request_alloc_locked(&session->scheduler,
+                                                                    session->engine->request_pool,
+                                                                    ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                    join_key);
+  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_request) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_request) == RVS_Result_AlreadyPending);
   AssertAlways(rvs_scheduler_unregister_operation_locked(&session->scheduler, join_key) == join_request);
   rvs_scheduler_request_remove_locked(&session->scheduler, join_request);
   mutex_drop(session->control->mutex);
@@ -380,11 +380,11 @@ entry_point(CmdLine *cmdline)
 
   RVS_RequestPool *foreign_pool = rvs_request_pool_alloc();
   mutex_take(session->control->mutex);
-  RVS_Request *foreign_request = rvs_session_request_alloc_locked(session,
-                                                                     foreign_pool,
-                                                                     ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                                     join_key);
-  AssertAlways(rvs_session_register_operation_locked(session, join_key, foreign_request) == RVS_Result_Error);
+  RVS_Request *foreign_request = rvs_scheduler_request_alloc_locked(&session->scheduler,
+                                                                       foreign_pool,
+                                                                       ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                       join_key);
+  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, foreign_request) == RVS_Result_Error);
   rvs_scheduler_request_remove_locked(&session->scheduler, foreign_request);
   mutex_drop(session->control->mutex);
   rvs_request_release(foreign_request); // drop engine ownership
@@ -507,10 +507,10 @@ internal RVS_Request *
 rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind)
 {
   mutex_take(session->control->mutex);
-  RVS_Request *request = rvs_session_request_alloc_locked(session,
-                                                            session->engine->request_pool,
-                                                            ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                            key);
+  RVS_Request *request = rvs_scheduler_request_alloc_locked(&session->scheduler,
+                                                               session->engine->request_pool,
+                                                               ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                               key);
   request->command_kind = command_kind;
   mutex_drop(session->control->mutex);
   return request;
