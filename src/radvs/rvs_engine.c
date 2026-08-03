@@ -1,5 +1,6 @@
 #include "radvs/rvs_engine.h"
 #include "radvs/rvs_demon.h"
+#include "radvs/rvs_request.h"
 #include "radvs/rvs_schedule.h"
 
 ////////////////////////////////
@@ -268,6 +269,7 @@ rvs_engine_control_release(RVS_EngineControl *control)
   ProfEnd();
 }
 
+#include "radvs/rvs_request.c"
 #include "radvs/rvs_schedule.c"
 
 internal RVS_Session *

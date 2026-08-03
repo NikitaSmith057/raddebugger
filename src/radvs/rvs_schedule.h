@@ -42,38 +42,6 @@ struct RVS_RequestControl
   B32                registered;
 };
 
-struct RVS_RequestPool
-{
-  Arena       *arena;
-  Mutex        mutex;
-  RVS_Request *free_first;
-  U64          live_requests_count;
-  B32          engine_released;
-};
-
-struct RVS_Request
-{
-  RVS_Request          *next;
-  RVS_Request          *prev;
-  RVS_Request          *key_next;
-  RVS_Request          *key_prev;
-  RVS_RequestPool      *pool;
-  RVS_Session          *session;
-  Mutex                 mutex;
-  CondVar               cv;
-  U32                   ref_count;
-  B32                   is_dispatched;
-  U64                   captured_program_state_epoch;
-  RVS_MessageID         request_id;
-  U32                   launch_pid;
-  RVS_EngineCommandKind command_kind;
-  RVS_OperationKey      key;
-  RVS_EngineReply       reply;
-};
-
-internal RVS_RequestPool *rvs_request_pool_alloc(void);
-internal void             rvs_request_pool_release_engine(RVS_RequestPool *pool);
-
 // The following scheduler mutation APIs require session->control->mutex.
 internal B32          rvs_operation_key_is_well_formed_for_policy(RVS_RequestPolicy policy, RVS_OperationKey key);
 internal B32          rvs_operation_key_match(RVS_OperationKey a, RVS_OperationKey b);
@@ -90,7 +58,6 @@ internal RVS_Request *rvs_session_find_active_request_locked(RVS_Session *sessio
 internal RVS_Request *rvs_session_request_mark_dispatched_locked(RVS_Session *session, RVS_MessageID request_id);
 internal RVS_Result   rvs_session_register_operation_locked(RVS_Session *session, RVS_OperationKey key, RVS_Request *request);
 internal RVS_Request *rvs_session_unregister_operation_locked(RVS_Session *session, RVS_OperationKey key);
-internal B32          rvs_request_complete(RVS_Request *request, RVS_EngineReply reply);
 internal RVS_Request *rvs_session_retire_undispatched_request_locked(RVS_Session *session, RVS_MessageID request_id);
 internal RVS_Request *rvs_session_take_active_requests_locked(RVS_Session *session);
 internal RVS_Request *rvs_session_take_operation_keys_locked(RVS_Session *session);
