@@ -189,16 +189,19 @@ rvs_operation_schedule_from_engine_command(RVS_EngineCommand command, RVS_Reques
     };
     return 1;
   } break;
-  case RVS_EngineCommandKind_Run: {
-    if (command.run.programs_count == 0 || command.run.programs == 0) {
+  case RVS_EngineCommandKind_Run:
+  case RVS_EngineCommandKind_Interrupt: {
+    RVS_ProgramID *programs = command.kind == RVS_EngineCommandKind_Run ? command.run.programs : command.interrupt.programs;
+    U64 programs_count = command.kind == RVS_EngineCommandKind_Run ? command.run.programs_count : command.interrupt.programs_count;
+    if (programs_count == 0 || programs == 0) {
       return 0;
     }
-    for EachIndex(program_idx, command.run.programs_count) {
-      if (dmn_handle_match(command.run.programs[program_idx], dmn_handle_zero())) {
+    for EachIndex(program_idx, programs_count) {
+      if (dmn_handle_match(programs[program_idx], dmn_handle_zero())) {
         return 0;
       }
       for EachIndex(previous_idx, program_idx) {
-        if (dmn_handle_match(command.run.programs[previous_idx], command.run.programs[program_idx])) {
+        if (dmn_handle_match(programs[previous_idx], programs[program_idx])) {
           return 0;
         }
       }
@@ -256,9 +259,11 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   if ( ! rvs_session_operation_key_resolves_locked(session, key)) {
     goto exit_arena_mutex;
   }
-  if (command.kind == RVS_EngineCommandKind_Run) {
-    for EachIndex(program_idx, command.run.programs_count) {
-      if (rvs_session_program_from_id_locked(session, command.run.programs[program_idx]) == 0) {
+  if (command.kind == RVS_EngineCommandKind_Run || command.kind == RVS_EngineCommandKind_Interrupt) {
+    RVS_ProgramID *programs = command.kind == RVS_EngineCommandKind_Run ? command.run.programs : command.interrupt.programs;
+    U64 programs_count = command.kind == RVS_EngineCommandKind_Run ? command.run.programs_count : command.interrupt.programs_count;
+    for EachIndex(program_idx, programs_count) {
+      if (rvs_session_program_from_id_locked(session, programs[program_idx]) == 0) {
         goto exit_arena_mutex;
       }
     }
@@ -269,9 +274,9 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   }
   RVS_ProgramID *targets = 0;
   U64 targets_count = 0;
-  if (command.kind == RVS_EngineCommandKind_Run) {
-    targets = command.run.programs;
-    targets_count = command.run.programs_count;
+  if (command.kind == RVS_EngineCommandKind_Run || command.kind == RVS_EngineCommandKind_Interrupt) {
+    targets = command.kind == RVS_EngineCommandKind_Run ? command.run.programs : command.interrupt.programs;
+    targets_count = command.kind == RVS_EngineCommandKind_Run ? command.run.programs_count : command.interrupt.programs_count;
   }
   RVS_SchedulerAdmission admission = {0};
   result = rvs_scheduler_admit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id, policy, key, targets, targets_count, captured_program_state_epoch, &admission);
@@ -386,6 +391,25 @@ rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *
     return RVS_Result_InvalidArgument;
   }
   return rvs_session_run_many(session, &program_id, 1, submit_out);
+}
+
+RVS_Result
+rvs_session_interrupt_many(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out)
+{
+  if (submit_out) { MemoryZeroStruct(submit_out); }
+  if (session == 0 || programs == 0 || programs_count == 0 || submit_out == 0) { return RVS_Result_InvalidArgument; }
+  return rvs_session_submit(session, (RVS_EngineCommand){
+    .kind = RVS_EngineCommandKind_Interrupt,
+    .interrupt = { .programs = programs, .programs_count = programs_count },
+  }, submit_out);
+}
+
+RVS_Result
+rvs_session_interrupt(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out)
+{
+  if (submit_out) { MemoryZeroStruct(submit_out); }
+  if (session == 0 || dmn_handle_match(program_id, dmn_handle_zero()) || submit_out == 0) { return RVS_Result_InvalidArgument; }
+  return rvs_session_interrupt_many(session, &program_id, 1, submit_out);
 }
 
 RVS_Result

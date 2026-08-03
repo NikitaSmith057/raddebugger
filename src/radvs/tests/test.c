@@ -112,7 +112,7 @@ entry_point(CmdLine *cmdline)
   RVS_Engine *engine = 0;
   AssertAlways(rvs_engine_init(&engine) == RVS_Result_Ok);
   AssertAlways(rvs_demon_interrupt_capability(engine->demon) == RVS_DemonInterruptCapability_GlobalWithResume);
-  AssertAlways(rvs_demon_interrupt(engine->demon, 1) == RVS_Result_Error);
+  AssertAlways(rvs_demon_interrupt(engine->demon, 1, &(DMN_Handle){0}, 1) == RVS_Result_Error);
   AssertAlways(rvs_demon_send_message(engine->demon, (RVS_DemonMessage){ .type = RVS_DemonMessage_Halt, .request_id = 1 }) == RVS_Result_Unsupported);
   RVS_Session *session = 0;
   AssertAlways(rvs_engine_create_session(engine, &session) == RVS_Result_Ok);
@@ -362,23 +362,47 @@ entry_point(CmdLine *cmdline)
   RVS_SchedulerAdmission interrupt_admission = {0};
   AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, interrupt_key, &reply.launch.program_id, 1, 0, &interrupt_admission) == RVS_Result_Ok);
   AssertAlways(interrupt_admission.operation->targets[0].execution_generation == rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id)->execution_generation);
-  rvs_scheduler_rollback_admission_locked(&session->scheduler, &interrupt_admission);
+  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id)->execution_state == RVS_TargetExecutionState_InterruptPending);
+  rvs_scheduler_note_interrupt_event_locked(&session->scheduler, &(RVS_Event){
+    .kind = DMN_EventKind_Halt,
+    .process = reply.launch.program_id,
+  });
+  AssertAlways(rvs_scheduler_finish_interrupt_locked(&session->scheduler, interrupt_admission.request->request_id) == RVS_Result_Ok);
+  rvs_scheduler_operation_remove_locked(&session->scheduler, interrupt_admission.operation);
+  rvs_request_release(interrupt_admission.request); // drop unreturned caller ownership
+  rvs_scheduler_operation_release(interrupt_admission.operation); // drop active registration ownership
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_EventBatch,
     .request_id = test_run_request_id,
   });
-  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_RunInFlight);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_RunFinished,
     .request_id = test_run_request_id + 1,
   });
-  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_RunInFlight);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_RunFinished,
     .request_id = test_run_request_id,
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
+
+  // A selected exit preempts the interrupt workflow rather than reporting a successful stop.
+  mutex_take(session->control->mutex);
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &test_target, 1, test_run_request_id));
+  AssertAlways(rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, test_run_request_id));
+  RVS_SchedulerAdmission exited_interrupt_admission = {0};
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, interrupt_key, &reply.launch.program_id, 1, 0, &exited_interrupt_admission) == RVS_Result_Ok);
+  rvs_scheduler_note_interrupt_event_locked(&session->scheduler, &(RVS_Event){
+    .kind = DMN_EventKind_ExitProcess,
+    .process = reply.launch.program_id,
+  });
+  AssertAlways(rvs_scheduler_finish_interrupt_locked(&session->scheduler, exited_interrupt_admission.request->request_id) == RVS_Result_StaleState);
+  rvs_scheduler_operation_remove_locked(&session->scheduler, exited_interrupt_admission.operation);
+  rvs_request_release(exited_interrupt_admission.request); // drop unreturned caller ownership
+  rvs_scheduler_operation_release(exited_interrupt_admission.operation); // drop active registration ownership
+  mutex_drop(session->control->mutex);
 
   RVS_OperationKey terminate_key = {
     .operation_class = RVS_OperationClass_Termination,

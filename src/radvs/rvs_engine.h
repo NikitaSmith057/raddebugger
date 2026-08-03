@@ -80,7 +80,8 @@ typedef struct
 
 #define RVS_ENGINE_COMMAND_XLIST \
   X(Launch, RVS_OperationClass_Topology,          RVS_RequestPolicy_RejectIfPending, "Launch program and stop at the entry point") \
-  X(Run,    RVS_OperationClass_ExecutionWorkflow, RVS_RequestPolicy_RejectIfPending, "Run selected programs")
+  X(Run,    RVS_OperationClass_ExecutionWorkflow, RVS_RequestPolicy_RejectIfPending, "Run selected programs") \
+  X(Interrupt, RVS_OperationClass_InterruptTransition, RVS_RequestPolicy_RejectIfPending, "Interrupt selected running programs")
 
 typedef enum
 {
@@ -98,6 +99,7 @@ typedef enum
   RVS_EngineReplyKind_Null,
   RVS_EngineReplyKind_Launch,
   RVS_EngineReplyKind_Run,
+  RVS_EngineReplyKind_Interrupt,
 } RVS_EngineReplyKind;
 
 typedef struct
@@ -133,6 +135,8 @@ void       rvs_session_release(RVS_Session *session);
 RVS_Result rvs_session_launch(RVS_Session *session, String8 cmdl, String8 wdir, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_run_many(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_session_interrupt_many(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_session_interrupt(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out);
 
 ////////////////////////////////

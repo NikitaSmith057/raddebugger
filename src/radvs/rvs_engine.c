@@ -18,6 +18,10 @@ typedef struct
       U64            programs_count;
       RVS_ProgramID *programs;
     } run;
+    struct {
+      U64            programs_count;
+      RVS_ProgramID *programs;
+    } interrupt;
   };
 } RVS_EngineCommand;
 
@@ -101,6 +105,11 @@ rvs_engine_command_copy(Arena *arena, RVS_EngineCommand *dst, RVS_EngineCommand 
     dst->run.programs = push_array(arena, RVS_ProgramID, src->run.programs_count);
     dst->run.programs_count = src->run.programs_count;
     MemoryCopyTyped(dst->run.programs, src->run.programs, src->run.programs_count);
+  } break;
+  case RVS_EngineCommandKind_Interrupt: {
+    dst->interrupt.programs = push_array(arena, RVS_ProgramID, src->interrupt.programs_count);
+    dst->interrupt.programs_count = src->interrupt.programs_count;
+    MemoryCopyTyped(dst->interrupt.programs, src->interrupt.programs, src->interrupt.programs_count);
   } break;
   default: { InvalidPath; } break;
   }
@@ -304,6 +313,8 @@ rvs_engine_complete_reply(RVS_Engine *engine, RVS_EngineReply reply)
   if (operation) {
     if (operation->key.operation_class == RVS_OperationClass_ExecutionWorkflow && reply.result != RVS_Result_Ok) {
       rvs_scheduler_clear_queued_execution_locked(&session->scheduler, reply.request_id);
+    } else if (operation->key.operation_class == RVS_OperationClass_InterruptTransition && reply.result != RVS_Result_Ok) {
+      rvs_scheduler_cancel_interrupt_locked(&session->scheduler, reply.request_id);
     }
     rvs_scheduler_operation_remove_locked(&session->scheduler, operation);
     rvs_session_prepare_reply_locked(session, operation, &reply);
@@ -609,6 +620,22 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_Session *session, RVS_Message
     }
     scratch_end(scratch);
   } break;
+  case RVS_EngineCommandKind_Interrupt: {
+    Temp scratch = scratch_begin(0, 0);
+    DMN_Handle *processes = push_array(scratch.arena, DMN_Handle, command->interrupt.programs_count);
+    RVS_Result result = RVS_Result_Error;
+    if (rvs_session_programs_to_processes(session, command->interrupt.programs, command->interrupt.programs_count, processes)) {
+      result = rvs_demon_interrupt(engine->demon, request_id, processes, command->interrupt.programs_count);
+    }
+    if (result != RVS_Result_Ok) {
+      rvs_engine_complete_reply(engine, (RVS_EngineReply){
+        .request_id = request_id,
+        .result = result,
+        .kind = RVS_EngineReplyKind_Interrupt,
+      });
+    }
+    scratch_end(scratch);
+  } break;
   default: { InvalidPath; } break;
   }
   ProfEnd();
@@ -632,7 +659,6 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
     RVS_Result result = reply->result == RVS_Result_Ok ? RVS_Result_Error : reply->result;
     rvs_engine_complete_launch(engine, reply->request_id, result, 0, dmn_handle_zero());
   } break;
-
   case RVS_DemonReplyKind_Run: {
     mutex_take(engine->control->mutex);
     if (reply->result == RVS_Result_Ok) {
@@ -678,6 +704,9 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
                            ((launch_event && dmn_handle_match(n->v.process, launch_event->process)) ||
                             (launch_pid != 0 && n->v.system_process_id == launch_pid));
       if (suppress_event) { continue; }
+      mutex_take(engine->control->mutex);
+      rvs_scheduler_note_interrupt_event_locked(&engine->session->scheduler, &n->v);
+      mutex_drop(engine->control->mutex);
       RVS_Result push_result = rvs_session_push_event(engine->session, &n->v);
       AssertAlways(push_result == RVS_Result_Ok || push_result == RVS_Result_EngineStopped);
     }
@@ -702,6 +731,19 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
 
   case RVS_DemonReplyKind_InterruptObserved: {
     // Target workflows will classify the preceding stop events before completion.
+  } break;
+
+  case RVS_DemonReplyKind_InterruptResumeAccepted: {
+    mutex_take(engine->control->mutex);
+    RVS_Result result = reply->result == RVS_Result_Ok ?
+                        rvs_scheduler_finish_interrupt_locked(&engine->session->scheduler, reply->request_id) :
+                        reply->result;
+    mutex_drop(engine->control->mutex);
+    rvs_engine_complete_reply(engine, (RVS_EngineReply){
+      .request_id = reply->request_id,
+      .result = result,
+      .kind = RVS_EngineReplyKind_Interrupt,
+    });
   } break;
 
   default: { InvalidPath; } break;

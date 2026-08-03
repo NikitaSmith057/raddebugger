@@ -14,6 +14,8 @@ typedef struct RVS_Demon
   void                   *reply_ud;
   RVS_MessageID           active_run_request_id;
   RVS_MessageID           pending_interrupt_request_id;
+  DMN_Handle              *pending_interrupt_processes;
+  U64                      pending_interrupt_processes_count;
   B32                     is_run_in_flight;
 } RVS_Demon;
 
@@ -175,6 +177,8 @@ rvs_demon_reply_copy(Arena *arena, RVS_DemonReply *dst, RVS_DemonReply *src)
   } break;
   case RVS_DemonReplyKind_InterruptObserved: {
   } break;
+  case RVS_DemonReplyKind_InterruptResumeAccepted: {
+  } break;
   default: { InvalidPath; } break;
   }
   ProfEnd();
@@ -221,9 +225,9 @@ rvs_demon_interrupt_capability(RVS_Demon *dmn)
 }
 
 internal RVS_Result
-rvs_demon_interrupt(RVS_Demon *dmn, RVS_MessageID request_id)
+rvs_demon_interrupt(RVS_Demon *dmn, RVS_MessageID request_id, DMN_Handle *selected_processes, U64 selected_processes_count)
 {
-  if (dmn == 0 || request_id == 0) { return RVS_Result_Error; }
+  if (dmn == 0 || request_id == 0 || selected_processes == 0 || selected_processes_count == 0) { return RVS_Result_Error; }
   RVS_Result result = RVS_Result_Error;
   RVS_DemonReplyCallback *reply_callback = 0;
   void *reply_ud = 0;
@@ -231,6 +235,9 @@ rvs_demon_interrupt(RVS_Demon *dmn, RVS_MessageID request_id)
   if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Live &&
       dmn->is_run_in_flight && dmn->pending_interrupt_request_id == 0) {
     dmn->pending_interrupt_request_id = request_id;
+    dmn->pending_interrupt_processes = push_array(dmn->arena, DMN_Handle, selected_processes_count);
+    dmn->pending_interrupt_processes_count = selected_processes_count;
+    MemoryCopyTyped(dmn->pending_interrupt_processes, selected_processes, selected_processes_count);
     reply_callback = dmn->reply_callback;
     reply_ud = dmn->reply_ud;
     dmn_halt(0, request_id);
@@ -319,9 +326,13 @@ rvs_demon_worker(void *user_data)
       DMN_EventList events = dmn_ctrl_run(scratch.arena, ctrl_ctx, &ctrls);
       mutex_take(dmn->mutex);
       RVS_MessageID interrupt_request_id = dmn->pending_interrupt_request_id;
+      DMN_Handle *interrupt_processes = dmn->pending_interrupt_processes;
+      U64 interrupt_processes_count = dmn->pending_interrupt_processes_count;
       dmn->active_run_request_id = 0;
       dmn->pending_interrupt_request_id = 0;
-      dmn->is_run_in_flight = 0;
+      dmn->pending_interrupt_processes = 0;
+      dmn->pending_interrupt_processes_count = 0;
+      dmn->is_run_in_flight = interrupt_request_id != 0;
       mutex_drop(dmn->mutex);
 
       if (events.first) {
@@ -339,6 +350,44 @@ rvs_demon_worker(void *user_data)
           .request_id = interrupt_request_id,
           .result = RVS_Result_Ok,
         }, dmn->reply_ud);
+        DMN_Handle *resume_processes = push_array(scratch.arena, DMN_Handle, message->run.processes_count);
+        U64 resume_processes_count = 0;
+        for EachIndex(process_idx, message->run.processes_count) {
+          B32 selected = 0;
+          for EachIndex(selected_idx, interrupt_processes_count) {
+            if (dmn_handle_match(message->run.processes[process_idx], interrupt_processes[selected_idx])) {
+              selected = 1;
+              break;
+            }
+          }
+          if ( ! selected) {
+            resume_processes[resume_processes_count] = message->run.processes[process_idx];
+            resume_processes_count += 1;
+          }
+        }
+        dmn->reply_callback(dmn, &(RVS_DemonReply){
+          .kind = RVS_DemonReplyKind_InterruptResumeAccepted,
+          .request_id = interrupt_request_id,
+          .result = RVS_Result_Ok,
+        }, dmn->reply_ud);
+        if (resume_processes_count != 0) {
+          DMN_EventList resume_events = dmn_ctrl_run(scratch.arena, ctrl_ctx, &(DMN_RunCtrls){
+            .run_entities = resume_processes,
+            .run_entity_count = resume_processes_count,
+            .run_entities_are_processes = 1,
+            .run_entities_are_unfrozen = 1,
+          });
+          if (resume_events.first) {
+            dmn->reply_callback(dmn, &(RVS_DemonReply){
+              .kind = RVS_DemonReplyKind_EventBatch,
+              .request_id = message->request_id,
+              .event_batch = { .events = resume_events },
+            }, dmn->reply_ud);
+          }
+        }
+        mutex_take(dmn->mutex);
+        dmn->is_run_in_flight = 0;
+        mutex_drop(dmn->mutex);
       }
       reply = (RVS_DemonReply){
         .kind       = RVS_DemonReplyKind_RunFinished,

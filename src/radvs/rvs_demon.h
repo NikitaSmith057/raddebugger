@@ -56,6 +56,7 @@ typedef enum
   RVS_DemonReplyKind_TerminateAccepted,
   RVS_DemonReplyKind_InterruptAccepted,
   RVS_DemonReplyKind_InterruptObserved,
+  RVS_DemonReplyKind_InterruptResumeAccepted,
 } RVS_DemonReplyKind;
 
 typedef struct
@@ -85,7 +86,7 @@ internal void       rvs_demon_event_copy  (Arena *arena, DMN_Event *dst, DMN_Eve
 internal void       rvs_demon_reply_copy  (Arena *arena, RVS_DemonReply *dst, RVS_DemonReply *src);
 internal RVS_Result rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage message_spec);
 internal RVS_DemonInterruptCapability rvs_demon_interrupt_capability(RVS_Demon *dmn);
-internal RVS_Result rvs_demon_interrupt(RVS_Demon *dmn, RVS_MessageID request_id);
+internal RVS_Result rvs_demon_interrupt(RVS_Demon *dmn, RVS_MessageID request_id, DMN_Handle *selected_processes, U64 selected_processes_count);
 
 
 
