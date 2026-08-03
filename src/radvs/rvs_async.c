@@ -23,8 +23,9 @@ rvs_queue_node_list_pop(RVS_QueueNodeList *list)
 }
 
 internal RVS_Queue *
-rvs_queue_alloc(Arena *arena, U64 message_size, U64 message_align)
+rvs_queue_alloc(U64 message_size, U64 message_align)
 {
+  Arena *arena = arena_alloc(.name = "RVS Queue");
   RVS_Queue *q = push_array(arena, RVS_Queue, 1);
   q->arena         = arena;
   q->mutex         = mutex_alloc();
@@ -46,8 +47,10 @@ rvs_queue_close(RVS_Queue *q)
 internal void
 rvs_queue_release(RVS_Queue *q)
 {
+  Arena *arena = q->arena;
   cond_var_release(q->available_cv);
   mutex_release(q->mutex);
+  arena_release(arena);
 }
 
 internal RVS_QueueNode *
@@ -84,13 +87,36 @@ rvs_queue_push(RVS_Queue *q, RVS_QueueNode *node)
     rvs_queue_node_list_push(&q->messages, node);
     cond_var_broadcast(q->available_cv);
     result = RVS_Result_Ok;
+  } else {
+    rvs_queue_node_list_push(&q->free_list, node);
   }
   mutex_drop(q->mutex);
   return result;
 }
 
-internal RVS_QueueNode *
-rvs_queue_pop(RVS_Queue *q, U64 wait_us)
+internal RVS_Result
+rvs_queue_push_copy(RVS_Queue *q, void *spec, RVS_QueueItemCopy *copy)
+{
+  mutex_take(q->mutex);
+  RVS_Result result = RVS_Result_EngineStopped;
+  if (!q->is_closed) {
+    RVS_QueueNode *node = rvs_queue_node_list_pop(&q->free_list);
+    if (node) {
+      MemoryZero(node, q->message_size);
+    } else {
+      node = arena_push(q->arena, q->message_size, q->message_align, 1);
+    }
+    copy(q->arena, node, spec);
+    rvs_queue_node_list_push(&q->messages, node);
+    cond_var_broadcast(q->available_cv);
+    result = RVS_Result_Ok;
+  }
+  mutex_drop(q->mutex);
+  return result;
+}
+
+internal RVS_QueuePopResult
+rvs_queue_pop_result(RVS_Queue *q, U64 wait_us)
 {
   U64 endt_us = max_U64;
   if (wait_us != max_U64) {
@@ -107,8 +133,17 @@ rvs_queue_pop(RVS_Queue *q, U64 wait_us)
       break;
     }
   }
-  RVS_QueueNode *node = rvs_queue_node_list_pop(&q->messages);
+  RVS_QueuePopResult result = {
+    .node = rvs_queue_node_list_pop(&q->messages),
+    .is_closed = q->is_closed,
+  };
   mutex_drop(q->mutex);
 
-  return node;
+  return result;
+}
+
+internal RVS_QueueNode *
+rvs_queue_pop(RVS_Queue *q, U64 wait_us)
+{
+  return rvs_queue_pop_result(q, wait_us).node;
 }

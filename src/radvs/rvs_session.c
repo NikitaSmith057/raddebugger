@@ -10,6 +10,8 @@ typedef struct
   RVS_Event     event;
 } RVS_SessionEventMessage;
 
+internal void rvs_session_event_message_copy(Arena *arena, void *dst, void *src);
+
 internal RVS_Program *
 rvs_session_program_from_id_locked(RVS_Session *session, RVS_ProgramID program_id)
 {
@@ -68,7 +70,7 @@ rvs_session_program_retire_locked(RVS_Session *session, RVS_ProgramID program_id
 }
 
 internal B32
-rvs_session_programs_to_processes(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, DMN_Handle *processes_out)
+rvs_session_programs_to_processes_locked(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, DMN_Handle *processes_out)
 {
   B32 all_programs_found = programs_count != 0;
   for EachIndex(program_idx, programs_count) {
@@ -107,18 +109,25 @@ internal RVS_Result
 rvs_session_push_event(RVS_Session *session, RVS_Event *event)
 {
   ProfBeginFunction();
-  RVS_SessionEventMessage *message = rvs_queue_alloc_struct(session->event_queue, RVS_SessionEventMessage);
-  RVS_Result result = RVS_Result_EngineStopped;
-  if (message) {
-    rvs_demon_event_copy(session->arena, &message->event, event);
-    result = rvs_queue_push(session->event_queue, &message->base);
-  }
+  RVS_SessionEventMessage spec = { .event = *event };
+  RVS_Result result = rvs_queue_push_copy(session->event_queue, &spec, rvs_session_event_message_copy);
   ProfEnd();
   return result;
 }
 
 internal void
-rvs_session_close_events_locked(RVS_Session *session)
+rvs_session_event_message_copy(Arena *arena, void *dst_ptr, void *src_ptr)
+{
+  RVS_SessionEventMessage *dst = dst_ptr;
+  RVS_SessionEventMessage *src = src_ptr;
+  RVS_QueueNode base = dst->base;
+  *dst = *src;
+  dst->base = base;
+  rvs_demon_event_copy(arena, &dst->event, &src->event);
+}
+
+internal void
+rvs_session_close_events(RVS_Session *session)
 {
   rvs_queue_close(session->event_queue);
 }
@@ -134,7 +143,7 @@ rvs_session_alloc(RVS_Engine *engine)
   session->scheduler.arena = arena;
   session->scheduler.recycle_mutex = mutex_alloc();
   session->ref_count = 2; // engine ownership plus the returned handle
-  session->event_queue = rvs_queue_alloc(arena, sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
+  session->event_queue = rvs_queue_alloc(sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
   session->program_arena = arena_alloc(.name = "Session Programs");
   rvs_engine_control_addref(session->control);
   return session;
@@ -209,10 +218,9 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   }
 
   RVS_Engine *engine = session->engine;
-  mutex_take(engine->arena_mutex);
 
   if ( ! rvs_session_operation_key_resolves_locked(session, key)) {
-    goto exit_arena_mutex;
+    goto exit_control_mutex;
   }
   if (command.kind == RVS_EngineCommandKind_Run || command.kind == RVS_EngineCommandKind_Interrupt) {
     RVS_ProgramID *programs = command.kind == RVS_EngineCommandKind_Run ? command.run.programs : command.interrupt.programs;
@@ -220,11 +228,11 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
     for EachIndex(program_idx, programs_count) {
       RVS_Program *program = rvs_session_program_from_id_locked(session, programs[program_idx]);
       if (program == 0) {
-        goto exit_arena_mutex;
+        goto exit_control_mutex;
       }
       if (program->lifecycle != RVS_ProgramLifecycle_Live) {
         result = RVS_Result_StaleState;
-        goto exit_arena_mutex;
+        goto exit_control_mutex;
       }
     }
   }
@@ -242,12 +250,12 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   result = rvs_scheduler_admit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id,
                                       op, key, targets, targets_count, captured_program_state_epoch, &admission);
   if (result != RVS_Result_Ok) {
-    goto exit_arena_mutex;
+    goto exit_control_mutex;
   }
   if (admission.is_terminal || admission.joined) {
     submit_out->request = admission.request;
     result = RVS_Result_Ok;
-    goto exit_arena_mutex;
+    goto exit_control_mutex;
   }
   RVS_ScheduledOperation *operation = admission.operation;
 
@@ -265,9 +273,6 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   } else {
     rvs_scheduler_rollback_admission_locked(&session->scheduler, &admission);
   }
-  exit_arena_mutex:;
-  mutex_drop(engine->arena_mutex);
-
   exit_control_mutex:;
   mutex_drop(session->control->mutex);
 
@@ -435,35 +440,24 @@ rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_
     goto exit;
   }
   rvs_session_addref(session);
-  mutex_take(session->control->mutex);
-  B32 is_stopped = session->control->is_shutdown || session->engine_released;
   RVS_Queue *event_queue = session->event_queue;
-  mutex_drop(session->control->mutex);
-  if (is_stopped) {
-    result = RVS_Result_EngineStopped;
-    goto exit_session;
-  }
-
-  RVS_SessionEventMessage *message = rvs_queue_pop_struct(event_queue, RVS_SessionEventMessage, wait_us);
-  mutex_take(session->control->mutex);
-  is_stopped = session->control->is_shutdown || session->engine_released;
-  mutex_drop(session->control->mutex);
+  RVS_QueuePopResult pop = rvs_queue_pop_result(event_queue, wait_us);
+  RVS_SessionEventMessage *message = (RVS_SessionEventMessage *)pop.node;
   if (message) {
-    if ( ! is_stopped) {
+    if (!pop.is_closed) {
       rvs_demon_event_copy(arena, event_out, &message->event);
       result = RVS_Result_Ok;
     }
     rvs_queue_recycle(event_queue, &message->base);
   }
   if (result != RVS_Result_Ok) {
-    if (is_stopped) {
+    if (pop.is_closed) {
       result = RVS_Result_EngineStopped;
     } else {
       result = RVS_Result_Timeout;
     }
   }
 
-  exit_session:;
   rvs_session_release(session);
   exit:;
   ProfEnd();

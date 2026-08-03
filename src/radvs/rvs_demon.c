@@ -5,7 +5,6 @@
 typedef struct RVS_Demon
 {
   Arena                  *arena;
-  Arena                  *message_arena;
   Mutex                   mutex;
   RVS_Queue              *queue;
   RVS_ThreadState         state;
@@ -35,11 +34,10 @@ rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon
   if (state == RVS_ThreadState_Null) {
     // alloc resources for the DEMON thread
     dmn->arena          = arena_alloc();
-    dmn->message_arena  = arena_alloc();
     dmn->mutex          = mutex_alloc();
     dmn->reply_callback = reply_callback;
     dmn->reply_ud       = reply_ud;
-    dmn->queue          = rvs_queue_alloc(dmn->arena, sizeof(RVS_DemonMessage), AlignOf(RVS_DemonMessage));
+    dmn->queue          = rvs_queue_alloc(sizeof(RVS_DemonMessage), AlignOf(RVS_DemonMessage));
     dmn->worker         = thread_launch(rvs_demon_worker, dmn);
     if ( ! MemoryIsZeroStruct(&dmn->worker)) {
       result = RVS_Result_Ok;
@@ -69,38 +67,37 @@ rvs_demon_shutdown(RVS_Demon *dmn)
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
   RVS_Result return_result = RVS_Result_Ok;
-  
+
+  mutex_take(dmn->mutex);
   if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Live) {
-    // Interrupt a blocking dmn_ctrl_run so the worker can consume Shutdown.
+    // Close command admission while keeping the backend alive for the wakeup.
+    ins_atomic_u32_eval_assign(&dmn->state, RVS_ThreadState_Terminating);
+  }
+  mutex_drop(dmn->mutex);
+
+  if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Terminating) {
     dmn_halt(0, 0);
-
-    // send message to the demon worker to shutdown and update thread worker state
-    mutex_take(dmn->mutex);
-    if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Live) {
-      result = rvs_demon_push_message(dmn, &(RVS_DemonMessage){ .type = RVS_DemonMessage_Shutdown });
-      if (result == RVS_Result_Ok) {
-        ins_atomic_u32_eval_assign(&dmn->state, RVS_ThreadState_Terminating);
-      }
-    }
-    mutex_drop(dmn->mutex);
-
-    if (result != RVS_Result_Ok) {
-      return_result = result;
-      goto exit;
-    }
-
-    // release DEMON thread resources
+    result = rvs_demon_push_message(dmn, &(RVS_DemonMessage){ .type = RVS_DemonMessage_Shutdown });
+  }
+  if (result == RVS_Result_Ok) {
     thread_join(dmn->worker, max_U64);
+  } else if (ins_atomic_u32_eval(&dmn->state) != RVS_ThreadState_Exited) {
+    return_result = result;
+  }
+  ProfEnd();
+  return return_result;
+}
+
+internal void
+rvs_demon_release_resources(RVS_Demon *dmn)
+{
+  if (dmn && dmn->arena) {
+    AssertAlways(ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Exited);
     rvs_queue_release(dmn->queue);
     mutex_release(dmn->mutex);
-    arena_release(dmn->message_arena);
     arena_release(dmn->arena);
     MemoryZeroStruct(dmn);
   }
-
-  exit:;
-  ProfEnd();
-  return return_result;
 }
 
 internal void
@@ -139,6 +136,12 @@ rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *sr
   default: { InvalidPath; } break;
   }
   ProfEnd();
+}
+
+internal void
+rvs_demon_message_queue_copy(Arena *arena, void *dst, void *src)
+{
+  rvs_demon_message_copy(arena, dst, src);
 }
 
 internal void
@@ -184,9 +187,7 @@ internal RVS_Result
 rvs_demon_push_message(RVS_Demon *dmn, RVS_DemonMessage *spec)
 {
   ProfBeginFunction();
-  RVS_DemonMessage *message = rvs_queue_alloc_struct(dmn->queue, RVS_DemonMessage);
-  rvs_demon_message_copy(dmn->message_arena, message, spec);
-  RVS_Result result = rvs_queue_push(dmn->queue, &message->base);
+  RVS_Result result = rvs_queue_push_copy(dmn->queue, spec, rvs_demon_message_queue_copy);
   ProfEnd();
   return result;
 }
@@ -258,6 +259,11 @@ rvs_demon_worker(void *user_data)
 
     // process the message
     RVS_DemonReply reply = {0};
+    if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Terminating &&
+        message->type != RVS_DemonMessage_Shutdown) {
+      rvs_queue_recycle(dmn->queue, &message->base);
+      continue;
+    }
     switch (message->type) {
     case RVS_DemonMessage_Launch: {
       Temp scratch = scratch_begin(0, 0);

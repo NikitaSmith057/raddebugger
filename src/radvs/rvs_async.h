@@ -6,6 +6,7 @@
 #include "radvs/rvs.h"
 
 typedef struct RVS_QueueNode RVS_QueueNode;
+typedef void RVS_QueueItemCopy(Arena *arena, void *dst, void *src);
 struct RVS_QueueNode
 {
   RVS_QueueNode *next;
@@ -31,13 +32,21 @@ typedef struct
   U64                message_align;
 } RVS_Queue;
 
-internal RVS_Queue *rvs_queue_alloc(Arena *arena, U64 message_size, U64 message_align);
+typedef struct
+{
+  RVS_QueueNode *node;
+  B32            is_closed;
+} RVS_QueuePopResult;
+
+internal RVS_Queue *rvs_queue_alloc(U64 message_size, U64 message_align);
 internal void       rvs_queue_close(RVS_Queue *q);
 internal void       rvs_queue_release(RVS_Queue *q);
 
 internal RVS_QueueNode *rvs_queue_alloc_item(RVS_Queue *q);
 internal void           rvs_queue_recycle(RVS_Queue *q, RVS_QueueNode *node);
 internal RVS_Result     rvs_queue_push(RVS_Queue *q, RVS_QueueNode *node);
+internal RVS_Result     rvs_queue_push_copy(RVS_Queue *q, void *spec, RVS_QueueItemCopy *copy);
+internal RVS_QueuePopResult rvs_queue_pop_result(RVS_Queue *q, U64 wait_us);
 internal RVS_QueueNode *rvs_queue_pop(RVS_Queue *q, U64 wait_us);
 
 #define rvs_queue_alloc_struct(q, T) ((T *)rvs_queue_alloc_item(q))

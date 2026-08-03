@@ -97,6 +97,7 @@ typedef void (RVS_DemonReplyCallback)(RVS_Demon *demon, RVS_DemonReply *reply, v
 
 RVS_Result rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out);
 RVS_Result rvs_demon_shutdown(RVS_Demon *dmn);
+internal void rvs_demon_release_resources(RVS_Demon *dmn);
 
 internal RVS_Result rvs_demon_alloc       (void);
 internal RVS_Result rvs_demon_release     (void);

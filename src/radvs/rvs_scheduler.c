@@ -45,6 +45,28 @@ typedef struct
   RVS_SchedulerTransition transition;
 } RVS_SchedulerOperationRule;
 
+typedef enum
+{
+  RVS_TargetTransition_Queue,
+  RVS_TargetTransition_RunAccepted,
+  RVS_TargetTransition_PreDispatchCancelled,
+  RVS_TargetTransition_ConfirmedStop,
+  RVS_TargetTransition_BarrierPause,
+  RVS_TargetTransition_BarrierRollback,
+  RVS_TargetTransition_TerminationFence,
+  RVS_TargetTransition_ConfirmedExit,
+  RVS_TargetTransition_Retired,
+  RVS_TargetTransition_Shutdown,
+} RVS_TargetTransitionKind;
+
+typedef struct
+{
+  RVS_TargetState          source;
+  RVS_TargetState          destination;
+  RVS_TargetTransitionKind kind;
+  B32                      advances_revision;
+} RVS_TargetTransitionRule;
+
 global RVS_SchedulerOperationRule rvs_scheduler_operation_rules[] = {
   { RVS_SchedulerOp_Launch,              RVS_SchedulerDuplicate_Reject, RVS_SchedulerScope_Session, RVS_SchedulerTargetShape_None,      RVS_AdmissionRequirement_None,             RVS_SchedulerTransition_Generic },
   { RVS_SchedulerOp_Run,                 RVS_SchedulerDuplicate_Reject, RVS_SchedulerScope_Targets, RVS_SchedulerTargetShape_OneOrMore, RVS_AdmissionRequirement_StoppedUnfenced,  RVS_SchedulerTransition_Run },
@@ -52,6 +74,24 @@ global RVS_SchedulerOperationRule rvs_scheduler_operation_rules[] = {
   { RVS_SchedulerOp_Terminate,           RVS_SchedulerDuplicate_Reject, RVS_SchedulerScope_Targets, RVS_SchedulerTargetShape_OneOrMore, RVS_AdmissionRequirement_LiveUnfenced,     RVS_SchedulerTransition_Terminate },
   { RVS_SchedulerOp_ReadOnly,            RVS_SchedulerDuplicate_Join,   RVS_SchedulerScope_Targets, RVS_SchedulerTargetShape_One,       RVS_AdmissionRequirement_ReadOnly,         RVS_SchedulerTransition_Generic },
   { RVS_SchedulerOp_TargetConfiguration, RVS_SchedulerDuplicate_Reject, RVS_SchedulerScope_Targets, RVS_SchedulerTargetShape_One,       RVS_AdmissionRequirement_StoppedUnfenced,  RVS_SchedulerTransition_Generic },
+};
+
+global RVS_TargetTransitionRule rvs_target_transition_rules[] = {
+  { RVS_TargetState_Stopped,          RVS_TargetState_Queued,         RVS_TargetTransition_Queue,                 0 },
+  { RVS_TargetState_Queued,           RVS_TargetState_Running,        RVS_TargetTransition_RunAccepted,           1 },
+  { RVS_TargetState_Queued,           RVS_TargetState_Stopped,        RVS_TargetTransition_PreDispatchCancelled,  0 },
+  { RVS_TargetState_Running,          RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedStop,         1 },
+  { RVS_TargetState_PausedForEvent,   RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedStop,         1 },
+  { RVS_TargetState_Running,          RVS_TargetState_PausedForEvent, RVS_TargetTransition_BarrierPause,          0 },
+  { RVS_TargetState_PausedForEvent,   RVS_TargetState_Running,        RVS_TargetTransition_BarrierRollback,       0 },
+  { RVS_TargetState_Running,          RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedExit,         1 },
+  { RVS_TargetState_PausedForEvent,   RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedExit,         1 },
+  { RVS_TargetState_Stopped,          RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
+  { RVS_TargetState_Queued,           RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
+  { RVS_TargetState_Running,          RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
+  { RVS_TargetState_PausedForEvent,   RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
+  { RVS_TargetState_StoppedAttention, RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
+  { RVS_TargetState_Terminating,      RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
 };
 
 internal RVS_SchedulerOperationRule *
@@ -151,46 +191,6 @@ rvs_scheduler_thread_add_locked(RVS_Scheduler *scheduler, RVS_ProgramID target, 
   entry->target = target;
   SLLQueuePush(scheduler->thread_first, scheduler->thread_last, entry);
 }
-
-typedef enum
-{
-  RVS_TargetTransition_Queue,
-  RVS_TargetTransition_RunAccepted,
-  RVS_TargetTransition_PreDispatchCancelled,
-  RVS_TargetTransition_ConfirmedStop,
-  RVS_TargetTransition_BarrierPause,
-  RVS_TargetTransition_BarrierRollback,
-  RVS_TargetTransition_TerminationFence,
-  RVS_TargetTransition_ConfirmedExit,
-  RVS_TargetTransition_Retired,
-  RVS_TargetTransition_Shutdown,
-} RVS_TargetTransitionKind;
-
-typedef struct
-{
-  RVS_TargetState          source;
-  RVS_TargetState          destination;
-  RVS_TargetTransitionKind kind;
-  B32                      advances_revision;
-} RVS_TargetTransitionRule;
-
-global RVS_TargetTransitionRule rvs_target_transition_rules[] = {
-  { RVS_TargetState_Stopped,        RVS_TargetState_Queued,         RVS_TargetTransition_Queue,                 0 },
-  { RVS_TargetState_Queued,         RVS_TargetState_Running,        RVS_TargetTransition_RunAccepted,           1 },
-  { RVS_TargetState_Queued,         RVS_TargetState_Stopped,        RVS_TargetTransition_PreDispatchCancelled,  0 },
-  { RVS_TargetState_Running,        RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedStop,         1 },
-  { RVS_TargetState_PausedForEvent, RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedStop,         1 },
-  { RVS_TargetState_Running,        RVS_TargetState_PausedForEvent, RVS_TargetTransition_BarrierPause,          0 },
-  { RVS_TargetState_PausedForEvent, RVS_TargetState_Running,        RVS_TargetTransition_BarrierRollback,       0 },
-  { RVS_TargetState_Running,        RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedExit,         1 },
-  { RVS_TargetState_PausedForEvent, RVS_TargetState_Stopped,        RVS_TargetTransition_ConfirmedExit,         1 },
-  { RVS_TargetState_Stopped,        RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
-  { RVS_TargetState_Queued,         RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
-  { RVS_TargetState_Running,        RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
-  { RVS_TargetState_PausedForEvent, RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
-  { RVS_TargetState_StoppedAttention,RVS_TargetState_Removed,       RVS_TargetTransition_Retired,               1 },
-  { RVS_TargetState_Terminating,    RVS_TargetState_Removed,        RVS_TargetTransition_Retired,               1 },
-};
 
 internal B32
 rvs_scheduler_commit_target_locked(RVS_TargetLedgerEntry *entry, U64 expected_revision, RVS_TargetState next_state, RVS_TargetTransitionKind transition_kind)
@@ -695,10 +695,10 @@ rvs_scheduler_register_operation_locked(RVS_Scheduler *scheduler, RVS_RequestPoo
 }
 
 internal RVS_ScheduledOperation *
-rvs_scheduler_unregister_operation_locked(RVS_Scheduler *scheduler, RVS_SchedulerKey key)
+rvs_scheduler_unregister_operation_locked(RVS_Scheduler *scheduler, RVS_SchedulerKey key, RVS_ScheduledOperation *expected_operation)
 {
   for (RVS_ScheduledOperation *n = scheduler->key_first; n; n = n->key_next) {
-    if (rvs_scheduler_key_match(n->key, key)) {
+    if (n == expected_operation && rvs_scheduler_key_match(n->key, key)) {
       rvs_scheduler_operation_key_remove_locked(scheduler, n);
       n->is_keyed = 0;
       return n;
@@ -708,7 +708,7 @@ rvs_scheduler_unregister_operation_locked(RVS_Scheduler *scheduler, RVS_Schedule
 }
 
 internal RVS_ScheduledOperation *
-rvs_scheduler_find_active_operation_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
+rvs_scheduler_operation_from_request_id_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
   for EachNode(n, RVS_ScheduledOperation, scheduler->operation_first) {
     if (n->request->request_id == request_id) { return n; }
@@ -877,7 +877,7 @@ rvs_scheduler_rollback_admission_locked(RVS_Scheduler *scheduler, RVS_SchedulerA
   rvs_scheduler_operation_remove_locked(scheduler, operation);
   RVS_ScheduledOperation *registered_operation = 0;
   if (admission->registered) {
-    registered_operation = rvs_scheduler_unregister_operation_locked(scheduler, operation->key);
+    registered_operation = rvs_scheduler_unregister_operation_locked(scheduler, operation->key, operation);
     AssertAlways(registered_operation == operation);
   }
   rvs_request_release(operation->request); // drop unreturned caller ownership
@@ -909,7 +909,7 @@ rvs_request_control_release(RVS_RequestControl *owner)
   RVS_ScheduledOperation *registered_operation = 0;
   mutex_take(owner->control->mutex);
   if (owner->registered && !owner->control->is_shutdown) {
-    registered_operation = rvs_scheduler_unregister_operation_locked(&owner->session->scheduler, owner->operation->key);
+    registered_operation = rvs_scheduler_unregister_operation_locked(&owner->session->scheduler, owner->operation->key, owner->operation);
   }
   mutex_drop(owner->control->mutex);
   if (registered_operation) { rvs_scheduler_operation_release(registered_operation); }
@@ -992,30 +992,37 @@ rvs_scheduler_emit_locked(RVS_Scheduler *scheduler, RVS_SchedulerDecision *decis
 }
 
 internal RVS_SchedulerCommand *
-rvs_scheduler_set_command_locked(RVS_Scheduler *scheduler, RVS_SchedulerDecision *decision, RVS_SchedulerCommandKind kind, RVS_ScheduledOperation *operation)
+rvs_scheduler_set_command_locked(RVS_Scheduler            *scheduler,
+                                 RVS_SchedulerDecision    *decision,
+                                 RVS_SchedulerCommandKind  kind,
+                                 RVS_ScheduledOperation   *operation)
 {
   AssertAlways(kind != RVS_SchedulerCommand_Null && operation != 0);
   AssertAlways(decision->status == RVS_SchedulerDecisionStatus_Applied && decision->command.kind == RVS_SchedulerCommand_Null);
   AssertAlways(operation->pending_command.kind == RVS_SchedulerCommand_Null);
   AssertAlways(scheduler->next_command_id != max_U64);
+
   scheduler->next_command_id += 1;
   AssertAlways(scheduler->next_command_id != 0);
+
   RVS_SchedulerCommandToken token = {
     .request_id = operation->request->request_id,
     .command_id = scheduler->next_command_id,
   };
-  decision->command.kind = kind;
-  decision->command.token = token;
+  decision->command.kind      = kind;
+  decision->command.token     = token;
   decision->command.operation = operation;
+
   operation->pending_command = (RVS_SchedulerPendingCommand){ .kind = kind, .token = token };
   rvs_scheduler_operation_addref(operation);
+
   return &decision->command;
 }
 
 internal B32
 rvs_scheduler_begin_command_locked(RVS_Scheduler *scheduler, RVS_SchedulerCommand *command)
 {
-  RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(scheduler, command->token.request_id);
+  RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, command->token.request_id);
   if (operation != command->operation || operation->pending_command.kind != command->kind ||
       operation->pending_command.has_started ||
       operation->pending_command.token.request_id != command->token.request_id ||
@@ -1031,7 +1038,7 @@ rvs_scheduler_consume_command_locked(RVS_Scheduler *scheduler, RVS_ScheduledOper
                                      RVS_SchedulerCommandKind expected_kind, B32 expected_phase_matches)
 {
   RVS_SchedulerPendingCommand *pending = &operation->pending_command;
-  if (rvs_scheduler_find_active_operation_locked(scheduler, token.request_id) != operation ||
+  if (rvs_scheduler_operation_from_request_id_locked(scheduler, token.request_id) != operation ||
       pending->kind != expected_kind || !pending->has_started ||
       pending->token.command_id != token.command_id || pending->token.request_id != token.request_id ||
       !expected_phase_matches) {
@@ -1065,7 +1072,7 @@ rvs_scheduler_complete_operation_locked(RVS_Scheduler *scheduler, RVS_ScheduledO
   AssertAlways(operation->pending_command.kind == RVS_SchedulerCommand_Null);
   RVS_ScheduledOperation *keyed_operation = 0;
   if (operation->is_keyed) {
-    keyed_operation = rvs_scheduler_unregister_operation_locked(scheduler, operation->key);
+    keyed_operation = rvs_scheduler_unregister_operation_locked(scheduler, operation->key, operation);
     AssertAlways(keyed_operation == operation);
   }
   rvs_scheduler_operation_remove_locked(scheduler, operation);
@@ -1085,7 +1092,7 @@ rvs_scheduler_complete_operation_locked(RVS_Scheduler *scheduler, RVS_ScheduledO
 internal void
 rvs_scheduler_abort_operation_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id, RVS_Result result, B32 require_undispatched, RVS_SchedulerDecision *decision)
 {
-  RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(scheduler, request_id);
+  RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, request_id);
   if (operation == 0) {
     if ( ! rvs_scheduler_clear_queued_execution_locked(scheduler, request_id)) {
       rvs_scheduler_decision_ignore_stale(decision);
@@ -1104,20 +1111,32 @@ rvs_scheduler_abort_operation_locked(RVS_Scheduler *scheduler, RVS_MessageID req
 }
 
 internal void
-rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, RVS_SchedulerDecision *decision_out)
+rvs_scheduler_apply_locked(RVS_Scheduler         *scheduler,
+                           RVS_SchedulerEvent     event,
+                           RVS_SchedulerDecision *decision_out)
 {
   MemoryZeroStruct(decision_out);
+
   decision_out->result = RVS_Result_Ok;
+
   switch (event.kind) {
-  case RVS_SchedulerEvent_DispatchStarted: {
-    RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(scheduler, event.request.request_id);
-    B32 is_pending = 0;
-    if (operation) {
-      mutex_take(operation->request->mutex);
-      is_pending = operation->request->reply.result == RVS_Result_Pending;
-      mutex_drop(operation->request->mutex);
+  case RVS_SchedulerEvent_LaunchStarted: {
+    RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, event.launch_started.request_id);
+    if (operation == 0 ||
+        operation->key.op != RVS_SchedulerOp_Launch ||
+        operation->launch_phase != RVS_LaunchPhase_AwaitLaunchStarted ||
+        event.launch_started.pid == 0) {
+      rvs_scheduler_decision_ignore_stale(decision_out);
+    } else {
+      operation->launch_phase = RVS_LaunchPhase_AwaitCreateProcess;
+      operation->launch_pid   = event.launch_started.pid;
+      rvs_scheduler_set_command_locked(scheduler, decision_out, RVS_SchedulerCommand_PumpLaunch, operation);
     }
-    if (operation == 0 || operation->is_dispatched || !is_pending) {
+  } break;
+
+  case RVS_SchedulerEvent_DispatchStarted: {
+    RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, event.request.request_id);
+    if (operation == 0 || operation->is_dispatched) {
       rvs_scheduler_decision_ignore_stale(decision_out);
     } else {
       operation->is_dispatched = 1;
@@ -1125,7 +1144,7 @@ rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, R
   } break;
 
   case RVS_SchedulerEvent_DispatchAccepted: {
-    RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(scheduler, event.request.request_id);
+    RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, event.request.request_id);
     if (operation == 0) {
       if ( ! rvs_scheduler_mark_run_in_flight_locked(scheduler, event.request.request_id)) {
         rvs_scheduler_decision_ignore_stale(decision_out);
@@ -1152,7 +1171,7 @@ rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, R
 
   case RVS_SchedulerEvent_BackendCompleted: {
     RVS_EngineReply reply = event.completed.reply;
-    RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(scheduler, reply.request_id);
+    RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, reply.request_id);
     if (operation == 0) {
       rvs_scheduler_decision_ignore_stale(decision_out);
     } else {
@@ -1177,18 +1196,6 @@ rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, R
     }
   } break;
 
-  case RVS_SchedulerEvent_LaunchStarted: {
-    RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(scheduler, event.launch_started.request_id);
-    if (operation == 0 || operation->key.op != RVS_SchedulerOp_Launch ||
-        operation->launch_phase != RVS_LaunchPhase_AwaitLaunchStarted || event.launch_started.pid == 0) {
-      rvs_scheduler_decision_ignore_stale(decision_out);
-    } else {
-      operation->launch_phase = RVS_LaunchPhase_AwaitCreateProcess;
-      operation->launch_pid = event.launch_started.pid;
-      rvs_scheduler_set_command_locked(scheduler, decision_out, RVS_SchedulerCommand_PumpLaunch, operation);
-    }
-  } break;
-
   case RVS_SchedulerEvent_DemonEventBatch: {
     B32 accepts_stop_events = 0;
     if (scheduler->phase == RVS_SchedulerPhase_Running &&
@@ -1210,7 +1217,7 @@ rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, R
     }
     RVS_ScheduledOperation *launch = 0;
     if (event.demon_events.source == RVS_SchedulerEventBatchSource_PumpLaunch) {
-      launch = rvs_scheduler_find_active_operation_locked(scheduler, event.demon_events.command.request_id);
+      launch = rvs_scheduler_operation_from_request_id_locked(scheduler, event.demon_events.command.request_id);
       B32 phase_matches = launch && launch->key.op == RVS_SchedulerOp_Launch &&
                           launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess;
       if (launch == 0 || !rvs_scheduler_consume_command_locked(scheduler, launch, event.demon_events.command,
@@ -1343,7 +1350,7 @@ rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, R
   case RVS_SchedulerEvent_CommandOutcome: {
     RVS_SchedulerCommandToken token = event.command_outcome.command;
     RVS_SchedulerCommandKind command_kind = event.command_outcome.command_kind;
-    RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(scheduler, token.request_id);
+    RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, token.request_id);
     B32 phase_matches = 0;
     if (operation) {
       if (command_kind == RVS_SchedulerCommand_PumpLaunch) {

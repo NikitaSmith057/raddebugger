@@ -392,9 +392,9 @@ internal void                    rvs_scheduler_operation_addref                 
 internal void                    rvs_scheduler_operation_release                (RVS_ScheduledOperation *operation);
 
 internal void                    rvs_scheduler_operation_remove_locked          (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation);
-internal RVS_ScheduledOperation *rvs_scheduler_find_active_operation_locked     (RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal RVS_ScheduledOperation *rvs_scheduler_operation_from_request_id_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal RVS_Result              rvs_scheduler_register_operation_locked        (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_SchedulerKey key, RVS_ScheduledOperation *operation);
-internal RVS_ScheduledOperation *rvs_scheduler_unregister_operation_locked      (RVS_Scheduler *scheduler, RVS_SchedulerKey key);
+internal RVS_ScheduledOperation *rvs_scheduler_unregister_operation_locked      (RVS_Scheduler *scheduler, RVS_SchedulerKey key, RVS_ScheduledOperation *expected_operation);
 
 internal RVS_RequestControl     *rvs_request_control_alloc                      (RVS_Session *session, RVS_ScheduledOperation *operation, B32 registered);
 

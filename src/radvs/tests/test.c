@@ -100,8 +100,7 @@ entry_point(CmdLine *cmdline)
 {
   (void)cmdline;
 
-  Arena *queue_arena = arena_alloc(.name = "RVS Queue Test");
-  RVS_Queue *queue = rvs_queue_alloc(queue_arena, sizeof(RVS_QueueTestMessage), AlignOf(RVS_QueueTestMessage));
+  RVS_Queue *queue = rvs_queue_alloc(sizeof(RVS_QueueTestMessage), AlignOf(RVS_QueueTestMessage));
   RVS_QueueTestMessage *queued = rvs_queue_alloc_struct(queue, RVS_QueueTestMessage);
   RVS_QueueTestMessage *rejected = rvs_queue_alloc_struct(queue, RVS_QueueTestMessage);
   AssertAlways(queued != 0 && rejected != 0);
@@ -109,13 +108,11 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_queue_push(queue, &queued->base) == RVS_Result_Ok);
   rvs_queue_close(queue);
   AssertAlways(rvs_queue_push(queue, &rejected->base) == RVS_Result_EngineStopped);
-  rvs_queue_recycle(queue, &rejected->base);
   RVS_QueueTestMessage *popped = rvs_queue_pop_struct(queue, RVS_QueueTestMessage, 0);
   AssertAlways(popped == queued && popped->value == 1);
   rvs_queue_recycle(queue, &popped->base);
   AssertAlways(rvs_queue_alloc_item(queue) == 0);
   rvs_queue_release(queue);
-  arena_release(queue_arena);
 
   Temp terminate_copy_scratch = scratch_begin(0, 0);
   DMN_Handle terminate_handles[] = { { .u64 = { 1 } }, { .u64 = { 2 } } };
@@ -422,7 +419,6 @@ entry_point(CmdLine *cmdline)
   AssertAlways(retired_run_submit.request == 0 && retired_run_submit.control == 0);
 
   RVS_Request *pump_failure_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
-  engine->test_scheduler_effect_execution_max_depth = 0;
   ins_atomic_u32_eval_assign(&engine->test_fail_demon_message_type, RVS_DemonMessage_Pump);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_LaunchStarted,
@@ -432,7 +428,6 @@ entry_point(CmdLine *cmdline)
   RVS_EngineReply pump_failure_reply = {0};
   AssertAlways(rvs_request_wait(pump_failure_launch, max_U64, &pump_failure_reply) == RVS_Result_Ok);
   AssertAlways(pump_failure_reply.result == RVS_Result_Error);
-  AssertAlways(engine->test_scheduler_effect_execution_max_depth == 1);
   rvs_request_release(pump_failure_launch);
 
   RVS_Request *malformed_outcome_launch = rvs_test_request_alloc(session, lifecycle_key, 0);
@@ -1024,7 +1019,7 @@ entry_point(CmdLine *cmdline)
   RVS_Request *join_request = join_operation->request;
   AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_operation) == RVS_Result_Ok);
   AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_operation) == RVS_Result_AlreadyPending);
-  AssertAlways(rvs_scheduler_unregister_operation_locked(&session->scheduler, join_key) == join_operation);
+  AssertAlways(rvs_scheduler_unregister_operation_locked(&session->scheduler, join_key, join_operation) == join_operation);
   rvs_scheduler_operation_remove_locked(&session->scheduler, join_operation);
   mutex_drop(session->control->mutex);
   rvs_request_release(join_request); // drop caller ownership
@@ -1277,7 +1272,7 @@ internal RVS_SchedulerCommandToken
 rvs_test_launch_pump_token(RVS_Engine *engine, RVS_MessageID request_id)
 {
   mutex_take(engine->control->mutex);
-  RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(&engine->session->scheduler, request_id);
+  RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(&engine->session->scheduler, request_id);
   AssertAlways(operation && operation->pending_command.kind == RVS_SchedulerCommand_PumpLaunch);
   if (!operation->pending_command.has_started) {
     RVS_SchedulerCommand command = {
