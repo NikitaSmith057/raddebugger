@@ -89,8 +89,9 @@ entry_point(CmdLine *cmdline)
   rvs_queue_close(queue);
   AssertAlways(rvs_queue_push(queue, &rejected->base) == RVS_Result_EngineStopped);
   rvs_queue_recycle(queue, &rejected->base);
-  AssertAlways(rvs_queue_pop_struct(queue, RVS_QueueTestMessage, 0) == queued);
-  rvs_queue_recycle(queue, &queued->base);
+  RVS_QueueTestMessage *popped = rvs_queue_pop_struct(queue, RVS_QueueTestMessage, 0);
+  AssertAlways(popped == queued && popped->value == 1);
+  rvs_queue_recycle(queue, &popped->base);
   AssertAlways(rvs_queue_alloc_item(queue) == 0);
   rvs_queue_release(queue);
   arena_release(queue_arena);

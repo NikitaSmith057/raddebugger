@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set TARGET_VALUES=radlink radbin mule_main mule_module torture
+set TARGET_VALUES=radlink radbin mule_main mule_module torture rvs_test
 set CC_VALUES=msvc clang
 set MODE_VALUES=debug release
 set RAW_ARGS=%*
@@ -111,6 +111,8 @@ for %%m in (%MODE_VALUES%) do for %%c in (%CC_VALUES%) do (
   ) else (
     call build.bat asan no_meta %%c %%m !TARGET_VALUES! || (endlocal exit /b 1)
   )
+
+  build\rvs_test.exe || (endlocal exit /b 1)
 
   if "%RUN_TORTURE%" equ "1" (
     pushd build
