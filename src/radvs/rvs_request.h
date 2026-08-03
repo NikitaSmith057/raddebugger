@@ -23,7 +23,6 @@ struct RVS_Request
   RVS_Request          *key_next;
   RVS_Request          *key_prev;
   RVS_RequestPool      *pool;
-  RVS_Session          *session;
   Mutex                 mutex;
   CondVar               cv;
   U32                   ref_count;

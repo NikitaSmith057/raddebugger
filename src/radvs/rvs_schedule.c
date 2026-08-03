@@ -111,7 +111,6 @@ rvs_session_request_alloc_locked(RVS_Session *session, RVS_RequestPool *pool, RV
   RVS_Request *request = rvs_request_pool_request_alloc(pool);
   request->ref_count = 2;
   request->request_id = request_id;
-  request->session = session;
   request->key = key;
   request->reply.request_id = request_id;
   request->reply.result = RVS_Result_Pending;
