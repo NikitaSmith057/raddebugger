@@ -30,7 +30,7 @@
 #include "arch/arch_inc.c"
 #include "demon/demon_inc.c"
 
-#include "radvs/rvs_protocol.c"
+#include "radvs/rvs_async.c"
 #include "radvs/rvs_demon.c"
 #include "radvs/rvs_engine.c"
 
@@ -52,6 +52,12 @@ typedef struct
   RVS_Engine *engine;
 } RVS_EngineShutdownTest;
 
+typedef struct
+{
+  RVS_QueueNode base;
+  U64           value;
+} RVS_QueueTestMessage;
+
 internal void rvs_event_wait_test_thread(void *user_data);
 internal void rvs_test_wait_until_event_waiting(RVS_Session *session);
 internal void rvs_engine_shutdown_test_thread(void *user_data);
@@ -72,6 +78,22 @@ internal void
 entry_point(CmdLine *cmdline)
 {
   (void)cmdline;
+
+  Arena *queue_arena = arena_alloc(.name = "RVS Queue Test");
+  RVS_Queue *queue = rvs_queue_alloc(queue_arena, sizeof(RVS_QueueTestMessage), AlignOf(RVS_QueueTestMessage));
+  RVS_QueueTestMessage *queued = rvs_queue_alloc_struct(queue, RVS_QueueTestMessage);
+  RVS_QueueTestMessage *rejected = rvs_queue_alloc_struct(queue, RVS_QueueTestMessage);
+  AssertAlways(queued != 0 && rejected != 0);
+  queued->value = 1;
+  AssertAlways(rvs_queue_push(queue, &queued->base) == RVS_Result_Ok);
+  rvs_queue_close(queue);
+  AssertAlways(rvs_queue_push(queue, &rejected->base) == RVS_Result_EngineStopped);
+  rvs_queue_recycle(queue, &rejected->base);
+  AssertAlways(rvs_queue_pop_struct(queue, RVS_QueueTestMessage, 0) == queued);
+  rvs_queue_recycle(queue, &queued->base);
+  AssertAlways(rvs_queue_alloc_item(queue) == 0);
+  rvs_queue_release(queue);
+  arena_release(queue_arena);
 
   RVS_Engine *engine = 0;
   AssertAlways(rvs_engine_init(&engine) == RVS_Result_Ok);

@@ -1,4 +1,5 @@
 #include "radvs/rvs_engine.h"
+#include "radvs/rvs_async.h"
 #include "radvs/rvs_demon.h"
 #include "radvs/rvs_request.h"
 #include "radvs/rvs_schedule.h"

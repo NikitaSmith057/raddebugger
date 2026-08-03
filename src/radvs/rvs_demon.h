@@ -4,7 +4,7 @@
 #pragma once
 
 #include "radvs/rvs.h"
-#include "radvs/rvs_protocol.h"
+#include "radvs/rvs_async.h"
 
 typedef struct RVS_Demon RVS_Demon;
 

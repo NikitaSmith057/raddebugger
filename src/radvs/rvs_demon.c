@@ -1,5 +1,5 @@
 
-#include "radvs/rvs_protocol.h"
+#include "radvs/rvs_async.h"
 #include "radvs/rvs_demon.h"
 
 typedef struct RVS_Demon

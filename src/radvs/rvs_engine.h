@@ -135,7 +135,6 @@ RVS_Result rvs_request_wait(RVS_Request *request, U64 wait_us, RVS_EngineReply *
 void       rvs_request_control_release(RVS_RequestControl *control);
 RVS_Result rvs_request_control_cancel(RVS_RequestControl *control);
 
-
 ////////////////////////////////
 // Internal
 
