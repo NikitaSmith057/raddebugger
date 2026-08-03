@@ -15,8 +15,11 @@ typedef enum
   RVS_Result_Pending,
   RVS_Result_AlreadyPending,
   RVS_Result_Cancelled,
+  // Returned only when engine shutdown prevents an operation or ends pending work.
   RVS_Result_EngineStopped,
   RVS_Result_Unsupported,
+
+  // The target was invalidated or its captured state/topology generation changed.
   RVS_Result_StaleState,
 } RVS_Result;
 

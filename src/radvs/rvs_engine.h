@@ -64,6 +64,12 @@ typedef struct
   RVS_RequestControl *control;
 } RVS_SubmitInfo;
 
+// Control-operation terminology:
+// - Terminate permanently ends selected targets and completes after confirmed exits.
+// - Interrupt and Break temporarily stop execution; a selected-target interrupt completes
+//   after confirmed selected stops and resumption of any temporarily halted unselected targets.
+// - Stop is reserved as an alias for Terminate, never for temporary interruption.
+
 ////////////////////////////////
 // Command
 
@@ -131,7 +137,8 @@ void       rvs_request_addref(RVS_Request *request);
 void       rvs_request_release(RVS_Request *request);
 RVS_Result rvs_request_wait(RVS_Request *request, U64 wait_us, RVS_EngineReply *reply_out);
 
-// Only the creator receives this pre-dispatch cancellation capability.
+// Only the creator receives this pre-dispatch cancellation capability. Dispatched workflow
+// preemption is engine-internal and is triggered only by Interrupt or Terminate workflows.
 void       rvs_request_control_release(RVS_RequestControl *control);
 RVS_Result rvs_request_control_cancel(RVS_RequestControl *control);
 
