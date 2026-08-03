@@ -11,10 +11,20 @@ typedef struct RVS_ScheduledOperation RVS_ScheduledOperation;
 
 typedef enum
 {
-  RVS_SessionExecutionState_Idle,
-  RVS_SessionExecutionState_Queued,
-  RVS_SessionExecutionState_RunInFlight,
-} RVS_SessionExecutionState;
+  RVS_TargetExecutionState_Idle,
+  RVS_TargetExecutionState_Queued,
+  RVS_TargetExecutionState_RunInFlight,
+} RVS_TargetExecutionState;
+
+typedef struct RVS_TargetLedgerEntry RVS_TargetLedgerEntry;
+struct RVS_TargetLedgerEntry
+{
+  RVS_TargetLedgerEntry    *next;
+  RVS_ProgramID             target;
+  RVS_TargetExecutionState  execution_state;
+  U64                       execution_generation;
+  RVS_MessageID             execution_request_id;
+};
 
 typedef struct
 {
@@ -24,8 +34,8 @@ typedef struct
   RVS_ScheduledOperation *key_first;
   RVS_ScheduledOperation *key_last;
   RVS_ScheduledOperation *free_first;
-  RVS_SessionExecutionState execution_state;
-  RVS_MessageID             execution_request_id; // lease survives Run request completion until RunFinished
+  RVS_TargetLedgerEntry    *target_first;
+  RVS_TargetLedgerEntry    *target_last;
 } RVS_Scheduler;
 
 typedef struct
@@ -68,10 +78,13 @@ internal B32          rvs_operation_key_is_well_formed_for_policy(RVS_RequestPol
 internal B32          rvs_operation_key_match(RVS_OperationKey a, RVS_OperationKey b);
 internal B32          rvs_operation_keys_conflict(RVS_OperationKey a, RVS_OperationKey b);
 internal B32          rvs_scheduler_has_conflicting_operation_locked(RVS_Scheduler *scheduler, RVS_OperationKey key);
-internal B32          rvs_scheduler_reserve_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal void         rvs_scheduler_target_add_locked(RVS_Scheduler *scheduler, RVS_ProgramID target);
+internal RVS_TargetLedgerEntry *rvs_scheduler_target_from_id_locked(RVS_Scheduler *scheduler, RVS_ProgramID target);
+internal B32          rvs_scheduler_reserve_execution_locked(RVS_Scheduler *scheduler, RVS_ProgramID *targets, U64 targets_count, RVS_MessageID request_id);
 internal B32          rvs_scheduler_mark_run_in_flight_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal B32          rvs_scheduler_clear_queued_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal B32          rvs_scheduler_finish_run_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal void         rvs_scheduler_release_execution_leases_locked(RVS_Scheduler *scheduler);
 internal B32          rvs_scheduler_execution_blocks_operation_locked(RVS_Scheduler *scheduler, RVS_OperationClass operation_class);
 internal RVS_ScheduledOperation *rvs_scheduler_operation_alloc_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_MessageID request_id, RVS_RequestPolicy policy, RVS_OperationKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch);
 internal void                    rvs_scheduler_operation_addref(RVS_ScheduledOperation *operation);

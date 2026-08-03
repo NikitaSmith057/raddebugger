@@ -63,7 +63,7 @@ internal void rvs_test_wait_until_event_waiting(RVS_Session *session);
 internal void rvs_engine_shutdown_test_thread(void *user_data);
 internal void rvs_test_wait_until_shutdown(RVS_Session *session);
 internal void rvs_test_wait_until_dispatch_held(RVS_Engine *engine);
-internal void rvs_test_wait_until_execution_state(RVS_Session *session, RVS_SessionExecutionState state);
+internal void rvs_test_wait_until_execution_state(RVS_Session *session, RVS_ProgramID target, RVS_TargetExecutionState state);
 internal RVS_Request *rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind, RVS_ScheduledOperation **operation_out);
 
 internal void
@@ -237,6 +237,8 @@ entry_point(CmdLine *cmdline)
   mutex_take(session->control->mutex);
   U64 first_program_epoch = rvs_session_program_state_epoch_locked(session, run_programs[0]);
   U64 second_program_epoch = rvs_session_program_state_epoch_locked(session, run_programs[1]);
+  U64 first_execution_generation = rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[0])->execution_generation;
+  U64 second_execution_generation = rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[1])->execution_generation;
   mutex_drop(session->control->mutex);
   RVS_SubmitInfo valid_run_submit = {0};
   AssertAlways(rvs_session_run_many(session, run_programs, ArrayCount(run_programs), &valid_run_submit) == RVS_Result_Ok);
@@ -247,10 +249,13 @@ entry_point(CmdLine *cmdline)
   AssertAlways(valid_run_reply.result == RVS_Result_Ok);
   rvs_request_release(valid_run_submit.request);
   rvs_request_control_release(valid_run_submit.control);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, run_programs[0], RVS_TargetExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, run_programs[1], RVS_TargetExecutionState_Idle);
   mutex_take(session->control->mutex);
   AssertAlways(rvs_session_program_state_epoch_locked(session, run_programs[0]) > first_program_epoch);
   AssertAlways(rvs_session_program_state_epoch_locked(session, run_programs[1]) > second_program_epoch);
+  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[0])->execution_generation > first_execution_generation);
+  AssertAlways(rvs_scheduler_target_from_id_locked(&session->scheduler, run_programs[1])->execution_generation > second_execution_generation);
   mutex_drop(session->control->mutex);
 
   RVS_SubmitInfo invalid_command_submit = {0};
@@ -278,20 +283,20 @@ entry_point(CmdLine *cmdline)
     .run = { .programs_count = 1, .programs = &null_program },
   }, &null_program_submit) == RVS_Result_Error);
   AssertAlways(null_program_submit.request == 0 && null_program_submit.control == 0);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
   // These failure paths cannot occur during normal engine operation.
   ins_atomic_u32_eval_assign(&engine->test_fail_command_enqueue, 1);
   RVS_SubmitInfo enqueue_failure_submit = {0};
   AssertAlways(rvs_session_run(session, reply.launch.program_id, &enqueue_failure_submit) == RVS_Result_Error);
   AssertAlways(enqueue_failure_submit.request == 0 && enqueue_failure_submit.control == 0);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
   ins_atomic_u32_eval_assign(&engine->test_hold_before_dispatch, 1);
   RVS_SubmitInfo cancelled_run_submit = {0};
   AssertAlways(rvs_session_run(session, reply.launch.program_id, &cancelled_run_submit) == RVS_Result_Ok);
   rvs_test_wait_until_dispatch_held(engine);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Queued);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Queued);
   RVS_SubmitInfo blocked_run_submit = {0};
   RVS_ProgramID other_program_id = { .u64 = { max_U64 - 1 } };
   AssertAlways(rvs_session_run(session, other_program_id, &blocked_run_submit) == RVS_Result_AlreadyPending);
@@ -301,14 +306,14 @@ entry_point(CmdLine *cmdline)
   AssertAlways( ! rvs_scheduler_execution_blocks_operation_locked(&session->scheduler, RVS_OperationClass_ReadOnly));
   mutex_drop(session->control->mutex);
   AssertAlways(rvs_request_control_cancel(cancelled_run_submit.control) == RVS_Result_Ok);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Queued);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Queued);
   ins_atomic_u32_eval_assign(&engine->test_hold_before_dispatch, 0);
   RVS_EngineReply cancelled_run_reply = {0};
   AssertAlways(rvs_request_wait(cancelled_run_submit.request, max_U64, &cancelled_run_reply) == RVS_Result_Ok);
   AssertAlways(cancelled_run_reply.result == RVS_Result_Cancelled);
   rvs_request_release(cancelled_run_submit.request);
   rvs_request_control_release(cancelled_run_submit.control);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
   ins_atomic_u32_eval_assign(&engine->test_fail_demon_message_type, RVS_DemonMessage_Run);
   RVS_SubmitInfo demon_send_failure_submit = {0};
@@ -318,12 +323,12 @@ entry_point(CmdLine *cmdline)
   AssertAlways(demon_send_failure_reply.result == RVS_Result_Error);
   rvs_request_release(demon_send_failure_submit.request);
   rvs_request_control_release(demon_send_failure_submit.control);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
   // Exercise DEMON reply transitions directly without fabricating backend failures.
   RVS_MessageID test_run_request_id = 0x1000;
   mutex_take(session->control->mutex);
-  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, test_run_request_id));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &reply.launch.program_id, 1, test_run_request_id));
   AssertAlways( ! rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, test_run_request_id + 1));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
@@ -331,34 +336,34 @@ entry_point(CmdLine *cmdline)
     .request_id = test_run_request_id,
     .result = RVS_Result_Ok,
   });
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_RunInFlight);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_RunInFlight);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_EventBatch,
     .request_id = test_run_request_id,
   });
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_RunInFlight);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_RunInFlight);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_RunFinished,
     .request_id = test_run_request_id + 1,
   });
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_RunInFlight);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_RunInFlight);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_RunFinished,
     .request_id = test_run_request_id,
   });
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
   mutex_take(session->control->mutex);
-  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, test_run_request_id));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &reply.launch.program_id, 1, test_run_request_id));
   AssertAlways(rvs_scheduler_clear_queued_execution_locked(&session->scheduler, test_run_request_id));
-  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, test_run_request_id));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &reply.launch.program_id, 1, test_run_request_id));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_Run,
     .request_id = test_run_request_id,
     .result = RVS_Result_Error,
   });
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
   RVS_OperationKey join_key = {
     .operation_class = RVS_OperationClass_ReadOnly,
@@ -435,7 +440,7 @@ entry_point(CmdLine *cmdline)
   AssertAlways( ! shutdown_held_run_submit.control->operation->is_dispatched);
   rvs_request_release(shutdown_held_run_submit.request);
   rvs_request_control_release(shutdown_held_run_submit.control);
-  rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
   Temp stopped_event_scratch = scratch_begin(0, 0);
   RVS_Event event = {0};
   AssertAlways(rvs_session_wait_for_event(stopped_event_scratch.arena, session, 0, &event) == RVS_Result_EngineStopped);
@@ -495,11 +500,12 @@ rvs_test_wait_until_dispatch_held(RVS_Engine *engine)
 }
 
 internal void
-rvs_test_wait_until_execution_state(RVS_Session *session, RVS_SessionExecutionState state)
+rvs_test_wait_until_execution_state(RVS_Session *session, RVS_ProgramID target, RVS_TargetExecutionState state)
 {
   for (;;) {
     mutex_take(session->control->mutex);
-    B32 matches = session->scheduler.execution_state == state;
+    RVS_TargetLedgerEntry *entry = rvs_scheduler_target_from_id_locked(&session->scheduler, target);
+    B32 matches = entry != 0 && entry->execution_state == state;
     mutex_drop(session->control->mutex);
     if (matches) { break; }
     sleep_ms(1);

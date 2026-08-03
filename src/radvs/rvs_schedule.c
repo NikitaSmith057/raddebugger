@@ -47,46 +47,122 @@ rvs_scheduler_has_conflicting_operation_locked(RVS_Scheduler *scheduler, RVS_Ope
   return 0;
 }
 
-internal B32
-rvs_scheduler_reserve_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
+internal void
+rvs_scheduler_target_add_locked(RVS_Scheduler *scheduler, RVS_ProgramID target)
 {
-  if (request_id == 0 || scheduler->execution_state != RVS_SessionExecutionState_Idle || scheduler->execution_request_id != 0) { return 0; }
-  scheduler->execution_state = RVS_SessionExecutionState_Queued;
-  scheduler->execution_request_id = request_id;
+  AssertAlways(rvs_scheduler_target_from_id_locked(scheduler, target) == 0);
+  RVS_TargetLedgerEntry *entry = push_array(scheduler->arena, RVS_TargetLedgerEntry, 1);
+  entry->target = target;
+  SLLQueuePush(scheduler->target_first, scheduler->target_last, entry);
+}
+
+internal RVS_TargetLedgerEntry *
+rvs_scheduler_target_from_id_locked(RVS_Scheduler *scheduler, RVS_ProgramID target)
+{
+  for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+    if (dmn_handle_match(entry->target, target)) { return entry; }
+  }
+  return 0;
+}
+
+internal B32
+rvs_scheduler_reserve_execution_locked(RVS_Scheduler *scheduler, RVS_ProgramID *targets, U64 targets_count, RVS_MessageID request_id)
+{
+  if (request_id == 0 || targets == 0 || targets_count == 0) { return 0; }
+  for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+    if (entry->execution_state != RVS_TargetExecutionState_Idle) { return 0; }
+  }
+  for EachIndex(target_idx, targets_count) {
+    if (rvs_scheduler_target_from_id_locked(scheduler, targets[target_idx]) == 0) { return 0; }
+  }
+  for EachIndex(target_idx, targets_count) {
+    RVS_TargetLedgerEntry *entry = rvs_scheduler_target_from_id_locked(scheduler, targets[target_idx]);
+    entry->execution_state = RVS_TargetExecutionState_Queued;
+    entry->execution_generation += 1;
+    entry->execution_request_id = request_id;
+  }
   return 1;
 }
 
 internal B32
 rvs_scheduler_mark_run_in_flight_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  if (scheduler->execution_state != RVS_SessionExecutionState_Queued || scheduler->execution_request_id != request_id) { return 0; }
-  scheduler->execution_state = RVS_SessionExecutionState_RunInFlight;
-  return 1;
+  B32 found = 0;
+  for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+    if (entry->execution_request_id == request_id) {
+      if (entry->execution_state != RVS_TargetExecutionState_Queued) { return 0; }
+      found = 1;
+    }
+  }
+  if (found) {
+    for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+      if (entry->execution_request_id == request_id) {
+        entry->execution_state = RVS_TargetExecutionState_RunInFlight;
+      }
+    }
+  }
+  return found;
 }
 
 internal B32
 rvs_scheduler_clear_queued_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  if (scheduler->execution_state != RVS_SessionExecutionState_Queued || scheduler->execution_request_id != request_id) { return 0; }
-  scheduler->execution_state = RVS_SessionExecutionState_Idle;
-  scheduler->execution_request_id = 0;
-  return 1;
+  B32 found = 0;
+  for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+    if (entry->execution_request_id == request_id) {
+      if (entry->execution_state != RVS_TargetExecutionState_Queued) { return 0; }
+      found = 1;
+    }
+  }
+  if (found) {
+    for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+      if (entry->execution_request_id == request_id) {
+        entry->execution_state = RVS_TargetExecutionState_Idle;
+        entry->execution_request_id = 0;
+      }
+    }
+  }
+  return found;
 }
 
 internal B32
 rvs_scheduler_finish_run_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  if (scheduler->execution_state != RVS_SessionExecutionState_RunInFlight || scheduler->execution_request_id != request_id) { return 0; }
-  scheduler->execution_state = RVS_SessionExecutionState_Idle;
-  scheduler->execution_request_id = 0;
-  return 1;
+  B32 found = 0;
+  for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+    if (entry->execution_request_id == request_id) {
+      if (entry->execution_state != RVS_TargetExecutionState_RunInFlight) { return 0; }
+      found = 1;
+    }
+  }
+  if (found) {
+    for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+      if (entry->execution_request_id == request_id) {
+        entry->execution_state = RVS_TargetExecutionState_Idle;
+        entry->execution_request_id = 0;
+      }
+    }
+  }
+  return found;
+}
+
+internal void
+rvs_scheduler_release_execution_leases_locked(RVS_Scheduler *scheduler)
+{
+  for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+    entry->execution_state = RVS_TargetExecutionState_Idle;
+    entry->execution_request_id = 0;
+  }
 }
 
 internal B32
 rvs_scheduler_execution_blocks_operation_locked(RVS_Scheduler *scheduler, RVS_OperationClass operation_class)
 {
-  return scheduler->execution_state != RVS_SessionExecutionState_Idle &&
-         (operation_class == RVS_OperationClass_SessionExecution || operation_class == RVS_OperationClass_SessionLifecycle);
+  if (operation_class != RVS_OperationClass_SessionExecution && operation_class != RVS_OperationClass_SessionLifecycle) { return 0; }
+  for EachNode(entry, RVS_TargetLedgerEntry, scheduler->target_first) {
+    if (entry->execution_state != RVS_TargetExecutionState_Idle) { return 1; }
+  }
+  return 0;
 }
 
 internal RVS_ScheduledOperation *
@@ -284,7 +360,7 @@ rvs_scheduler_admit_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_p
     admission_out->registered = 1;
   }
   if (key.operation_class == RVS_OperationClass_SessionExecution) {
-    AssertAlways(rvs_scheduler_reserve_execution_locked(scheduler, operation->request->request_id));
+    AssertAlways(rvs_scheduler_reserve_execution_locked(scheduler, operation->targets, operation->targets_count, operation->request->request_id));
   }
   admission_out->operation = operation;
   return RVS_Result_Ok;

@@ -66,6 +66,7 @@ rvs_session_program_add_locked(RVS_Session *session, U32 pid, DMN_Handle process
   program->process     = process;
   program->state_epoch = 1;
   SLLQueuePush(session->first_program, session->last_program, program);
+  rvs_scheduler_target_add_locked(&session->scheduler, program->id);
   return program;
 }
 
@@ -146,11 +147,7 @@ internal void
 rvs_session_release_engine(RVS_Session *session)
 {
   // The engine holds control->mutex while releasing session ownership.
-  if (session->scheduler.execution_state == RVS_SessionExecutionState_Queued) {
-    rvs_scheduler_clear_queued_execution_locked(&session->scheduler, session->scheduler.execution_request_id);
-  } else if (session->scheduler.execution_state == RVS_SessionExecutionState_RunInFlight) {
-    rvs_scheduler_finish_run_locked(&session->scheduler, session->scheduler.execution_request_id);
-  }
+  rvs_scheduler_release_execution_leases_locked(&session->scheduler);
   for EachNode(program, RVS_Program, session->first_program) {
     arena_release(program->arena);
   }
