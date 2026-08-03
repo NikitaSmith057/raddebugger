@@ -355,6 +355,19 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(join_request); // drop caller ownership
   rvs_request_release(join_request); // drop operation-key ownership
 
+  RVS_RequestPool *foreign_pool = rvs_request_pool_alloc();
+  mutex_take(session->control->mutex);
+  RVS_Request *foreign_request = rvs_session_request_alloc_locked(session,
+                                                                     foreign_pool,
+                                                                     ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                     join_key);
+  AssertAlways(rvs_session_register_operation_locked(session, join_key, foreign_request) == RVS_Result_Error);
+  rvs_session_request_remove_locked(session, foreign_request);
+  mutex_drop(session->control->mutex);
+  rvs_request_release(foreign_request); // drop engine ownership
+  rvs_request_release(foreign_request); // drop caller ownership
+  rvs_request_pool_release_engine(foreign_pool);
+
   lifecycle_key.operation_id = 2;
   RVS_OperationKey session_execution_key = {
     .operation_class = RVS_OperationClass_SessionExecution,

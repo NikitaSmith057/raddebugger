@@ -213,7 +213,7 @@ internal RVS_Result
 rvs_session_register_operation_locked(RVS_Session *session, RVS_OperationKey key, RVS_Request *request)
 {
   RVS_Result result = RVS_Result_Error;
-  if (request && rvs_operation_key_is_complete(key)) {
+  if (request && request->pool == session->engine->request_pool && rvs_operation_key_is_complete(key)) {
     result = RVS_Result_Ok;
     for (RVS_Request *n = session->scheduler.key_first; n; n = n->key_next) {
       if (rvs_operation_key_match(n->key, key)) { result = RVS_Result_AlreadyPending; break; }
