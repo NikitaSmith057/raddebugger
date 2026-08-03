@@ -342,7 +342,10 @@ entry_point(CmdLine *cmdline)
     .operation_id    = 1,
   };
   mutex_take(session->control->mutex);
-  RVS_Request *join_request = rvs_session_request_alloc_locked(session, join_key);
+  RVS_Request *join_request = rvs_session_request_alloc_locked(session,
+                                                                 session->engine->request_pool,
+                                                                 ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                 join_key);
   AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_Ok);
   AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_AlreadyPending);
   AssertAlways(rvs_session_unregister_operation_locked(session, join_key) == join_request);
@@ -457,7 +460,7 @@ rvs_test_wait_until_execution_state(RVS_Session *session, RVS_SessionExecutionSt
 {
   for (;;) {
     mutex_take(session->control->mutex);
-    B32 matches = session->execution_state == state;
+    B32 matches = session->scheduler.execution_state == state;
     mutex_drop(session->control->mutex);
     if (matches) { break; }
     sleep_ms(1);
@@ -468,7 +471,10 @@ internal RVS_Request *
 rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind)
 {
   mutex_take(session->control->mutex);
-  RVS_Request *request = rvs_session_request_alloc_locked(session, key);
+  RVS_Request *request = rvs_session_request_alloc_locked(session,
+                                                            session->engine->request_pool,
+                                                            ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                            key);
   request->command_kind = command_kind;
   mutex_drop(session->control->mutex);
   return request;
