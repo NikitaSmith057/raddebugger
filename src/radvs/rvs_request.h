@@ -6,33 +6,31 @@
 #include "radvs/rvs_engine.h"
 
 typedef struct RVS_RequestPool RVS_RequestPool;
+typedef struct RVS_RequestPoolNode RVS_RequestPoolNode;
 
 struct RVS_RequestPool
 {
-  Arena       *arena;
-  Mutex        mutex;
-  RVS_Request *free_first;
-  U64          live_requests_count;
-  B32          engine_released;
+  Arena               *arena;
+  Mutex                mutex;
+  RVS_RequestPoolNode *free_first;
+  U64                  live_requests_count;
+  B32                  engine_released;
 };
 
 struct RVS_Request
 {
-  RVS_Request          *next;
-  RVS_Request          *prev;
-  RVS_Request          *key_next;
-  RVS_Request          *key_prev;
-  RVS_RequestPool      *pool;
-  Mutex                 mutex;
-  CondVar               cv;
-  U32                   ref_count;
-  B32                   is_dispatched;
-  U64                   captured_program_state_epoch;
-  RVS_MessageID         request_id;
-  U32                   launch_pid;
-  RVS_EngineCommandKind command_kind;
-  RVS_OperationKey      key;
-  RVS_EngineReply       reply;
+  RVS_RequestPool *pool;
+  Mutex            mutex;
+  CondVar          cv;
+  U32              ref_count;
+  RVS_MessageID    request_id;
+  RVS_EngineReply  reply;
+};
+
+struct RVS_RequestPoolNode
+{
+  RVS_RequestPoolNode *next;
+  RVS_Request          request;
 };
 
 internal RVS_RequestPool *rvs_request_pool_alloc(void);

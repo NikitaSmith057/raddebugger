@@ -16,9 +16,9 @@ internal void
 rvs_request_pool_destroy(RVS_RequestPool *pool)
 {
   AssertAlways(pool->live_requests_count == 0);
-  for (RVS_Request *request = pool->free_first; request; request = request->next) {
-    cond_var_release(request->cv);
-    mutex_release(request->mutex);
+  for (RVS_RequestPoolNode *node = pool->free_first; node; node = node->next) {
+    cond_var_release(node->request.cv);
+    mutex_release(node->request.mutex);
   }
   mutex_release(pool->mutex);
   arena_release(pool->arena);
@@ -29,16 +29,19 @@ rvs_request_pool_request_alloc(RVS_RequestPool *pool)
 {
   mutex_take(pool->mutex);
   AssertAlways( ! pool->engine_released);
-  RVS_Request *request = pool->free_first;
-  if (request) {
-    pool->free_first = request->next;
+  RVS_RequestPoolNode *node = pool->free_first;
+  RVS_Request *request = 0;
+  if (node) {
+    pool->free_first = node->next;
+    request = &node->request;
     Mutex mutex = request->mutex;
     CondVar cv = request->cv;
     MemoryZeroStruct(request);
     request->mutex = mutex;
     request->cv = cv;
   } else {
-    request = push_array(pool->arena, RVS_Request, 1);
+    node = push_array(pool->arena, RVS_RequestPoolNode, 1);
+    request = &node->request;
     request->mutex = mutex_alloc();
     request->cv = cond_var_alloc();
   }
@@ -54,8 +57,9 @@ rvs_request_pool_request_release(RVS_Request *request)
   RVS_RequestPool *pool = request->pool;
   mutex_take(pool->mutex);
   AssertAlways(pool->live_requests_count != 0);
-  request->next = pool->free_first;
-  pool->free_first = request;
+  RVS_RequestPoolNode *node = CastFromMember(RVS_RequestPoolNode, request, request);
+  node->next = pool->free_first;
+  pool->free_first = node;
   pool->live_requests_count -= 1;
   B32 destroy_pool = pool->engine_released && pool->live_requests_count == 0;
   mutex_drop(pool->mutex);

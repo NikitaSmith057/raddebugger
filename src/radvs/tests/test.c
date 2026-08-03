@@ -64,7 +64,7 @@ internal void rvs_engine_shutdown_test_thread(void *user_data);
 internal void rvs_test_wait_until_shutdown(RVS_Session *session);
 internal void rvs_test_wait_until_dispatch_held(RVS_Engine *engine);
 internal void rvs_test_wait_until_execution_state(RVS_Session *session, RVS_SessionExecutionState state);
-internal RVS_Request *rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind);
+internal RVS_Request *rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind, RVS_ScheduledOperation **operation_out);
 
 internal void
 rvs_request_wait_test_thread(void *user_data)
@@ -142,7 +142,7 @@ entry_point(CmdLine *cmdline)
     .operation_class = RVS_OperationClass_SessionLifecycle,
     .operation_id = RVS_EngineCommandKind_Launch,
   };
-  RVS_Request *correlated_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch);
+  RVS_Request *correlated_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch, 0);
   AssertAlways(rvs_engine_begin_launch(engine, correlated_launch->request_id, 100));
   Temp correlation_scratch = scratch_begin(0, 0);
   DMN_EventList correlation_events = {0};
@@ -166,7 +166,7 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(correlated_launch);
   scratch_end(correlation_scratch);
 
-  RVS_Request *exited_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch);
+  RVS_Request *exited_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch, 0);
   AssertAlways(rvs_engine_begin_launch(engine, exited_launch->request_id, 200));
   Temp exit_scratch = scratch_begin(0, 0);
   DMN_EventList exit_events = {0};
@@ -188,7 +188,7 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(exited_launch);
   scratch_end(exit_scratch);
 
-  RVS_Request *pump_failure_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch);
+  RVS_Request *pump_failure_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch, 0);
   ins_atomic_u32_eval_assign(&engine->test_fail_demon_message_type, RVS_DemonMessage_Pump);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_LaunchStarted,
@@ -205,9 +205,10 @@ entry_point(CmdLine *cmdline)
     .program_id = reply.launch.program_id,
     .operation_id = 1,
   };
-  RVS_Request *stale_read = rvs_test_request_alloc(session, read_only_key, RVS_EngineCommandKind_Null);
+  RVS_ScheduledOperation *stale_operation = 0;
+  RVS_Request *stale_read = rvs_test_request_alloc(session, read_only_key, RVS_EngineCommandKind_Null, &stale_operation);
   mutex_take(session->control->mutex);
-  stale_read->captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, read_only_key.program_id);
+  stale_operation->captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, read_only_key.program_id);
   rvs_session_bump_program_state_epoch_locked(session, read_only_key.program_id);
   mutex_drop(session->control->mutex);
   rvs_engine_complete_reply(engine, (RVS_EngineReply){
@@ -365,30 +366,34 @@ entry_point(CmdLine *cmdline)
     .operation_id    = 1,
   };
   mutex_take(session->control->mutex);
-  RVS_Request *join_request = rvs_scheduler_request_alloc_locked(&session->scheduler,
-                                                                    session->engine->request_pool,
-                                                                    ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                                    join_key);
-  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_request) == RVS_Result_Ok);
-  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_request) == RVS_Result_AlreadyPending);
-  AssertAlways(rvs_scheduler_unregister_operation_locked(&session->scheduler, join_key) == join_request);
-  rvs_scheduler_request_remove_locked(&session->scheduler, join_request);
+  RVS_ScheduledOperation *join_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
+                                                                                   session->engine->request_pool,
+                                                                                   ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                                   RVS_RequestPolicy_RejectIfPending,
+                                                                                   join_key, 0, 0, 0);
+  RVS_Request *join_request = join_operation->request;
+  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_operation) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, join_operation) == RVS_Result_AlreadyPending);
+  AssertAlways(rvs_scheduler_unregister_operation_locked(&session->scheduler, join_key) == join_operation);
+  rvs_scheduler_operation_remove_locked(&session->scheduler, join_operation);
   mutex_drop(session->control->mutex);
-  rvs_request_release(join_request); // drop engine ownership
   rvs_request_release(join_request); // drop caller ownership
-  rvs_request_release(join_request); // drop operation-key ownership
+  rvs_scheduler_operation_release(join_operation); // drop keyed registration ownership
+  rvs_scheduler_operation_release(join_operation); // drop active registration ownership
 
   RVS_RequestPool *foreign_pool = rvs_request_pool_alloc();
   mutex_take(session->control->mutex);
-  RVS_Request *foreign_request = rvs_scheduler_request_alloc_locked(&session->scheduler,
-                                                                       foreign_pool,
-                                                                       ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                                       join_key);
-  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, foreign_request) == RVS_Result_Error);
-  rvs_scheduler_request_remove_locked(&session->scheduler, foreign_request);
+  RVS_ScheduledOperation *foreign_operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
+                                                                                      foreign_pool,
+                                                                                      ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                                      RVS_RequestPolicy_RejectIfPending,
+                                                                                      join_key, 0, 0, 0);
+  RVS_Request *foreign_request = foreign_operation->request;
+  AssertAlways(rvs_scheduler_register_operation_locked(&session->scheduler, session->engine->request_pool, join_key, foreign_operation) == RVS_Result_Error);
+  rvs_scheduler_operation_remove_locked(&session->scheduler, foreign_operation);
   mutex_drop(session->control->mutex);
-  rvs_request_release(foreign_request); // drop engine ownership
   rvs_request_release(foreign_request); // drop caller ownership
+  rvs_scheduler_operation_release(foreign_operation); // drop active registration ownership
   rvs_request_pool_release_engine(foreign_pool);
 
   lifecycle_key.operation_id = 2;
@@ -427,9 +432,7 @@ entry_point(CmdLine *cmdline)
   RVS_EngineReply shutdown_held_run_reply = {0};
   AssertAlways(rvs_request_wait(shutdown_held_run_submit.request, max_U64, &shutdown_held_run_reply) == RVS_Result_Ok);
   AssertAlways(shutdown_held_run_reply.result == RVS_Result_EngineStopped);
-  mutex_take(shutdown_held_run_submit.request->mutex);
-  AssertAlways( ! shutdown_held_run_submit.request->is_dispatched);
-  mutex_drop(shutdown_held_run_submit.request->mutex);
+  AssertAlways( ! shutdown_held_run_submit.control->operation->is_dispatched);
   rvs_request_release(shutdown_held_run_submit.request);
   rvs_request_control_release(shutdown_held_run_submit.control);
   rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
@@ -504,14 +507,16 @@ rvs_test_wait_until_execution_state(RVS_Session *session, RVS_SessionExecutionSt
 }
 
 internal RVS_Request *
-rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind)
+rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind, RVS_ScheduledOperation **operation_out)
 {
   mutex_take(session->control->mutex);
-  RVS_Request *request = rvs_scheduler_request_alloc_locked(&session->scheduler,
-                                                               session->engine->request_pool,
-                                                               ins_atomic_u64_inc_eval(&session->engine->next_request_id),
-                                                               key);
-  request->command_kind = command_kind;
+  RVS_ScheduledOperation *operation = rvs_scheduler_operation_alloc_locked(&session->scheduler,
+                                                                              session->engine->request_pool,
+                                                                              ins_atomic_u64_inc_eval(&session->engine->next_request_id),
+                                                                              RVS_RequestPolicy_RejectIfPending,
+                                                                              key, 0, 0, 0);
+  operation->command_kind = command_kind;
   mutex_drop(session->control->mutex);
-  return request;
+  if (operation_out) { *operation_out = operation; }
+  return operation->request;
 }

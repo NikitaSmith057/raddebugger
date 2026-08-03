@@ -41,6 +41,6 @@ internal void         rvs_session_bump_program_state_epoch_locked(RVS_Session *s
 internal B32          rvs_session_operation_key_resolves_locked(RVS_Session *session, RVS_OperationKey key);
 internal RVS_Program *rvs_session_program_add_locked(RVS_Session *session, U32 pid, DMN_Handle process);
 internal B32          rvs_session_programs_to_processes(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, DMN_Handle *processes_out);
-internal void         rvs_session_prepare_reply_locked(RVS_Session *session, RVS_Request *request, RVS_EngineReply *reply);
+internal void         rvs_session_prepare_reply_locked(RVS_Session *session, RVS_ScheduledOperation *operation, RVS_EngineReply *reply);
 internal RVS_Result   rvs_session_push_event(RVS_Session *session, RVS_Event *event);
 internal void         rvs_session_close_events_locked(RVS_Session *session);

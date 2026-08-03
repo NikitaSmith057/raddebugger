@@ -85,11 +85,11 @@ rvs_session_programs_to_processes(RVS_Session *session, RVS_ProgramID *programs,
 }
 
 internal void
-rvs_session_prepare_reply_locked(RVS_Session *session, RVS_Request *request, RVS_EngineReply *reply)
+rvs_session_prepare_reply_locked(RVS_Session *session, RVS_ScheduledOperation *operation, RVS_EngineReply *reply)
 {
-  if (request->key.operation_class == RVS_OperationClass_ReadOnly) {
-    reply->program_state_epoch = request->captured_program_state_epoch;
-    if (reply->program_state_epoch != rvs_session_program_state_epoch_locked(session, request->key.program_id)) {
+  if (operation->key.operation_class == RVS_OperationClass_ReadOnly) {
+    reply->program_state_epoch = operation->captured_program_state_epoch;
+    if (reply->program_state_epoch != rvs_session_program_state_epoch_locked(session, operation->key.program_id)) {
       reply->result = RVS_Result_StaleState;
     }
   }
@@ -123,6 +123,7 @@ rvs_session_alloc(RVS_Engine *engine)
   session->arena = arena;
   session->engine = engine;
   session->control = engine->control;
+  session->scheduler.arena = arena;
   session->ref_count = 2; // engine ownership plus the returned handle
   session->event_queue = rvs_queue_alloc(arena, sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
   session->program_arena = arena_alloc(.name = "Session Programs");
@@ -252,31 +253,37 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   if (key.operation_class == RVS_OperationClass_ReadOnly) {
     captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, key.program_id);
   }
+  RVS_ProgramID *targets = 0;
+  U64 targets_count = 0;
+  if (command.kind == RVS_EngineCommandKind_Run) {
+    targets = command.run.programs;
+    targets_count = command.run.programs_count;
+  }
   RVS_SchedulerAdmission admission = {0};
-  result = rvs_scheduler_admit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id, policy, key, captured_program_state_epoch, &admission);
+  result = rvs_scheduler_admit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id, policy, key, targets, targets_count, captured_program_state_epoch, &admission);
   if (result != RVS_Result_Ok) {
     goto exit_arena_mutex;
   }
   if (admission.joined) {
-    submit_out->request = admission.request;
+    submit_out->request = admission.operation->request;
     goto exit_arena_mutex;
   }
 
-  RVS_Request *request = admission.request;
-  request->command_kind = command.kind;
+  RVS_ScheduledOperation *operation = admission.operation;
+  operation->command_kind = command.kind;
 
   RVS_EngineMessage message = {
     .type    = RVS_EngineMessageType_Command,
     .session = session,
     .command = command,
   };
-  message.request_id = request->request_id;
+  message.request_id = operation->request->request_id;
 
   result = rvs_engine_send_message_locked(engine, &message);
 
   if (result == RVS_Result_Ok) {
-    submit_out->request = request;
-    submit_out->control = rvs_request_control_alloc(session, request, key, admission.registered);
+    submit_out->request = operation->request;
+    submit_out->control = rvs_request_control_alloc(session, operation, admission.registered);
   } else {
     rvs_scheduler_rollback_admission_locked(&session->scheduler, &admission);
   }

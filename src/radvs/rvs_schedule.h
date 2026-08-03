@@ -7,6 +7,7 @@
 
 typedef struct RVS_EngineControl RVS_EngineControl;
 typedef struct RVS_RequestPool RVS_RequestPool;
+typedef struct RVS_ScheduledOperation RVS_ScheduledOperation;
 
 typedef enum
 {
@@ -17,28 +18,48 @@ typedef enum
 
 typedef struct
 {
-  RVS_Request *request_first;
-  RVS_Request *request_last;
-  RVS_Request *key_first;
-  RVS_Request *key_last;
+  Arena                  *arena;
+  RVS_ScheduledOperation *operation_first;
+  RVS_ScheduledOperation *operation_last;
+  RVS_ScheduledOperation *key_first;
+  RVS_ScheduledOperation *key_last;
+  RVS_ScheduledOperation *free_first;
   RVS_SessionExecutionState execution_state;
-  RVS_MessageID             execution_request_id;
+  RVS_MessageID             execution_request_id; // lease survives Run request completion until RunFinished
 } RVS_Scheduler;
 
 typedef struct
 {
-  RVS_Request *request;
-  B32          joined;
-  B32          registered;
+  RVS_ScheduledOperation *operation;
+  B32                     joined;
+  B32                     registered;
 } RVS_SchedulerAdmission;
+
+struct RVS_ScheduledOperation
+{
+  RVS_ScheduledOperation *next;
+  RVS_ScheduledOperation *prev;
+  RVS_ScheduledOperation *key_next;
+  RVS_ScheduledOperation *key_prev;
+  RVS_Scheduler          *scheduler;
+  RVS_Request            *request;
+  RVS_ProgramID          *targets;
+  U64                     targets_count;
+  U32                     ref_count;
+  B32                     is_dispatched;
+  U64                     captured_program_state_epoch;
+  U32                     launch_pid;
+  RVS_EngineCommandKind   command_kind;
+  RVS_RequestPolicy       policy;
+  RVS_OperationKey        key;
+};
 
 struct RVS_RequestControl
 {
   Arena             *arena;
   RVS_Session       *session;
   RVS_EngineControl *control;
-  RVS_Request       *request;
-  RVS_OperationKey   key;
+  RVS_ScheduledOperation *operation;
   B32                registered;
 };
 
@@ -52,15 +73,17 @@ internal B32          rvs_scheduler_mark_run_in_flight_locked(RVS_Scheduler *sch
 internal B32          rvs_scheduler_clear_queued_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal B32          rvs_scheduler_finish_run_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal B32          rvs_scheduler_execution_blocks_operation_locked(RVS_Scheduler *scheduler, RVS_OperationClass operation_class);
-internal RVS_Request *rvs_scheduler_request_alloc_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_MessageID request_id, RVS_OperationKey key);
-internal void         rvs_scheduler_request_remove_locked(RVS_Scheduler *scheduler, RVS_Request *request);
-internal RVS_Request *rvs_scheduler_find_active_request_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
-internal RVS_Request *rvs_scheduler_request_mark_dispatched_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
-internal RVS_Result   rvs_scheduler_register_operation_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_OperationKey key, RVS_Request *request);
-internal RVS_Request *rvs_scheduler_unregister_operation_locked(RVS_Scheduler *scheduler, RVS_OperationKey key);
-internal RVS_Request *rvs_scheduler_retire_undispatched_request_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
-internal RVS_Request *rvs_scheduler_take_active_requests_locked(RVS_Scheduler *scheduler);
-internal RVS_Request *rvs_scheduler_take_operation_keys_locked(RVS_Scheduler *scheduler);
-internal RVS_RequestControl *rvs_request_control_alloc(RVS_Session *session, RVS_Request *request, RVS_OperationKey key, B32 registered);
-internal RVS_Result rvs_scheduler_admit_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_RequestPolicy policy, RVS_OperationKey key, U64 captured_program_state_epoch, RVS_SchedulerAdmission *admission_out);
+internal RVS_ScheduledOperation *rvs_scheduler_operation_alloc_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_MessageID request_id, RVS_RequestPolicy policy, RVS_OperationKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch);
+internal void                    rvs_scheduler_operation_addref(RVS_ScheduledOperation *operation);
+internal void                    rvs_scheduler_operation_release(RVS_ScheduledOperation *operation);
+internal void                    rvs_scheduler_operation_remove_locked(RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation);
+internal RVS_ScheduledOperation *rvs_scheduler_find_active_operation_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal RVS_ScheduledOperation *rvs_scheduler_operation_mark_dispatched_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal RVS_Result              rvs_scheduler_register_operation_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_OperationKey key, RVS_ScheduledOperation *operation);
+internal RVS_ScheduledOperation *rvs_scheduler_unregister_operation_locked(RVS_Scheduler *scheduler, RVS_OperationKey key);
+internal RVS_ScheduledOperation *rvs_scheduler_retire_undispatched_operation_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal RVS_ScheduledOperation *rvs_scheduler_take_active_operations_locked(RVS_Scheduler *scheduler);
+internal RVS_ScheduledOperation *rvs_scheduler_take_operation_keys_locked(RVS_Scheduler *scheduler);
+internal RVS_RequestControl *rvs_request_control_alloc(RVS_Session *session, RVS_ScheduledOperation *operation, B32 registered);
+internal RVS_Result rvs_scheduler_admit_locked(RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_RequestPolicy policy, RVS_OperationKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch, RVS_SchedulerAdmission *admission_out);
 internal void       rvs_scheduler_rollback_admission_locked(RVS_Scheduler *scheduler, RVS_SchedulerAdmission *admission);
