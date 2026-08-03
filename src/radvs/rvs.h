@@ -10,6 +10,7 @@ typedef enum
   RVS_Result_Null,
   RVS_Result_Ok,
   RVS_Result_Timeout,
+  RVS_Result_InvalidArgument,
   RVS_Result_Error,
   RVS_Result_Pending,
   RVS_Result_AlreadyPending,
@@ -23,7 +24,7 @@ typedef enum
 {
   RVS_ThreadState_Null,
   RVS_ThreadState_Initing,
-  RVS_ThreadState_Running,
+  RVS_ThreadState_Live,
   RVS_ThreadState_Stopped,
   RVS_ThreadState_Terminating,
   RVS_ThreadState_Exited

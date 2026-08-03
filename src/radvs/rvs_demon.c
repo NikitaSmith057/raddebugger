@@ -10,8 +10,8 @@ typedef struct RVS_Demon
   RVS_Queue              *queue;
   RVS_ThreadState         state;
   Thread                  worker;
-  RVS_DemonOutputCallback *output_callback;
-  void                    *output_ud;
+  RVS_DemonReplyCallback *reply_callback;
+  void                   *reply_ud;
 } RVS_Demon;
 
 global RVS_Demon g_rvs_demon;
@@ -20,7 +20,7 @@ internal void rvs_demon_worker(void *user_data);
 internal RVS_Result rvs_demon_push_message(RVS_Demon *dmn, RVS_DemonMessage *spec);
 
 RVS_Result
-rvs_demon_init(void *output_ud, RVS_DemonOutputCallback *output_callback, RVS_Demon **dmn_out)
+rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out)
 {
   ProfBeginFunction();
   RVS_Demon *dmn = &g_rvs_demon;
@@ -32,8 +32,8 @@ rvs_demon_init(void *output_ud, RVS_DemonOutputCallback *output_callback, RVS_De
     dmn->arena          = arena_alloc();
     dmn->message_arena  = arena_alloc();
     dmn->mutex          = mutex_alloc();
-    dmn->output_callback = output_callback;
-    dmn->output_ud       = output_ud;
+    dmn->reply_callback = reply_callback;
+    dmn->reply_ud       = reply_ud;
     dmn->queue          = rvs_queue_alloc(dmn->arena, sizeof(RVS_DemonMessage), AlignOf(RVS_DemonMessage));
     dmn->worker         = thread_launch(rvs_demon_worker, dmn);
     if ( ! MemoryIsZeroStruct(&dmn->worker)) {
@@ -44,7 +44,7 @@ rvs_demon_init(void *output_ud, RVS_DemonOutputCallback *output_callback, RVS_De
 
     // wait for the DEMON thread to initialize
     while (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Initing) { sleep_ms(1); }
-    if (ins_atomic_u32_eval(&dmn->state) != RVS_ThreadState_Running) {
+    if (ins_atomic_u32_eval(&dmn->state) != RVS_ThreadState_Live) {
       // TODO: handle the error
       NotImplemented;
     }
@@ -65,13 +65,13 @@ rvs_demon_shutdown(RVS_Demon *dmn)
   RVS_Result result = RVS_Result_Error;
   RVS_Result return_result = RVS_Result_Ok;
   
-  if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Running) {
+  if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Live) {
     // Interrupt a blocking dmn_ctrl_run so the worker can consume Shutdown.
     dmn_halt(0, 0);
 
     // send message to the demon worker to shutdown and update thread worker state
     mutex_take(dmn->mutex);
-    if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Running) {
+    if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Live) {
       result = rvs_demon_push_message(dmn, &(RVS_DemonMessage){ .type = RVS_DemonMessage_Shutdown });
       if (result == RVS_Result_Ok) {
         ins_atomic_u32_eval_assign(&dmn->state, RVS_ThreadState_Terminating);
@@ -145,21 +145,25 @@ rvs_demon_event_copy(Arena *arena, DMN_Event *dst, DMN_Event *src)
 }
 
 internal void
-rvs_demon_output_copy(Arena *arena, RVS_DemonOutput *dst, RVS_DemonOutput *src)
+rvs_demon_reply_copy(Arena *arena, RVS_DemonReply *dst, RVS_DemonReply *src)
 {
   ProfBeginFunction();
   *dst = *src;
   switch (src->kind) {
-  case RVS_DemonOutputKind_LaunchStarted: {
+  case RVS_DemonReplyKind_LaunchStarted: {
   } break;
-  case RVS_DemonOutputKind_Reply: {
+  case RVS_DemonReplyKind_Launch: {
   } break;
-  case RVS_DemonOutputKind_EventBatch: {
+  case RVS_DemonReplyKind_Run: {
+  } break;
+  case RVS_DemonReplyKind_EventBatch: {
     dst->event_batch.events = (DMN_EventList){0};
     for EachNode(n, DMN_EventNode, src->event_batch.events.first) {
       DMN_Event *event = dmn_event_list_push(arena, &dst->event_batch.events);
       rvs_demon_event_copy(arena, event, &n->v);
     }
+  } break;
+  case RVS_DemonReplyKind_RunFinished: {
   } break;
   default: { InvalidPath; } break;
   }
@@ -184,7 +188,7 @@ rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec)
   RVS_Result result = RVS_Result_Error;
 
   mutex_take(dmn->mutex);
-  if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Running) {
+  if (ins_atomic_u32_eval(&dmn->state) == RVS_ThreadState_Live) {
     AssertAlways(spec.request_id != 0);
     result = rvs_demon_push_message(dmn, &spec);
   }
@@ -205,29 +209,28 @@ rvs_demon_worker(void *user_data)
 
   // grant current thread access to the DEMON API
   DMN_CtrlCtx *ctrl_ctx = dmn_ctrl_begin();
-  ins_atomic_u32_eval_assign(&dmn->state, RVS_ThreadState_Running);
+  ins_atomic_u32_eval_assign(&dmn->state, RVS_ThreadState_Live);
 
   for (B32 keep_running = 1; keep_running;) {
     // wait for the requests from the engine thread
     RVS_DemonMessage *message = rvs_queue_pop_struct(dmn->queue, RVS_DemonMessage, max_U64);
 
     // process the message
-    RVS_DemonOutput output = {0};
+    RVS_DemonReply reply = {0};
     switch (message->type) {
     case RVS_DemonMessage_Launch: {
       Temp scratch = scratch_begin(0, 0);
       U32 pid = dmn_ctrl_launch(ctrl_ctx, &message->launch.params);
-      output.request_id             = message->request_id;
+      reply.request_id             = message->request_id;
       if (pid == 0) {
-        output = (RVS_DemonOutput){
-          .kind                   = RVS_DemonOutputKind_Reply,
-          .request_id             = message->request_id,
-          .reply.result           = RVS_Result_Error,
-          .reply.reply.kind       = RVS_DemonReplyKind_Launch,
+        reply = (RVS_DemonReply){
+          .kind       = RVS_DemonReplyKind_Launch,
+          .request_id = message->request_id,
+          .result     = RVS_Result_Error,
         };
       } else {
-        output = (RVS_DemonOutput){
-          .kind       = RVS_DemonOutputKind_LaunchStarted,
+        reply = (RVS_DemonReply){
+          .kind       = RVS_DemonReplyKind_LaunchStarted,
           .request_id = message->request_id,
           .launch_started = { .pid = pid },
         };
@@ -237,23 +240,22 @@ rvs_demon_worker(void *user_data)
     case RVS_DemonMessage_Pump: {
       Temp scratch = scratch_begin(0, 0);
       DMN_EventList events = dmn_ctrl_pump(scratch.arena, ctrl_ctx);
-      output = (RVS_DemonOutput){
-        .kind        = RVS_DemonOutputKind_EventBatch,
+      reply = (RVS_DemonReply){
+        .kind        = RVS_DemonReplyKind_EventBatch,
         .request_id  = message->request_id,
         .event_batch = { .events = events },
       };
-      dmn->output_callback(dmn, &output, dmn->output_ud);
-      output = (RVS_DemonOutput){0};
+      dmn->reply_callback(dmn, &reply, dmn->reply_ud);
+      reply = (RVS_DemonReply){0};
       scratch_end(scratch);
     } break;
     case RVS_DemonMessage_Run: {
       Temp scratch = scratch_begin(0, 0);
-      output.kind             = RVS_DemonOutputKind_Reply;
-      output.request_id       = message->request_id;
-      output.reply.result     = RVS_Result_Ok;
-      output.reply.reply.kind = RVS_DemonReplyKind_Run;
-      dmn->output_callback(dmn, &output, dmn->output_ud);
-      output = (RVS_DemonOutput){0};
+      reply.kind       = RVS_DemonReplyKind_Run;
+      reply.request_id = message->request_id;
+      reply.result     = RVS_Result_Ok;
+      dmn->reply_callback(dmn, &reply, dmn->reply_ud);
+      reply = (RVS_DemonReply){0};
 
       DMN_RunCtrls ctrls = {
         .run_entities              = message->run.processes,
@@ -264,14 +266,18 @@ rvs_demon_worker(void *user_data)
       DMN_EventList events = dmn_ctrl_run(scratch.arena, ctrl_ctx, &ctrls);
 
       if (events.first) {
-        output = (RVS_DemonOutput){
-          .kind       = RVS_DemonOutputKind_EventBatch,
+        reply = (RVS_DemonReply){
+          .kind       = RVS_DemonReplyKind_EventBatch,
           .request_id = message->request_id,
           .event_batch = { .events = events },
         };
-        dmn->output_callback(dmn, &output, dmn->output_ud);
-        output = (RVS_DemonOutput){0};
+        dmn->reply_callback(dmn, &reply, dmn->reply_ud);
+        reply = (RVS_DemonReply){0};
       }
+      reply = (RVS_DemonReply){
+        .kind       = RVS_DemonReplyKind_RunFinished,
+        .request_id = message->request_id,
+      };
       scratch_end(scratch);
     } break;
     case RVS_DemonMessage_Shutdown: {
@@ -281,8 +287,8 @@ rvs_demon_worker(void *user_data)
     }
 
     // publish completed commands and event batches
-    if (output.kind != RVS_DemonOutputKind_Null) {
-      dmn->output_callback(dmn, &output, dmn->output_ud);
+    if (reply.kind != RVS_DemonReplyKind_Null) {
+      dmn->reply_callback(dmn, &reply, dmn->reply_ud);
     }
 
     // recycle the message

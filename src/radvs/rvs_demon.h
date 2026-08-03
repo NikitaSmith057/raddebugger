@@ -40,53 +40,38 @@ typedef struct
 typedef enum
 {
   RVS_DemonReplyKind_Null,
+  RVS_DemonReplyKind_LaunchStarted,
   RVS_DemonReplyKind_Launch,
   RVS_DemonReplyKind_Run,
-  RVS_DemonReplyKind_Halt,
-  RVS_DemonReplyKind_Terminate,
+  RVS_DemonReplyKind_RunFinished,
+  RVS_DemonReplyKind_EventBatch,
 } RVS_DemonReplyKind;
 
 typedef struct
 {
   RVS_DemonReplyKind kind;
-} RVS_DemonReply;
-
-typedef enum
-{
-  RVS_DemonOutputKind_Null,
-  RVS_DemonOutputKind_LaunchStarted,
-  RVS_DemonOutputKind_Reply,
-  RVS_DemonOutputKind_EventBatch,
-} RVS_DemonOutputKind;
-
-typedef struct
-{
-  RVS_DemonOutputKind kind;
-  RVS_MessageID       request_id;
+  RVS_MessageID      request_id;
   union {
     struct {
       U32 pid;
     } launch_started;
-    struct {
-      RVS_Result      result;
-      RVS_DemonReply  reply;
-    } reply;
+    RVS_Result result;
     struct {
       DMN_EventList events;
     } event_batch;
   };
-} RVS_DemonOutput;
+} RVS_DemonReply;
 
-typedef void (RVS_DemonOutputCallback)(RVS_Demon *demon, RVS_DemonOutput *output, void *ud);
+typedef void (RVS_DemonReplyCallback)(RVS_Demon *demon, RVS_DemonReply *reply, void *ud);
 
-RVS_Result rvs_demon_init(void *output_ud, RVS_DemonOutputCallback *output_callback, RVS_Demon **dmn_out);
+RVS_Result rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out);
 RVS_Result rvs_demon_shutdown(RVS_Demon *dmn);
 
 internal RVS_Result rvs_demon_alloc       (void);
 internal RVS_Result rvs_demon_release     (void);
 internal void       rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *src);
 internal void       rvs_demon_event_copy  (Arena *arena, DMN_Event *dst, DMN_Event *src);
-internal void       rvs_demon_output_copy (Arena *arena, RVS_DemonOutput *dst, RVS_DemonOutput *src);
+internal void       rvs_demon_reply_copy  (Arena *arena, RVS_DemonReply *dst, RVS_DemonReply *src);
 internal RVS_Result rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage message_spec);
 
 

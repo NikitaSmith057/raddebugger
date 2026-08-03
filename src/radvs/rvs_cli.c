@@ -38,7 +38,7 @@
 #define RVS_CLI_CMD_XLIST    \
   X(Help,      "HELP")       \
   X(Launch,    "LAUNCH")     \
-  X(Start,     "START")      \
+  X(Run,       "Run")        \
   X(Stop,      "STOP")       \
   X(Continue,  "CONTINUE")   \
   X(Step,      "STEP")       \
@@ -172,7 +172,7 @@ entry_point(CmdLine *cmdline)
       RVS_ProgramID program_id = { .u64 = { program_id_u64 } };
 
       RVS_SubmitInfo submit = {0};
-      RVS_Result run_result = rvs_session_run(session, program_id, (RVS_SubmitOptions){0}, &submit);
+      RVS_Result run_result = rvs_session_run(session, program_id, &submit);
       if (run_result != RVS_Result_Ok) {
         rci_fprintf(stdout, "run: failed to submit program %llu, error code %u\n", program_id.u64[0], run_result);
         continue;
