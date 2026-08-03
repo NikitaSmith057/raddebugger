@@ -692,6 +692,18 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
     mutex_drop(engine->control->mutex);
   } break;
 
+  case RVS_DemonReplyKind_TerminateAccepted: {
+    // Termination completes only when later ExitProcess events invalidate its targets.
+  } break;
+
+  case RVS_DemonReplyKind_InterruptAccepted: {
+    // Acceptance is distinct from the later observed halt event batch.
+  } break;
+
+  case RVS_DemonReplyKind_InterruptObserved: {
+    // Target workflows will classify the preceding stop events before completion.
+  } break;
+
   default: { InvalidPath; } break;
   }
   ProfEnd();

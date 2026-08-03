@@ -96,8 +96,24 @@ entry_point(CmdLine *cmdline)
   rvs_queue_release(queue);
   arena_release(queue_arena);
 
+  Temp terminate_copy_scratch = scratch_begin(0, 0);
+  DMN_Handle terminate_handles[] = { { .u64 = { 1 } }, { .u64 = { 2 } } };
+  RVS_DemonMessage terminate_copy = {0};
+  rvs_demon_message_copy(terminate_copy_scratch.arena, &terminate_copy, &(RVS_DemonMessage){
+    .type = RVS_DemonMessage_Terminate,
+    .terminate = { .process_handles = terminate_handles, .process_count = ArrayCount(terminate_handles) },
+  });
+  AssertAlways(terminate_copy.terminate.process_count == ArrayCount(terminate_handles));
+  AssertAlways(terminate_copy.terminate.process_handles != terminate_handles);
+  AssertAlways(dmn_handle_match(terminate_copy.terminate.process_handles[0], terminate_handles[0]));
+  AssertAlways(dmn_handle_match(terminate_copy.terminate.process_handles[1], terminate_handles[1]));
+  scratch_end(terminate_copy_scratch);
+
   RVS_Engine *engine = 0;
   AssertAlways(rvs_engine_init(&engine) == RVS_Result_Ok);
+  AssertAlways(rvs_demon_interrupt_capability(engine->demon) == RVS_DemonInterruptCapability_GlobalWithResume);
+  AssertAlways(rvs_demon_interrupt(engine->demon, 1) == RVS_Result_Error);
+  AssertAlways(rvs_demon_send_message(engine->demon, (RVS_DemonMessage){ .type = RVS_DemonMessage_Halt, .request_id = 1 }) == RVS_Result_Unsupported);
   RVS_Session *session = 0;
   AssertAlways(rvs_engine_create_session(engine, &session) == RVS_Result_Ok);
   RVS_Session *second_session = 0;
