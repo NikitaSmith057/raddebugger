@@ -20,25 +20,47 @@ typedef enum
   RVS_SchedulerEvent_BackendCompleted,
   RVS_SchedulerEvent_RunFinished,
   RVS_SchedulerEvent_LaunchStarted,
-  RVS_SchedulerEvent_LaunchPumpFailed,
   RVS_SchedulerEvent_DemonEventBatch,
-  RVS_SchedulerEvent_TargetRegistered,
-  RVS_SchedulerEvent_ResumeAccepted,
+  RVS_SchedulerEvent_CommandOutcome,
   RVS_SchedulerEvent_PreDispatchCancelled,
   RVS_SchedulerEvent_Shutdown,
 } RVS_SchedulerEventKind;
 
 typedef enum
 {
-  RVS_SchedulerEffect_Null,
-  RVS_SchedulerEffect_Reject,
-  RVS_SchedulerEffect_ResumeTargetSubset,
-  RVS_SchedulerEffect_PumpLaunch,
-  RVS_SchedulerEffect_PublishTarget,
-  RVS_SchedulerEffect_RetireTarget,
-  RVS_SchedulerEffect_CompleteRequest,
-  RVS_SchedulerEffect_IgnoreStale,
-} RVS_SchedulerEffectKind;
+  RVS_SchedulerDecisionStatus_Applied,
+  RVS_SchedulerDecisionStatus_Rejected,
+  RVS_SchedulerDecisionStatus_IgnoredStale,
+} RVS_SchedulerDecisionStatus;
+
+typedef enum
+{
+  RVS_SchedulerEmission_Null,
+  RVS_SchedulerEmission_RetireTarget,
+  RVS_SchedulerEmission_CompleteRequest,
+} RVS_SchedulerEmissionKind;
+
+typedef enum
+{
+  RVS_SchedulerCommand_Null,
+  RVS_SchedulerCommand_ResumeTargetSubset,
+  RVS_SchedulerCommand_PumpLaunch,
+  RVS_SchedulerCommand_PublishTarget,
+} RVS_SchedulerCommandKind;
+
+typedef enum
+{
+  RVS_SchedulerCommandOutcome_Null,
+  RVS_SchedulerCommandOutcome_Failed,
+  RVS_SchedulerCommandOutcome_PublishTargetCompleted,
+  RVS_SchedulerCommandOutcome_ResumeTargetSubsetCompleted,
+} RVS_SchedulerCommandOutcomeKind;
+
+typedef enum
+{
+  RVS_SchedulerEventBatchSource_Execution,
+  RVS_SchedulerEventBatchSource_PumpLaunch,
+} RVS_SchedulerEventBatchSource;
 
 typedef enum
 {
@@ -192,25 +214,51 @@ typedef struct
   RVS_MessageID           execution_owner;
   U64                     cycle_epoch;
   U32                     resume_attempt;
-  B32                     acknowledged;
 } RVS_ResumeTransaction;
 
-typedef struct RVS_SchedulerEffect RVS_SchedulerEffect;
-struct RVS_SchedulerEffect
+typedef struct
 {
-  RVS_SchedulerEffect     *next;
-  RVS_Scheduler           *scheduler;
-  RVS_SchedulerEffectKind  kind;
-  RVS_ScheduledOperation  *operation;
-  RVS_Result               result;
-  RVS_EngineReply          reply;
-  U32                      pid;
-  U32                      exit_code;
-  DMN_Handle               process;
-  RVS_ProgramID           *targets;
-  U64                      targets_count;
-  RVS_MessageID            execution_request_id;
+  RVS_MessageID request_id;
+  U64           command_id;
+} RVS_SchedulerCommandToken;
+
+typedef struct
+{
+  RVS_SchedulerCommandKind  kind;
+  RVS_SchedulerCommandToken token;
+  B32                       has_started;
+} RVS_SchedulerPendingCommand;
+
+typedef struct RVS_SchedulerEmission RVS_SchedulerEmission;
+struct RVS_SchedulerEmission
+{
+  RVS_SchedulerEmission    *next;
+  RVS_Scheduler            *scheduler;
+  RVS_SchedulerEmissionKind kind;
+  RVS_ScheduledOperation   *operation;
+  RVS_EngineReply           reply;
+  U32                       pid;
+  U32                       exit_code;
+  DMN_Handle                process;
 };
+
+typedef struct
+{
+  RVS_SchedulerCommandKind  kind;
+  RVS_SchedulerCommandToken token;
+  RVS_ScheduledOperation   *operation;
+  union {
+    struct {
+      RVS_ProgramID *targets;
+      U64            targets_count;
+      RVS_MessageID  execution_request_id;
+    } resume_target_subset;
+    struct {
+      U32        pid;
+      DMN_Handle process;
+    } publish_target;
+  };
+} RVS_SchedulerCommand;
 
 struct RVS_TargetSnapshotStorage
 {
@@ -221,9 +269,19 @@ struct RVS_TargetSnapshotStorage
 
 typedef struct
 {
-  RVS_SchedulerEffect *first;
-  RVS_SchedulerEffect *last;
-} RVS_SchedulerEffectList;
+  RVS_SchedulerEmission *first;
+  RVS_SchedulerEmission *last;
+} RVS_SchedulerEmissionList;
+
+typedef struct
+{
+  RVS_SchedulerDecisionStatus status;
+  RVS_Result                  result;
+  // State and pending-command changes are committed before return. Emissions are
+  // ordered, best-effort consequences and never cause scheduler rollback.
+  RVS_SchedulerEmissionList   emissions;
+  RVS_SchedulerCommand        command;
+} RVS_SchedulerDecision;
 
 typedef struct
 {
@@ -233,12 +291,21 @@ typedef struct
     struct { RVS_EngineReply   reply;      } completed;
     struct { RVS_MessageID     request_id; U32 pid; } launch_started;
     struct {
+      RVS_SchedulerEventBatchSource source;
+      RVS_SchedulerCommandToken     command;
       RVS_MessageID                  request_id;
       DMN_EventList                  events;
       RVS_SchedulerEventDisposition *dispositions;
       U64                            dispositions_count;
     } demon_events;
-    struct { RVS_MessageID request_id; RVS_ProgramID target; U32 pid;             } target;
+    struct {
+      RVS_SchedulerCommandOutcomeKind kind;
+      RVS_SchedulerCommandKind        command_kind;
+      RVS_SchedulerCommandToken       command;
+      RVS_Result                      result;
+      RVS_ProgramID                   target;
+      U32                             pid;
+    } command_outcome;
     struct { RVS_MessageID request_id; RVS_ProgramID target; U64 execution_token; } observed;
   };
 } RVS_SchedulerEvent;
@@ -252,12 +319,13 @@ struct RVS_Scheduler
   RVS_ScheduledOperation    *key_last;
   Mutex                      recycle_mutex;
   RVS_ScheduledOperation    *operation_free_first;
-  RVS_SchedulerEffect       *effect_free_first;
+  RVS_SchedulerEmission     *emission_free_first;
   RVS_TargetSnapshotStorage *target_storage_free_first;
   RVS_TargetLedgerEntry     *target_first;
   RVS_TargetLedgerEntry     *target_last;
   RVS_ThreadLedgerEntry     *thread_first;
   RVS_ThreadLedgerEntry     *thread_last;
+  U64                        next_command_id;
   RVS_SchedulerPhase         phase;
   U64                        run_cycle_epoch;
   RVS_RunIntent              run_intent;
@@ -292,7 +360,7 @@ struct RVS_ScheduledOperation
   B32                        is_keyed;
   U64                        captured_program_state_epoch;
   RVS_LaunchPhase            launch_phase;
-  B32                        is_launch_pump_in_flight;
+  RVS_SchedulerPendingCommand pending_command;
   U32                        launch_pid;
   DMN_Handle                 launch_process;
   RVS_SchedulerKey           key;
@@ -332,5 +400,6 @@ internal RVS_RequestControl     *rvs_request_control_alloc                      
 
 internal RVS_Result              rvs_scheduler_admit_locked                     (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_SchedulerOp op, RVS_SchedulerKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch, RVS_SchedulerAdmission *admission_out);
 internal void                    rvs_scheduler_rollback_admission_locked        (RVS_Scheduler *scheduler, RVS_SchedulerAdmission *admission);
-internal void                    rvs_scheduler_apply_locked                     (RVS_Scheduler *scheduler, RVS_SchedulerEvent event, RVS_SchedulerEffectList *effects_out);
-internal void                    rvs_scheduler_effect_list_release              (RVS_SchedulerEffectList *effects);
+internal void                    rvs_scheduler_apply_locked                     (RVS_Scheduler *scheduler, RVS_SchedulerEvent event, RVS_SchedulerDecision *decision_out);
+internal B32                     rvs_scheduler_begin_command_locked             (RVS_Scheduler *scheduler, RVS_SchedulerCommand *command);
+internal void                    rvs_scheduler_decision_release                 (RVS_SchedulerDecision *decision);

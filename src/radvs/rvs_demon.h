@@ -36,6 +36,9 @@ typedef struct
       ProcessLaunchParams params; // process launch params
     } launch;
     struct {
+      U64 command_id;
+    } pump;
+    struct {
       DMN_Handle *processes;
       U64         processes_count;
     } run;
@@ -43,6 +46,7 @@ typedef struct
       DMN_Handle     *processes;
       U64             processes_count;
       RVS_MessageID   execution_request_id;
+      U64             command_id;
     } resume;
     struct {
       DMN_Handle *process_handles;
@@ -80,9 +84,11 @@ typedef struct
     struct {
       RVS_DemonAction action;
       RVS_Result      result;
+      U64             command_id;
     } action_result;
     struct {
       DMN_EventList events;
+      U64           command_id;
     } event_batch;
   };
 } RVS_DemonReply;

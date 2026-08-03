@@ -284,7 +284,7 @@ rvs_demon_worker(void *user_data)
       reply = (RVS_DemonReply){
         .kind        = RVS_DemonReplyKind_EventBatch,
         .request_id  = message->request_id,
-        .event_batch = { .events = events },
+        .event_batch = { .events = events, .command_id = message->pump.command_id },
       };
       dmn->reply_callback(dmn, &reply, dmn->reply_ud);
       reply = (RVS_DemonReply){0};
@@ -345,7 +345,11 @@ rvs_demon_worker(void *user_data)
       reply = (RVS_DemonReply){
         .kind = RVS_DemonReplyKind_ActionResult,
         .request_id = message->request_id,
-        .action_result = { .action = RVS_DemonAction_Resume, .result = RVS_Result_Ok },
+        .action_result = {
+          .action = RVS_DemonAction_Resume,
+          .result = RVS_Result_Ok,
+          .command_id = message->resume.command_id,
+        },
       };
       dmn->reply_callback(dmn, &reply, dmn->reply_ud);
       reply = (RVS_DemonReply){0};
