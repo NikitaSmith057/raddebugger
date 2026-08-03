@@ -115,6 +115,8 @@ struct RVS_Engine
   U32 test_hold_before_dispatch;
   U32 test_is_held_before_dispatch;
   U32 test_fail_demon_message_type;
+  U32 test_scheduler_effect_execution_depth;
+  U32 test_scheduler_effect_execution_max_depth;
 #endif
 };
 
@@ -279,6 +281,39 @@ rvs_engine_request_mark_dispatched(RVS_Engine *engine, RVS_MessageID request_id,
 internal void rvs_engine_execute_scheduler_effects(RVS_Engine *engine, RVS_SchedulerEffectList *effects);
 internal RVS_Result rvs_engine_send_demon_message(RVS_Engine *engine, RVS_DemonMessage message);
 
+typedef enum
+{
+  RVS_EngineSchedulerFeedbackKind_Null,
+  RVS_EngineSchedulerFeedbackKind_Event,
+  RVS_EngineSchedulerFeedbackKind_PublishTarget,
+} RVS_EngineSchedulerFeedbackKind;
+
+typedef struct RVS_EngineSchedulerFeedback RVS_EngineSchedulerFeedback;
+struct RVS_EngineSchedulerFeedback
+{
+  RVS_EngineSchedulerFeedback     *next;
+  RVS_EngineSchedulerFeedbackKind  kind;
+  RVS_SchedulerEvent               event;
+  RVS_MessageID                    request_id;
+  U32                              pid;
+  DMN_Handle                       process;
+};
+
+typedef struct
+{
+  RVS_EngineSchedulerFeedback *first;
+  RVS_EngineSchedulerFeedback *last;
+} RVS_EngineSchedulerFeedbackList;
+
+internal RVS_EngineSchedulerFeedback *
+rvs_engine_scheduler_feedback_push(Arena *arena, RVS_EngineSchedulerFeedbackList *list, RVS_EngineSchedulerFeedbackKind kind)
+{
+  RVS_EngineSchedulerFeedback *feedback = push_array(arena, RVS_EngineSchedulerFeedback, 1);
+  feedback->kind = kind;
+  SLLQueuePush(list->first, list->last, feedback);
+  return feedback;
+}
+
 internal void
 rvs_engine_release_active_requests(RVS_Engine *engine, RVS_Result pending_result)
 {
@@ -323,88 +358,115 @@ rvs_engine_submit_launch_started(RVS_Engine *engine, RVS_MessageID request_id, U
 internal void
 rvs_engine_execute_scheduler_effects(RVS_Engine *engine, RVS_SchedulerEffectList *effects)
 {
-  for EachNode(effect, RVS_SchedulerEffect, effects->first) {
-    if (effect->kind == RVS_SchedulerEffect_ResumeTargetSubset) {
-      RVS_SchedulerEffectList child_effects = {0};
-      RVS_Result result = RVS_Result_Ok;
-      DMN_Handle *processes = 0;
-      Temp scratch = scratch_begin(0, 0);
-      if (effect->targets_count != 0) {
-        processes = push_array(scratch.arena, DMN_Handle, effect->targets_count);
-        if ( ! rvs_session_programs_to_processes(engine->session, effect->targets, effect->targets_count, processes)) {
-          result = RVS_Result_Error;
+#if RVS_ENGINE_TESTING
+  engine->test_scheduler_effect_execution_depth += 1;
+  engine->test_scheduler_effect_execution_max_depth = Max(engine->test_scheduler_effect_execution_max_depth,
+                                                          engine->test_scheduler_effect_execution_depth);
+#endif
+  Temp scratch = scratch_begin(0, 0);
+  RVS_EngineSchedulerFeedbackList feedbacks = {0};
+  RVS_SchedulerEffectList current_effects = *effects;
+  MemoryZeroStruct(effects);
+  for (;;) {
+    for EachNode(effect, RVS_SchedulerEffect, current_effects.first) {
+      if (effect->kind == RVS_SchedulerEffect_ResumeTargetSubset) {
+        RVS_Result result = RVS_Result_Ok;
+        DMN_Handle *processes = 0;
+        if (effect->targets_count != 0) {
+          processes = push_array(scratch.arena, DMN_Handle, effect->targets_count);
+          mutex_take(engine->control->mutex);
+          if ( ! rvs_session_programs_to_processes(engine->session, effect->targets, effect->targets_count, processes)) {
+            result = RVS_Result_Error;
+          }
+          mutex_drop(engine->control->mutex);
         }
-      }
-      if (result == RVS_Result_Ok) {
-        result = rvs_engine_send_demon_message(engine, (RVS_DemonMessage){
-          .type = RVS_DemonMessage_Resume,
+        if (result == RVS_Result_Ok) {
+          result = rvs_engine_send_demon_message(engine, (RVS_DemonMessage){
+            .type = RVS_DemonMessage_Resume,
+            .request_id = effect->operation->request->request_id,
+            .resume = {
+              .processes = processes,
+              .processes_count = effect->targets_count,
+              .execution_request_id = effect->execution_request_id,
+            },
+          });
+        }
+        if (result != RVS_Result_Ok) {
+          RVS_EngineSchedulerFeedback *feedback = rvs_engine_scheduler_feedback_push(scratch.arena, &feedbacks, RVS_EngineSchedulerFeedbackKind_Event);
+          feedback->event = (RVS_SchedulerEvent){
+            .kind = RVS_SchedulerEvent_OperationFailed,
+            .request = { .request_id = effect->operation->request->request_id },
+          };
+        }
+      } else if (effect->kind == RVS_SchedulerEffect_PumpLaunch) {
+        RVS_Result result = rvs_engine_send_demon_message(engine, (RVS_DemonMessage){
+          .type       = RVS_DemonMessage_Pump,
           .request_id = effect->operation->request->request_id,
-          .resume = {
-            .processes = processes,
-            .processes_count = effect->targets_count,
-            .execution_request_id = effect->execution_request_id,
-          },
         });
+        if (result != RVS_Result_Ok) {
+          RVS_EngineSchedulerFeedback *feedback = rvs_engine_scheduler_feedback_push(scratch.arena, &feedbacks, RVS_EngineSchedulerFeedbackKind_Event);
+          feedback->event = (RVS_SchedulerEvent){
+            .kind = RVS_SchedulerEvent_LaunchPumpFailed,
+            .request = { .request_id = effect->operation->request->request_id },
+          };
+        }
+      } else if (effect->kind == RVS_SchedulerEffect_RetireTarget) {
+        mutex_take(engine->control->mutex);
+        rvs_session_program_retire_locked(engine->session, effect->process, effect->exit_code);
+        mutex_drop(engine->control->mutex);
+      } else if (effect->kind == RVS_SchedulerEffect_CompleteRequest) {
+        RVS_Request *request = effect->operation->request;
+        RVS_EngineReply reply = effect->reply;
+        mutex_take(engine->control->mutex);
+        rvs_session_prepare_reply_locked(engine->session, effect->operation, &reply);
+        mutex_drop(engine->control->mutex);
+        rvs_request_complete(request, reply);
+      } else if (effect->kind == RVS_SchedulerEffect_PublishTarget) {
+        RVS_EngineSchedulerFeedback *feedback = rvs_engine_scheduler_feedback_push(scratch.arena, &feedbacks, RVS_EngineSchedulerFeedbackKind_PublishTarget);
+        feedback->request_id = effect->operation->request->request_id;
+        feedback->pid = effect->pid;
+        feedback->process = effect->process;
       }
-      scratch_end(scratch);
-      if (result != RVS_Result_Ok) {
-        rvs_engine_apply_scheduler_event(engine, (RVS_SchedulerEvent){
-          .kind = RVS_SchedulerEvent_OperationFailed,
-          .request = { .request_id = effect->operation->request->request_id },
-        }, &child_effects);
-        rvs_engine_execute_scheduler_effects(engine, &child_effects);
-      }
-    } else if (effect->kind == RVS_SchedulerEffect_PumpLaunch) {
-      RVS_Result result = rvs_engine_send_demon_message(engine, (RVS_DemonMessage){
-        .type       = RVS_DemonMessage_Pump,
-        .request_id = effect->operation->request->request_id,
-      });
-      if (result != RVS_Result_Ok) {
-        RVS_SchedulerEffectList child_effects = {0};
-        rvs_engine_apply_scheduler_event(engine, (RVS_SchedulerEvent){
-          .kind = RVS_SchedulerEvent_LaunchPumpFailed,
-          .request = { .request_id = effect->operation->request->request_id },
-        }, &child_effects);
-        rvs_engine_execute_scheduler_effects(engine, &child_effects);
-      }
-    } else if (effect->kind == RVS_SchedulerEffect_RetireTarget) {
+    }
+    rvs_scheduler_effect_list_release(&current_effects);
+
+    // Finish the current transition's effects before reducing any feedback they produced.
+    RVS_EngineSchedulerFeedback *feedback = feedbacks.first;
+    if (feedback == 0) { break; }
+    SLLQueuePop(feedbacks.first, feedbacks.last);
+    if (feedback->kind == RVS_EngineSchedulerFeedbackKind_Event) {
+      rvs_engine_apply_scheduler_event(engine, feedback->event, &current_effects);
+    } else if (feedback->kind == RVS_EngineSchedulerFeedbackKind_PublishTarget) {
       mutex_take(engine->control->mutex);
-      rvs_session_program_retire_locked(engine->session, effect->process, effect->exit_code);
-      mutex_drop(engine->control->mutex);
-    } else if (effect->kind == RVS_SchedulerEffect_CompleteRequest) {
-      RVS_Request *request = effect->operation->request;
-      RVS_EngineReply reply = effect->reply;
-      mutex_take(engine->control->mutex);
-      rvs_session_prepare_reply_locked(engine->session, effect->operation, &reply);
-      mutex_drop(engine->control->mutex);
-      rvs_request_complete(request, reply);
-    } else if (effect->kind == RVS_SchedulerEffect_PublishTarget) {
-      mutex_take(engine->control->mutex);
-      RVS_SchedulerEffectList child_effects = {0};
-      if (effect->operation->key.op != RVS_SchedulerOp_Launch ||
-          effect->operation->launch_phase != RVS_LaunchPhase_AwaitTargetRegistration ||
-          effect->operation->launch_pid != effect->pid ||
-          !dmn_handle_match(effect->operation->launch_process, effect->process)) {
+      RVS_ScheduledOperation *operation = rvs_scheduler_find_active_operation_locked(&engine->session->scheduler, feedback->request_id);
+      if (operation == 0 || operation->key.op != RVS_SchedulerOp_Launch ||
+          operation->launch_phase != RVS_LaunchPhase_AwaitTargetRegistration ||
+          operation->launch_pid != feedback->pid ||
+          !dmn_handle_match(operation->launch_process, feedback->process) ||
+          rvs_scheduler_target_from_id_locked(&engine->session->scheduler, feedback->process) != 0 ||
+          rvs_session_program_from_id_locked(engine->session, feedback->process) != 0) {
         rvs_engine_apply_scheduler_event_locked(engine, (RVS_SchedulerEvent){
           .kind = RVS_SchedulerEvent_OperationFailed,
-          .request = { .request_id = effect->operation->request->request_id },
-        }, &child_effects);
+          .request = { .request_id = feedback->request_id },
+        }, &current_effects);
       } else {
-        RVS_Program *program = rvs_session_program_add_locked(engine->session, effect->pid, effect->process);
+        RVS_Program *program = rvs_session_program_add_locked(engine->session, feedback->pid, feedback->process);
         rvs_engine_apply_scheduler_event_locked(engine, (RVS_SchedulerEvent){
           .kind = RVS_SchedulerEvent_TargetRegistered,
           .target = {
-            .request_id = effect->operation->request->request_id,
+            .request_id = feedback->request_id,
             .target = program->id,
             .pid = program->pid,
           },
-        }, &child_effects);
+        }, &current_effects);
       }
       mutex_drop(engine->control->mutex);
-      rvs_engine_execute_scheduler_effects(engine, &child_effects);
     }
   }
-  rvs_scheduler_effect_list_release(effects);
+  scratch_end(scratch);
+#if RVS_ENGINE_TESTING
+  engine->test_scheduler_effect_execution_depth -= 1;
+#endif
 }
 
 internal void

@@ -420,7 +420,7 @@ rvs_scheduler_resume_effect_locked(RVS_Scheduler *scheduler, RVS_ScheduledOperat
 }
 
 internal B32
-rvs_scheduler_observe_stop_transaction_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, DMN_EventKind event_kind, RVS_SchedulerEffectList *effects)
+rvs_scheduler_observe_stop_transaction_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, DMN_EventKind event_kind)
 {
   RVS_StopTransaction *stop = &scheduler->stop_transaction;
   RVS_ScheduledOperation *operation = stop->owner;
@@ -437,31 +437,19 @@ rvs_scheduler_observe_stop_transaction_locked(RVS_Scheduler *scheduler, RVS_Sche
   }
   if ((scheduler->phase != RVS_SchedulerPhase_Interrupting && scheduler->phase != RVS_SchedulerPhase_CollectingStop) ||
       operation == 0 || event.observed.request_id != stop->execution_owner || !matches_target) { return 0; }
-  if (stop->backend_stable) { return 1; }
   rvs_scheduler_note_stop_transaction_locked(scheduler, &(RVS_Event){ .kind = event_kind, .process = event.observed.target });
-  if (rvs_scheduler_stop_transaction_is_observed_locked(operation)) {
-    stop->backend_stable = 1;
-    scheduler->resume_transaction = (RVS_ResumeTransaction){
-      .owner = operation,
-      .execution_owner = stop->execution_owner,
-      .cycle_epoch = scheduler->run_cycle_epoch,
-      .resume_attempt = 1,
-    };
-    scheduler->phase = RVS_SchedulerPhase_PreparingResume;
-    rvs_scheduler_resume_effect_locked(scheduler, operation, effects);
-  }
   return 1;
 }
 
 internal B32
-rvs_scheduler_observe_target_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, DMN_EventKind event_kind, RVS_SchedulerEffectList *effects)
+rvs_scheduler_observe_target_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, DMN_EventKind event_kind)
 {
   RVS_TargetLedgerEntry *entry = rvs_scheduler_target_from_id_locked(scheduler, event.observed.target);
   if (entry == 0 || event.observed.request_id != entry->execution_owner ||
       (event.observed.execution_token != 0 && entry->execution_token != event.observed.execution_token)) {
     return 0;
   }
-  B32 observed_global = rvs_scheduler_observe_stop_transaction_locked(scheduler, event, event_kind, effects);
+  B32 observed_global = rvs_scheduler_observe_stop_transaction_locked(scheduler, event, event_kind);
   if (event_kind == DMN_EventKind_Halt) {
     return observed_global;
   }
@@ -477,7 +465,7 @@ rvs_scheduler_retire_target_locked(RVS_Scheduler *scheduler, RVS_TargetLedgerEnt
   if (entry->execution_owner != 0) {
     rvs_scheduler_observe_stop_transaction_locked(scheduler, (RVS_SchedulerEvent){
       .observed = { .request_id = execution_owner, .target = entry->target },
-    }, DMN_EventKind_ExitProcess, effects);
+    }, DMN_EventKind_ExitProcess);
   }
   rvs_scheduler_commit_target_locked(entry, 0, RVS_TargetState_Removed, RVS_TargetTransition_Retired);
   entry->is_termination_fenced = 1;
@@ -1236,7 +1224,7 @@ rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, R
         if (entry && entry->execution_owner != 0) {
           rvs_scheduler_observe_target_locked(scheduler, (RVS_SchedulerEvent){
             .observed = { .request_id = event.demon_events.request_id, .target = demon_event->process },
-          }, DMN_EventKind_Halt, effects_out);
+          }, DMN_EventKind_Halt);
         }
       } else if (demon_event->kind == DMN_EventKind_Exception || demon_event->kind == DMN_EventKind_Breakpoint) {
         if (accepts_stop_events) {
@@ -1248,6 +1236,19 @@ rvs_scheduler_apply_locked(RVS_Scheduler *scheduler, RVS_SchedulerEvent event, R
         }
       }
       event_index += 1;
+    }
+    if (accepts_stop_events && scheduler->stop_transaction.owner != 0 &&
+        rvs_scheduler_stop_transaction_is_observed_locked(scheduler->stop_transaction.owner)) {
+      RVS_StopTransaction *stop = &scheduler->stop_transaction;
+      stop->backend_stable = 1;
+      scheduler->resume_transaction = (RVS_ResumeTransaction){
+        .owner = stop->owner,
+        .execution_owner = stop->execution_owner,
+        .cycle_epoch = scheduler->run_cycle_epoch,
+        .resume_attempt = 1,
+      };
+      scheduler->phase = RVS_SchedulerPhase_PreparingResume;
+      rvs_scheduler_resume_effect_locked(scheduler, stop->owner, effects_out);
     }
     if (launch) {
       launch->is_launch_pump_in_flight = 0;
