@@ -24,17 +24,19 @@ typedef struct
   RVS_QueueNode        base;
   RVS_DemonMessageType type;
   RVS_MessageID        request_id; // engine request that owns this completion
-  struct {
-    ProcessLaunchParams params;   // process launch params
-  } launch;
-  struct {
-    DMN_Handle *processes;
-    U64         processes_count;
-  } run;
-  struct {
-    DMN_Handle *process_handles;
-    U64         process_count;
-  } terminate;
+  union {
+    struct {
+      ProcessLaunchParams params; // process launch params
+    } launch;
+    struct {
+      DMN_Handle *processes;
+      U64         processes_count;
+    } run;
+    struct {
+      DMN_Handle *process_handles;
+      U64         process_count;
+    } terminate;
+  };
 } RVS_DemonMessage;
 
 typedef enum

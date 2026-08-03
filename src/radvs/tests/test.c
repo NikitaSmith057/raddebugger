@@ -79,7 +79,7 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_engine_create_session(engine, &session) == RVS_Result_Ok);
   RVS_Session *second_session = 0;
   AssertAlways(rvs_engine_create_session(engine, &second_session) == RVS_Result_Unsupported);
-  AssertAlways(RVS_RequestConflictPolicy_RejectIfPending == 0);
+  AssertAlways(RVS_RequestPolicy_Null == 0);
   AssertAlways(str8_match(rvs_string_from_command_kind(RVS_EngineCommandKind_Launch), str8_lit("Launch"), 0));
   AssertAlways(str8_match(rvs_string_from_command_kind(RVS_EngineCommandKind_Run), str8_lit("Run"), 0));
   AssertAlways(rvs_string_from_command_kind(RVS_EngineCommandKind_Null).size == 0);
@@ -106,6 +106,14 @@ entry_point(CmdLine *cmdline)
   AssertAlways(reply.kind == RVS_EngineReplyKind_Launch);
   AssertAlways(waiter.reply.kind == RVS_EngineReplyKind_Launch);
   rvs_request_control_release(launch_submit.control);
+
+  RVS_SubmitInfo second_launch_submit = {0};
+  AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &second_launch_submit) == RVS_Result_Ok);
+  RVS_EngineReply second_launch_reply = {0};
+  AssertAlways(rvs_request_wait(second_launch_submit.request, max_U64, &second_launch_reply) == RVS_Result_Ok);
+  AssertAlways(second_launch_reply.result == RVS_Result_Ok);
+  rvs_request_release(second_launch_submit.request);
+  rvs_request_control_release(second_launch_submit.control);
 
   RVS_OperationKey lifecycle_key = {
     .operation_class = RVS_OperationClass_SessionLifecycle,
@@ -158,7 +166,7 @@ entry_point(CmdLine *cmdline)
   scratch_end(exit_scratch);
 
   RVS_Request *pump_failure_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch);
-  ins_atomic_u32_eval_assign(&engine->test_fail_demon_pump_send, 1);
+  ins_atomic_u32_eval_assign(&engine->test_fail_demon_message_type, RVS_DemonMessage_Pump);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_LaunchStarted,
     .request_id = pump_failure_launch->request_id,
@@ -196,9 +204,18 @@ entry_point(CmdLine *cmdline)
   RVS_SubmitInfo invalid_program_submit = {0};
   AssertAlways(rvs_session_run(session, invalid_program_id, &invalid_program_submit) == RVS_Result_Error);
   AssertAlways(invalid_program_submit.request == 0 && invalid_program_submit.control == 0);
+  RVS_ProgramID unknown_programs[] = { invalid_program_id };
+  RVS_SubmitInfo unknown_programs_submit = {0};
+  AssertAlways(rvs_session_run_many(session, unknown_programs, ArrayCount(unknown_programs), &unknown_programs_submit) == RVS_Result_Error);
+  AssertAlways(unknown_programs_submit.request == 0 && unknown_programs_submit.control == 0);
 
+  RVS_ProgramID run_programs[] = { reply.launch.program_id, second_launch_reply.launch.program_id };
+  mutex_take(session->control->mutex);
+  U64 first_program_epoch = rvs_session_program_state_epoch_locked(session, run_programs[0]);
+  U64 second_program_epoch = rvs_session_program_state_epoch_locked(session, run_programs[1]);
+  mutex_drop(session->control->mutex);
   RVS_SubmitInfo valid_run_submit = {0};
-  AssertAlways(rvs_session_run(session, reply.launch.program_id, &valid_run_submit) == RVS_Result_Ok);
+  AssertAlways(rvs_session_run_many(session, run_programs, ArrayCount(run_programs), &valid_run_submit) == RVS_Result_Ok);
   AssertAlways(valid_run_submit.request != 0 && valid_run_submit.control != 0);
   RVS_EngineReply valid_run_reply = {0};
   AssertAlways(rvs_request_wait(valid_run_submit.request, max_U64, &valid_run_reply) == RVS_Result_Ok);
@@ -207,42 +224,36 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(valid_run_submit.request);
   rvs_request_control_release(valid_run_submit.control);
   rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
+  mutex_take(session->control->mutex);
+  AssertAlways(rvs_session_program_state_epoch_locked(session, run_programs[0]) > first_program_epoch);
+  AssertAlways(rvs_session_program_state_epoch_locked(session, run_programs[1]) > second_program_epoch);
+  mutex_drop(session->control->mutex);
 
-  RVS_EngineSubmission mismatched_submission = {
-    .command.kind = RVS_EngineCommandKind_Launch,
-    .conflict_policy = RVS_RequestConflictPolicy_RejectIfPending,
-    .key = {
-      .operation_class = RVS_OperationClass_ProgramExecution,
-      .program_id = reply.launch.program_id,
-      .operation_id = RVS_EngineCommandKind_Launch,
-    },
-  };
-  RVS_SubmitInfo mismatched_submit = {0};
-  AssertAlways(rvs_session_submit(session, mismatched_submission, &mismatched_submit) == RVS_Result_Error);
-  AssertAlways(mismatched_submit.request == 0 && mismatched_submit.control == 0);
-  RVS_ProgramID mismatched_run_program = { .u64 = { max_U64 - 1 } };
-  RVS_EngineSubmission mismatched_run_submission = {
-    .command = {
-      .kind = RVS_EngineCommandKind_Run,
-      .run = { .programs_count = 1, .programs = &mismatched_run_program },
-    },
-    .conflict_policy = RVS_RequestConflictPolicy_RejectIfPending,
-    .key = {
-      .operation_class = RVS_OperationClass_ProgramExecution,
-      .program_id = reply.launch.program_id,
-      .operation_id = RVS_EngineCommandKind_Run,
-    },
-  };
-  RVS_SubmitInfo mismatched_run_submit = {0};
-  AssertAlways(rvs_session_submit(session, mismatched_run_submission, &mismatched_run_submit) == RVS_Result_Error);
-  AssertAlways(mismatched_run_submit.request == 0 && mismatched_run_submit.control == 0);
-  RVS_EngineSubmission malformed_run_submission = mismatched_run_submission;
-  malformed_run_submission.command.run.programs_count = 0;
-  malformed_run_submission.command.run.programs = 0;
-  malformed_run_submission.key.program_id = reply.launch.program_id;
-  RVS_SubmitInfo malformed_run_submit = {0};
-  AssertAlways(rvs_session_submit(session, malformed_run_submission, &malformed_run_submit) == RVS_Result_Error);
-  AssertAlways(malformed_run_submit.request == 0 && malformed_run_submit.control == 0);
+  RVS_SubmitInfo invalid_command_submit = {0};
+  AssertAlways(rvs_session_submit(session, (RVS_EngineCommand){0}, &invalid_command_submit) == RVS_Result_Error);
+  AssertAlways(invalid_command_submit.request == 0 && invalid_command_submit.control == 0);
+  RVS_SubmitInfo zero_program_run_submit = {0};
+  AssertAlways(rvs_session_submit(session, (RVS_EngineCommand){
+    .kind = RVS_EngineCommandKind_Run,
+  }, &zero_program_run_submit) == RVS_Result_Error);
+  AssertAlways(zero_program_run_submit.request == 0 && zero_program_run_submit.control == 0);
+  RVS_ProgramID duplicate_programs[] = { reply.launch.program_id, reply.launch.program_id };
+  RVS_SubmitInfo duplicate_programs_submit = {0};
+  AssertAlways(rvs_session_run_many(session, duplicate_programs, ArrayCount(duplicate_programs), &duplicate_programs_submit) == RVS_Result_Error);
+  AssertAlways(duplicate_programs_submit.request == 0 && duplicate_programs_submit.control == 0);
+  RVS_SubmitInfo null_program_pointer_submit = {0};
+  AssertAlways(rvs_session_submit(session, (RVS_EngineCommand){
+    .kind = RVS_EngineCommandKind_Run,
+    .run = { .programs_count = 1 },
+  }, &null_program_pointer_submit) == RVS_Result_Error);
+  AssertAlways(null_program_pointer_submit.request == 0 && null_program_pointer_submit.control == 0);
+  RVS_ProgramID null_program = {0};
+  RVS_SubmitInfo null_program_submit = {0};
+  AssertAlways(rvs_session_submit(session, (RVS_EngineCommand){
+    .kind = RVS_EngineCommandKind_Run,
+    .run = { .programs_count = 1, .programs = &null_program },
+  }, &null_program_submit) == RVS_Result_Error);
+  AssertAlways(null_program_submit.request == 0 && null_program_submit.control == 0);
   rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
 
   // These failure paths cannot occur during normal engine operation.
@@ -275,7 +286,7 @@ entry_point(CmdLine *cmdline)
   rvs_request_control_release(cancelled_run_submit.control);
   rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
 
-  ins_atomic_u32_eval_assign(&engine->test_fail_demon_run_send, 1);
+  ins_atomic_u32_eval_assign(&engine->test_fail_demon_message_type, RVS_DemonMessage_Run);
   RVS_SubmitInfo demon_send_failure_submit = {0};
   AssertAlways(rvs_session_run(session, reply.launch.program_id, &demon_send_failure_submit) == RVS_Result_Ok);
   RVS_EngineReply demon_send_failure_reply = {0};
@@ -331,7 +342,7 @@ entry_point(CmdLine *cmdline)
     .operation_id    = 1,
   };
   mutex_take(session->control->mutex);
-  RVS_Request *join_request = rvs_session_request_alloc_locked(session, RVS_RequestConflictPolicy_JoinIfEqual, join_key);
+  RVS_Request *join_request = rvs_session_request_alloc_locked(session, join_key);
   AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_Ok);
   AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_AlreadyPending);
   AssertAlways(rvs_session_unregister_operation_locked(session, join_key) == join_request);
@@ -342,31 +353,19 @@ entry_point(CmdLine *cmdline)
   rvs_request_release(join_request); // drop operation-key ownership
 
   lifecycle_key.operation_id = 2;
-  RVS_OperationKey program_a_key = {
-    .operation_class = RVS_OperationClass_ProgramExecution,
-    .program_id   = { .u64 = { 1 } },
-    .operation_id = 3,
+  RVS_OperationKey session_execution_key = {
+    .operation_class = RVS_OperationClass_SessionExecution,
+    .operation_id = RVS_EngineCommandKind_Run,
   };
-  RVS_OperationKey program_b_same_target_key = {
-    .operation_class = RVS_OperationClass_ProgramExecution,
-    .program_id   = { .u64 = { 2 } },
-    .operation_id = 4,
-  };
-  RVS_OperationKey program_b_other_target_key = {
-    .operation_class = RVS_OperationClass_ProgramExecution,
-    .program_id   = { .u64 = { 2 } },
-    .operation_id = 5,
-  };
-  AssertAlways(rvs_operation_keys_conflict(lifecycle_key, program_a_key));
-  AssertAlways( ! rvs_operation_keys_conflict(program_a_key, program_b_same_target_key));
-  AssertAlways( ! rvs_operation_keys_conflict(program_a_key, program_b_other_target_key));
+  AssertAlways(rvs_operation_keys_conflict(lifecycle_key, session_execution_key));
+  AssertAlways(rvs_operation_keys_conflict(session_execution_key, session_execution_key));
   RVS_OperationKey query_key = {
     .operation_class   = RVS_OperationClass_ReadOnly,
     .program_id        = { .u64 = { 1 } },
     .operation_id      = 6,
   };
   AssertAlways(rvs_operation_keys_conflict(lifecycle_key, query_key));
-  AssertAlways( ! rvs_operation_keys_conflict(query_key, program_a_key));
+  AssertAlways( ! rvs_operation_keys_conflict(session_execution_key, query_key));
 
   RVS_EventWaitTest event_waiter = { .session = session };
   Thread event_thread = thread_launch(rvs_event_wait_test_thread, &event_waiter);
@@ -469,7 +468,7 @@ internal RVS_Request *
 rvs_test_request_alloc(RVS_Session *session, RVS_OperationKey key, RVS_EngineCommandKind command_kind)
 {
   mutex_take(session->control->mutex);
-  RVS_Request *request = rvs_session_request_alloc_locked(session, RVS_RequestConflictPolicy_RejectIfPending, key);
+  RVS_Request *request = rvs_session_request_alloc_locked(session, key);
   request->command_kind = command_kind;
   mutex_drop(session->control->mutex);
   return request;

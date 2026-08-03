@@ -20,13 +20,6 @@ typedef struct
   };
 } RVS_EngineCommand;
 
-typedef struct
-{
-  RVS_EngineCommand        command;
-  RVS_RequestConflictPolicy conflict_policy;
-  RVS_OperationKey         key;
-} RVS_EngineSubmission;
-
 typedef enum
 {
   RVS_SessionExecutionState_Idle,
@@ -137,9 +130,8 @@ struct RVS_Request
   U64                    captured_program_state_epoch;
   RVS_MessageID          request_id;
   U32                    launch_pid;
-  RVS_EngineCommandKind  command_kind;
-  RVS_RequestConflictPolicy conflict_policy;
-  RVS_OperationKey       key;
+  RVS_EngineCommandKind command_kind;
+  RVS_OperationKey      key;
   RVS_EngineReply        reply;
 };
 
@@ -166,8 +158,7 @@ struct RVS_Engine
   U32 test_fail_command_enqueue;
   U32 test_hold_before_dispatch;
   U32 test_is_held_before_dispatch;
-  U32 test_fail_demon_run_send;
-  U32 test_fail_demon_pump_send;
+  U32 test_fail_demon_message_type;
 #endif
 };
 
@@ -256,19 +247,21 @@ rvs_operation_key_is_complete(RVS_OperationKey key)
 }
 
 internal B32
-rvs_operation_key_is_well_formed_for_conflict_policy(RVS_RequestConflictPolicy conflict_policy, RVS_OperationKey key)
+rvs_operation_key_is_well_formed_for_policy(RVS_RequestPolicy policy, RVS_OperationKey key)
 {
-  if (conflict_policy != RVS_RequestConflictPolicy_RejectIfPending &&
-      conflict_policy != RVS_RequestConflictPolicy_JoinIfEqual) {
+  if (policy != RVS_RequestPolicy_RejectIfPending &&
+      policy != RVS_RequestPolicy_JoinIfEqual) {
     return 0;
   }
   if ( ! rvs_operation_key_is_complete(key)) {
     return 0;
   }
-  if (key.operation_class == RVS_OperationClass_ReadOnly || key.operation_class == RVS_OperationClass_ProgramExecution) {
+  if (key.operation_class == RVS_OperationClass_ReadOnly) {
     return !dmn_handle_match(key.program_id, dmn_handle_zero());
   }
-  return key.operation_class == RVS_OperationClass_SessionLifecycle && dmn_handle_match(key.program_id, dmn_handle_zero());
+  return (key.operation_class == RVS_OperationClass_SessionLifecycle ||
+          key.operation_class == RVS_OperationClass_SessionExecution) &&
+         dmn_handle_match(key.program_id, dmn_handle_zero());
 }
 
 internal RVS_Program *
@@ -311,7 +304,8 @@ rvs_session_bump_program_state_epoch_locked(RVS_Session *session, RVS_ProgramID 
 internal B32
 rvs_session_operation_key_resolves_locked(RVS_Session *session, RVS_OperationKey key)
 {
-  if (key.operation_class == RVS_OperationClass_SessionLifecycle) {
+  if (key.operation_class == RVS_OperationClass_SessionLifecycle ||
+      key.operation_class == RVS_OperationClass_SessionExecution) {
     return 1;
   }
 
@@ -335,10 +329,8 @@ rvs_operation_keys_conflict(RVS_OperationKey a, RVS_OperationKey b)
   if (a.operation_class == RVS_OperationClass_ReadOnly || b.operation_class == RVS_OperationClass_ReadOnly) {
     return 0;
   }
-  if (a.operation_class != RVS_OperationClass_ProgramExecution || b.operation_class != RVS_OperationClass_ProgramExecution) {
-    return 0;
-  }
-  return dmn_handle_match(a.program_id, b.program_id);
+  return a.operation_class == RVS_OperationClass_SessionExecution ||
+         b.operation_class == RVS_OperationClass_SessionExecution;
 }
 
 // Execution state is protected exclusively by session->control->mutex.
@@ -394,7 +386,7 @@ internal B32
 rvs_session_execution_blocks_operation_locked(RVS_Session *session, RVS_OperationClass operation_class)
 {
   return session->execution_state != RVS_SessionExecutionState_Idle &&
-         (operation_class == RVS_OperationClass_ProgramExecution ||
+         (operation_class == RVS_OperationClass_SessionExecution ||
           operation_class == RVS_OperationClass_SessionLifecycle);
 }
 
@@ -606,14 +598,13 @@ rvs_request_control_alloc(RVS_Session *session, RVS_Request *request, RVS_Operat
 // Active Requests
 
 internal RVS_Request *
-rvs_session_request_alloc_locked(RVS_Session *session, RVS_RequestConflictPolicy conflict_policy, RVS_OperationKey key)
+rvs_session_request_alloc_locked(RVS_Session *session, RVS_OperationKey key)
 {
   ProfBeginFunction();
   RVS_Request *request = rvs_request_pool_request_alloc(session->engine->request_pool);
   request->ref_count        = 2; // engine ownership plus the returned handle
   request->request_id       = ins_atomic_u64_inc_eval(&session->engine->next_request_id);
   request->session          = session;
-  request->conflict_policy  = conflict_policy;
   request->key              = key;
   request->reply.request_id = request->request_id;
   request->reply.result     = RVS_Result_Pending;
@@ -648,9 +639,8 @@ rvs_session_register_operation_locked(RVS_Session *session, RVS_OperationKey key
 {
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
-  if (request && request->pool == session->engine->request_pool &&
-      request->conflict_policy == RVS_RequestConflictPolicy_JoinIfEqual &&
-      rvs_operation_key_is_complete(key)) {
+  // The caller has already selected the JoinIfEqual policy for this request.
+  if (request && request->pool == session->engine->request_pool && rvs_operation_key_is_complete(key)) {
     result = RVS_Result_Ok;
     for (RVS_Request *n = session->key_first; n; n = n->key_next) {
       if (rvs_operation_key_match(n->key, key)) {
@@ -719,7 +709,7 @@ rvs_session_find_active_request_locked(RVS_Session *session, RVS_MessageID reque
 }
 
 internal B32
-rvs_engine_request_mark_dispatched(RVS_Engine *engine, RVS_MessageID request_id)
+rvs_engine_request_mark_dispatched(RVS_Engine *engine, RVS_MessageID request_id, RVS_EngineCommand *command)
 {
   ProfBeginFunction();
   B32 result = 0;
@@ -730,8 +720,11 @@ rvs_engine_request_mark_dispatched(RVS_Engine *engine, RVS_MessageID request_id)
     mutex_take(request->mutex);
     if (request->reply.result == RVS_Result_Pending) {
       request->is_dispatched = 1;
-      if (request->key.operation_class == RVS_OperationClass_ProgramExecution) {
-        rvs_session_bump_program_state_epoch_locked(session, request->key.program_id);
+      if (request->key.operation_class == RVS_OperationClass_SessionExecution) {
+        AssertAlways(command->kind == RVS_EngineCommandKind_Run);
+        for EachIndex(program_idx, command->run.programs_count) {
+          rvs_session_bump_program_state_epoch_locked(session, command->run.programs[program_idx]);
+        }
       }
       result = 1;
     }
@@ -753,7 +746,7 @@ rvs_engine_retire_undispatched_request(RVS_Engine *engine, RVS_MessageID request
   if (candidate) {
     mutex_take(candidate->mutex);
     if (candidate->reply.result != RVS_Result_Pending && !candidate->is_dispatched) {
-      if (candidate->key.operation_class == RVS_OperationClass_ProgramExecution) {
+      if (candidate->key.operation_class == RVS_OperationClass_SessionExecution) {
         rvs_session_clear_queued_execution_locked(session, request_id);
       }
       request = candidate;
@@ -852,7 +845,7 @@ rvs_engine_complete_reply(RVS_Engine *engine, RVS_EngineReply reply)
   RVS_Session *session = engine->session;
   request = rvs_session_find_active_request_locked(session, reply.request_id);
   if (request) {
-    if (request->key.operation_class == RVS_OperationClass_ProgramExecution && reply.result != RVS_Result_Ok) {
+    if (request->key.operation_class == RVS_OperationClass_SessionExecution && reply.result != RVS_Result_Ok) {
       rvs_session_clear_queued_execution_locked(session, reply.request_id);
     }
     rvs_session_request_remove_locked(session, request);
@@ -993,15 +986,24 @@ rvs_engine_launch_pid(RVS_Engine *engine, RVS_MessageID request_id)
   return result;
 }
 
+internal RVS_Result
+rvs_engine_send_demon_message(RVS_Engine *engine, RVS_DemonMessage message)
+{
+#if RVS_ENGINE_TESTING
+  if (ins_atomic_u32_eval_cond_assign(&engine->test_fail_demon_message_type,
+                                      RVS_DemonMessage_Null,
+                                      (U32)message.type) == (U32)message.type) {
+    return RVS_Result_Error;
+  }
+#endif
+  return rvs_demon_send_message(engine->demon, message);
+}
+
 internal void
 rvs_engine_pump_launch(RVS_Engine *engine, RVS_MessageID request_id)
 {
   ProfBeginFunction();
-  RVS_Result result = RVS_Result_Error;
-#if RVS_ENGINE_TESTING
-  if (ins_atomic_u32_eval_cond_assign(&engine->test_fail_demon_pump_send, 0, 1) != 1)
-#endif
-  result = rvs_demon_send_message(engine->demon, (RVS_DemonMessage){
+  RVS_Result result = rvs_engine_send_demon_message(engine, (RVS_DemonMessage){
     .type       = RVS_DemonMessage_Pump,
     .request_id = request_id,
   });
@@ -1120,7 +1122,7 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_Session *session, RVS_Message
     ins_atomic_u32_eval_assign(&engine->test_is_held_before_dispatch, 0);
   }
 #endif
-  if ( ! rvs_engine_request_mark_dispatched(engine, request_id)) {
+  if ( ! rvs_engine_request_mark_dispatched(engine, request_id, command)) {
     rvs_engine_retire_undispatched_request(engine, request_id);
     ProfEnd();
     return;
@@ -1134,7 +1136,7 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_Session *session, RVS_Message
       .launch     = { .params = command->launch.params },
     };
 
-    RVS_Result result = rvs_demon_send_message(engine->demon, spec);
+    RVS_Result result = rvs_engine_send_demon_message(engine, spec);
 
     // failed to send a message to the DEMON thread -- reply with the error code
     if (result != RVS_Result_Ok) {
@@ -1166,12 +1168,7 @@ rvs_engine_process_command(RVS_Engine *engine, RVS_Session *session, RVS_Message
 
     RVS_Result result = RVS_Result_Error;
     if (all_programs_found) {
-#if RVS_ENGINE_TESTING
-      if (ins_atomic_u32_eval_cond_assign(&engine->test_fail_demon_run_send, 0, 1) == 1) {
-        result = RVS_Result_Error;
-      } else
-#endif
-      result = rvs_demon_send_message(engine->demon, (RVS_DemonMessage){
+      result = rvs_engine_send_demon_message(engine, (RVS_DemonMessage){
         .type       = RVS_DemonMessage_Run,
         .request_id = request_id,
         .run = {
@@ -1448,25 +1445,38 @@ rvs_engine_shutdown(RVS_Engine *engine)
   ProfEnd();
 }
 
-// Public APIs and test helpers construct a complete scheduling submission before calling this.
 internal B32
-rvs_engine_submission_matches_command(RVS_EngineSubmission submission)
+rvs_operation_schedule_from_engine_command(RVS_EngineCommand command, RVS_RequestPolicy *policy_out, RVS_OperationKey *key_out)
 {
-  if (submission.key.operation_class != rvs_op_class_from_engine_command_kind(submission.command.kind) ||
-      submission.conflict_policy != rvs_request_conflict_policy_from_command_kind(submission.command.kind) ||
-      submission.key.operation_id != submission.command.kind) {
-    return 0;
-  }
-
-  switch (submission.command.kind) {
+  switch (command.kind) {
   case RVS_EngineCommandKind_Launch: {
+    *policy_out = rvs_request_policy_from_engine_command_kind(command.kind);
+    *key_out = (RVS_OperationKey){
+      .operation_class = rvs_op_class_from_engine_command_kind(command.kind),
+      .operation_id    = command.kind,
+    };
     return 1;
   } break;
   case RVS_EngineCommandKind_Run: {
-    return submission.command.run.programs_count == 1 &&
-           submission.command.run.programs != 0 &&
-           !dmn_handle_match(submission.command.run.programs[0], dmn_handle_zero()) &&
-           dmn_handle_match(submission.key.program_id, submission.command.run.programs[0]);
+    if (command.run.programs_count == 0 || command.run.programs == 0) {
+      return 0;
+    }
+    for EachIndex(program_idx, command.run.programs_count) {
+      if (dmn_handle_match(command.run.programs[program_idx], dmn_handle_zero())) {
+        return 0;
+      }
+      for EachIndex(previous_idx, program_idx) {
+        if (dmn_handle_match(command.run.programs[previous_idx], command.run.programs[program_idx])) {
+          return 0;
+        }
+      }
+    }
+    *policy_out = rvs_request_policy_from_engine_command_kind(command.kind);
+    *key_out = (RVS_OperationKey){
+      .operation_class = rvs_op_class_from_engine_command_kind(command.kind),
+      .operation_id    = command.kind,
+    };
+    return 1;
   } break;
   default: break;
   }
@@ -1474,24 +1484,24 @@ rvs_engine_submission_matches_command(RVS_EngineSubmission submission)
 }
 
 internal RVS_Result
-rvs_session_submit(RVS_Session *session, RVS_EngineSubmission submission, RVS_SubmitInfo *submit_out)
+rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitInfo *submit_out)
 {
   ProfBeginFunction();
 
-  RVS_Result                result = RVS_Result_Error;
-  RVS_RequestConflictPolicy conflict_policy = submission.conflict_policy;
-  RVS_OperationKey          key = submission.key;
+  RVS_Result         result = RVS_Result_Error;
+  RVS_RequestPolicy  policy = RVS_RequestPolicy_Null;
+  RVS_OperationKey   key = {0};
 
   AssertAlways(session != 0);
   AssertAlways(submit_out != 0);
-  AssertAlways(rvs_operation_key_is_well_formed_for_conflict_policy(conflict_policy, key));
 
   MemoryZeroStruct(submit_out);
 
-  // Fixed commands own their complete scheduling contract, including Run's target.
-  if ( ! rvs_engine_submission_matches_command(submission)) {
+  // Validate Run shape before accessing its target or constructing scheduling metadata.
+  if ( ! rvs_operation_schedule_from_engine_command(command, &policy, &key)) {
     goto exit;
   }
+  AssertAlways(rvs_operation_key_is_well_formed_for_policy(policy, key));
 
   mutex_take(session->control->mutex);
 
@@ -1514,11 +1524,18 @@ rvs_session_submit(RVS_Session *session, RVS_EngineSubmission submission, RVS_Su
   if ( ! rvs_session_operation_key_resolves_locked(session, key)) {
     goto exit_arena_mutex;
   }
+  if (command.kind == RVS_EngineCommandKind_Run) {
+    for EachIndex(program_idx, command.run.programs_count) {
+      if (rvs_session_program_from_id_locked(session, command.run.programs[program_idx]) == 0) {
+        goto exit_arena_mutex;
+      }
+    }
+  }
   U64 captured_program_state_epoch = 0;
   if (key.operation_class == RVS_OperationClass_ReadOnly) {
     captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, key.program_id);
   }
-  if (conflict_policy == RVS_RequestConflictPolicy_JoinIfEqual) {
+  if (policy == RVS_RequestPolicy_JoinIfEqual) {
     for (RVS_Request *n = session->key_first; n; n = n->key_next) {
       if (rvs_operation_key_match(n->key, key) &&
           (key.operation_class != RVS_OperationClass_ReadOnly ||
@@ -1536,13 +1553,13 @@ rvs_session_submit(RVS_Session *session, RVS_EngineSubmission submission, RVS_Su
 
   RVS_Request *request = 0;
   if (result == RVS_Result_Error) {
-    request = rvs_session_request_alloc_locked(session, conflict_policy, key);
-    request->command_kind = submission.command.kind;
+    request = rvs_session_request_alloc_locked(session, key);
+    request->command_kind = command.kind;
     request->captured_program_state_epoch = captured_program_state_epoch;
-    if (conflict_policy == RVS_RequestConflictPolicy_JoinIfEqual) {
+    if (policy == RVS_RequestPolicy_JoinIfEqual) {
       AssertAlways(rvs_session_register_operation_locked(session, key, request) == RVS_Result_Ok);
     }
-    if (key.operation_class == RVS_OperationClass_ProgramExecution) {
+    if (key.operation_class == RVS_OperationClass_SessionExecution) {
       AssertAlways(rvs_session_reserve_execution_locked(session, request->request_id));
     }
   }
@@ -1553,7 +1570,7 @@ rvs_session_submit(RVS_Session *session, RVS_EngineSubmission submission, RVS_Su
   RVS_EngineMessage message = {
     .type    = RVS_EngineMessageType_Command,
     .session = session,
-    .command = submission.command,
+    .command = command,
   };
   message.request_id = request->request_id;
 
@@ -1561,14 +1578,14 @@ rvs_session_submit(RVS_Session *session, RVS_EngineSubmission submission, RVS_Su
 
   if (result == RVS_Result_Ok) {
     submit_out->request = request;
-    submit_out->control = rvs_request_control_alloc(session, request, key, conflict_policy == RVS_RequestConflictPolicy_JoinIfEqual);
+    submit_out->control = rvs_request_control_alloc(session, request, key, policy == RVS_RequestPolicy_JoinIfEqual);
   } else {
-    if (request->key.operation_class == RVS_OperationClass_ProgramExecution) {
+    if (request->key.operation_class == RVS_OperationClass_SessionExecution) {
       rvs_session_clear_queued_execution_locked(session, request->request_id);
     }
     rvs_session_request_remove_locked(session, request);
     RVS_Request *registered_request = 0;
-    if (conflict_policy == RVS_RequestConflictPolicy_JoinIfEqual) {
+    if (policy == RVS_RequestPolicy_JoinIfEqual) {
       registered_request = rvs_session_unregister_operation_locked(session, key);
       AssertAlways(registered_request == request);
     }
@@ -1614,16 +1631,7 @@ rvs_session_launch(RVS_Session *session, String8 cmdl, String8 wdir, RVS_SubmitI
     }
   };
 
-  RVS_EngineSubmission submission = {
-    .command = command,
-    .conflict_policy = rvs_request_conflict_policy_from_command_kind(command.kind),
-    .key     = {
-      .operation_class = rvs_op_class_from_engine_command_kind(command.kind),
-      .operation_id    = command.kind,
-    }
-  };
-
-  result = rvs_session_submit(session, submission, submit_out);
+  result = rvs_session_submit(session, command, submit_out);
 
   scratch_end(scratch);
   exit:;
@@ -1632,14 +1640,14 @@ rvs_session_launch(RVS_Session *session, String8 cmdl, String8 wdir, RVS_SubmitI
 }
 
 RVS_Result
-rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out)
+rvs_session_run_many(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out)
 {
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
 
   // @API_ARG_CHECK
   if (submit_out) { MemoryZeroStruct(submit_out); }
-  if (session == 0 || dmn_handle_match(program_id, dmn_handle_zero()) || submit_out == 0)  {
+  if (session == 0 || programs == 0 || programs_count == 0 || submit_out == 0)  {
     result = RVS_Result_InvalidArgument;
     goto exit;
   }
@@ -1647,26 +1655,26 @@ rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *
   RVS_EngineCommand command = {
     .kind = RVS_EngineCommandKind_Run,
     .run  = {
-      .programs_count = 1,
-      .programs       = &program_id,
+      .programs_count = programs_count,
+      .programs       = programs,
     },
   };
 
-  RVS_EngineSubmission submission = {
-    .command = command,
-    .conflict_policy = rvs_request_conflict_policy_from_command_kind(command.kind),
-    .key     = {
-      .operation_class = rvs_op_class_from_engine_command_kind(command.kind),
-      .operation_id    = command.kind,
-      .program_id      = program_id,
-    },
-  };
-
-  result = rvs_session_submit(session, submission, submit_out);
+  result = rvs_session_submit(session, command, submit_out);
 
   exit:;
   ProfEnd();
   return result;
+}
+
+RVS_Result
+rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out)
+{
+  if (submit_out) { MemoryZeroStruct(submit_out); }
+  if (session == 0 || dmn_handle_match(program_id, dmn_handle_zero()) || submit_out == 0) {
+    return RVS_Result_InvalidArgument;
+  }
+  return rvs_session_run_many(session, &program_id, 1, submit_out);
 }
 
 RVS_Result
@@ -1867,7 +1875,7 @@ rvs_help_from_command_kind(RVS_EngineCommandKind v)
 {
   switch (v) {
   case RVS_EngineCommandKind_Null: break;
-#define X(id, op_class, conflict_policy, help, ...) case RVS_EngineCommandKind_##id: return str8_lit(help);
+#define X(id, op_class, policy, help, ...) case RVS_EngineCommandKind_##id: return str8_lit(help);
   RVS_ENGINE_COMMAND_XLIST
 #undef X
   }
@@ -1895,14 +1903,14 @@ rvs_op_class_from_engine_command_kind(RVS_EngineCommandKind v)
   return RVS_OperationClass_Null;
 }
 
-internal RVS_RequestConflictPolicy
-rvs_request_conflict_policy_from_command_kind(RVS_EngineCommandKind v)
+internal RVS_RequestPolicy
+rvs_request_policy_from_engine_command_kind(RVS_EngineCommandKind v)
 {
   switch (v) {
-#define X(id, op_class, conflict_policy, ...) case RVS_EngineCommandKind_##id: return conflict_policy;
+#define X(id, op_class, policy, ...) case RVS_EngineCommandKind_##id: return policy;
     RVS_ENGINE_COMMAND_XLIST
 #undef X
   default: break;
   }
-  return RVS_RequestConflictPolicy_RejectIfPending;
+  return RVS_RequestPolicy_Null;
 }

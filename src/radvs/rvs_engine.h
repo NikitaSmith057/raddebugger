@@ -20,14 +20,14 @@ typedef DMN_Handle RVS_ProgramID;
 
 typedef enum
 {
-  RVS_RequestConflictPolicy_Null,
+  RVS_RequestPolicy_Null,
 
   // A conflicting keyed request is rejected with RVS_Result_AlreadyPending.
-  RVS_RequestConflictPolicy_RejectIfPending,
+  RVS_RequestPolicy_RejectIfPending,
 
   // A request with duplicate key is joined; other conflicts are rejected with RVS_Result_AlreadyPending.
-  RVS_RequestConflictPolicy_JoinIfEqual,
-} RVS_RequestConflictPolicy;
+  RVS_RequestPolicy_JoinIfEqual,
+} RVS_RequestPolicy;
 
 typedef enum
 {
@@ -36,13 +36,13 @@ typedef enum
   // Request observes state for one known program without taking execution control.
   // It remains admissible while program execution is active and relies on epoch freshness.
   // It does not conflict with other read-only requests.
-  // It does not conflict with other ProgramExecution requests.
-  // It conflicts with SessionLifecycle, because lifecycle is session-wide exclusive.
+  // It does not conflict with execution requests.
+  // It conflicts with SessionLifecycle, because lifecycle is session-wide lock.
   RVS_OperationClass_ReadOnly,
 
-  // Operation controls the specified program through the session's single execution controller.
-  // Only one ProgramExecution operation may be queued or in flight per session.
-  RVS_OperationClass_ProgramExecution,
+  // Operation controls multiple programs through the session's single execution controller.
+  // It has no single program ID and does not conflict with ReadOnly work.
+  RVS_OperationClass_SessionExecution,
 
   // Operation temporarily requires exclusive access to session-wide backend/topology state.
   // It is rejected while program execution is queued or in flight.
@@ -60,12 +60,6 @@ typedef struct
 
 typedef struct
 {
-  RVS_RequestConflictPolicy conflict_policy;
-  RVS_OperationKey          key;
-} RVS_SubmitOptions;
-
-typedef struct
-{
   RVS_Request        *request;
   RVS_RequestControl *control;
 } RVS_SubmitInfo;
@@ -74,8 +68,8 @@ typedef struct
 // Command
 
 #define RVS_ENGINE_COMMAND_XLIST \
-  X(Launch, RVS_OperationClass_SessionLifecycle, RVS_RequestConflictPolicy_RejectIfPending, "Launch program and stop at the entry point") \
-  X(Run,    RVS_OperationClass_ProgramExecution, RVS_RequestConflictPolicy_RejectIfPending, "Run selected programs")
+  X(Launch, RVS_OperationClass_SessionLifecycle, RVS_RequestPolicy_RejectIfPending, "Launch program and stop at the entry point") \
+  X(Run,    RVS_OperationClass_SessionExecution, RVS_RequestPolicy_RejectIfPending, "Run selected programs")
 
 typedef enum
 {
@@ -126,6 +120,7 @@ void       rvs_session_addref(RVS_Session *session);
 void       rvs_session_release(RVS_Session *session);
 
 RVS_Result rvs_session_launch(RVS_Session *session, String8 cmdl, String8 wdir, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_session_run_many(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_run(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out);
 
@@ -149,4 +144,4 @@ internal RVS_EngineCommandKind rvs_command_kind_from_string(String8 v);
 internal String8               rvs_string_from_command_kind(RVS_EngineCommandKind v);
 internal String8               rvs_help_from_command_kind(RVS_EngineCommandKind v);
 internal RVS_OperationClass    rvs_op_class_from_engine_command_kind(RVS_EngineCommandKind kind);
-internal RVS_RequestConflictPolicy rvs_request_conflict_policy_from_command_kind(RVS_EngineCommandKind v);
+internal RVS_RequestPolicy     rvs_request_policy_from_engine_command_kind(RVS_EngineCommandKind v);
