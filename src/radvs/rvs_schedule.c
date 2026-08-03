@@ -39,18 +39,17 @@ rvs_operation_keys_conflict(RVS_OperationKey a, RVS_OperationKey b)
 }
 
 internal B32
-rvs_session_has_conflicting_operation_locked(RVS_Session *session, RVS_OperationKey key)
+rvs_scheduler_has_conflicting_operation_locked(RVS_Scheduler *scheduler, RVS_OperationKey key)
 {
-  for EachNode(request, RVS_Request, session->scheduler.request_first) {
+  for EachNode(request, RVS_Request, scheduler->request_first) {
     if (rvs_operation_keys_conflict(request->key, key)) { return 1; }
   }
   return 0;
 }
 
 internal B32
-rvs_session_reserve_execution_locked(RVS_Session *session, RVS_MessageID request_id)
+rvs_scheduler_reserve_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  RVS_Scheduler *scheduler = &session->scheduler;
   if (request_id == 0 || scheduler->execution_state != RVS_SessionExecutionState_Idle || scheduler->execution_request_id != 0) { return 0; }
   scheduler->execution_state = RVS_SessionExecutionState_Queued;
   scheduler->execution_request_id = request_id;
@@ -58,18 +57,16 @@ rvs_session_reserve_execution_locked(RVS_Session *session, RVS_MessageID request
 }
 
 internal B32
-rvs_session_mark_run_in_flight_locked(RVS_Session *session, RVS_MessageID request_id)
+rvs_scheduler_mark_run_in_flight_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  RVS_Scheduler *scheduler = &session->scheduler;
   if (scheduler->execution_state != RVS_SessionExecutionState_Queued || scheduler->execution_request_id != request_id) { return 0; }
   scheduler->execution_state = RVS_SessionExecutionState_RunInFlight;
   return 1;
 }
 
 internal B32
-rvs_session_clear_queued_execution_locked(RVS_Session *session, RVS_MessageID request_id)
+rvs_scheduler_clear_queued_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  RVS_Scheduler *scheduler = &session->scheduler;
   if (scheduler->execution_state != RVS_SessionExecutionState_Queued || scheduler->execution_request_id != request_id) { return 0; }
   scheduler->execution_state = RVS_SessionExecutionState_Idle;
   scheduler->execution_request_id = 0;
@@ -77,9 +74,8 @@ rvs_session_clear_queued_execution_locked(RVS_Session *session, RVS_MessageID re
 }
 
 internal B32
-rvs_session_finish_run_locked(RVS_Session *session, RVS_MessageID request_id)
+rvs_scheduler_finish_run_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  RVS_Scheduler *scheduler = &session->scheduler;
   if (scheduler->execution_state != RVS_SessionExecutionState_RunInFlight || scheduler->execution_request_id != request_id) { return 0; }
   scheduler->execution_state = RVS_SessionExecutionState_Idle;
   scheduler->execution_request_id = 0;
@@ -87,9 +83,9 @@ rvs_session_finish_run_locked(RVS_Session *session, RVS_MessageID request_id)
 }
 
 internal B32
-rvs_session_execution_blocks_operation_locked(RVS_Session *session, RVS_OperationClass operation_class)
+rvs_scheduler_execution_blocks_operation_locked(RVS_Scheduler *scheduler, RVS_OperationClass operation_class)
 {
-  return session->scheduler.execution_state != RVS_SessionExecutionState_Idle &&
+  return scheduler->execution_state != RVS_SessionExecutionState_Idle &&
          (operation_class == RVS_OperationClass_SessionExecution || operation_class == RVS_OperationClass_SessionLifecycle);
 }
 
@@ -124,18 +120,18 @@ rvs_session_request_alloc_locked(RVS_Session *session, RVS_RequestPool *pool, RV
 }
 
 internal void
-rvs_session_request_remove_locked(RVS_Session *session, RVS_Request *request)
+rvs_scheduler_request_remove_locked(RVS_Scheduler *scheduler, RVS_Request *request)
 {
-  DLLRemove(session->scheduler.request_first, session->scheduler.request_last, request);
+  DLLRemove(scheduler->request_first, scheduler->request_last, request);
 }
 
 internal void
-rvs_session_request_key_remove_locked(RVS_Session *session, RVS_Request *request)
+rvs_scheduler_request_key_remove_locked(RVS_Scheduler *scheduler, RVS_Request *request)
 {
   if (request->key_prev) { request->key_prev->key_next = request->key_next; }
-  else { session->scheduler.key_first = request->key_next; }
+  else { scheduler->key_first = request->key_next; }
   if (request->key_next) { request->key_next->key_prev = request->key_prev; }
-  else { session->scheduler.key_last = request->key_prev; }
+  else { scheduler->key_last = request->key_prev; }
   request->key_next = 0;
   request->key_prev = 0;
 }
@@ -162,11 +158,11 @@ rvs_session_register_operation_locked(RVS_Session *session, RVS_OperationKey key
 }
 
 internal RVS_Request *
-rvs_session_unregister_operation_locked(RVS_Session *session, RVS_OperationKey key)
+rvs_scheduler_unregister_operation_locked(RVS_Scheduler *scheduler, RVS_OperationKey key)
 {
-  for (RVS_Request *n = session->scheduler.key_first; n; n = n->key_next) {
+  for (RVS_Request *n = scheduler->key_first; n; n = n->key_next) {
     if (rvs_operation_key_match(n->key, key)) {
-      rvs_session_request_key_remove_locked(session, n);
+      rvs_scheduler_request_key_remove_locked(scheduler, n);
       return n;
     }
   }
@@ -174,18 +170,18 @@ rvs_session_unregister_operation_locked(RVS_Session *session, RVS_OperationKey k
 }
 
 internal RVS_Request *
-rvs_session_find_active_request_locked(RVS_Session *session, RVS_MessageID request_id)
+rvs_scheduler_find_active_request_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  for EachNode(n, RVS_Request, session->scheduler.request_first) {
+  for EachNode(n, RVS_Request, scheduler->request_first) {
     if (n->request_id == request_id) { return n; }
   }
   return 0;
 }
 
 internal RVS_Request *
-rvs_session_request_mark_dispatched_locked(RVS_Session *session, RVS_MessageID request_id)
+rvs_scheduler_request_mark_dispatched_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  RVS_Request *request = rvs_session_find_active_request_locked(session, request_id);
+  RVS_Request *request = rvs_scheduler_find_active_request_locked(scheduler, request_id);
   if (request) {
     Mutex request_mutex = request->mutex;
     mutex_take(request_mutex);
@@ -200,17 +196,17 @@ rvs_session_request_mark_dispatched_locked(RVS_Session *session, RVS_MessageID r
 }
 
 internal RVS_Request *
-rvs_session_retire_undispatched_request_locked(RVS_Session *session, RVS_MessageID request_id)
+rvs_scheduler_retire_undispatched_request_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id)
 {
-  RVS_Request *request = rvs_session_find_active_request_locked(session, request_id);
+  RVS_Request *request = rvs_scheduler_find_active_request_locked(scheduler, request_id);
   if (request) {
     Mutex request_mutex = request->mutex;
     mutex_take(request_mutex);
     if (request->reply.result != RVS_Result_Pending && !request->is_dispatched) {
       if (request->key.operation_class == RVS_OperationClass_SessionExecution) {
-        rvs_session_clear_queued_execution_locked(session, request_id);
+        rvs_scheduler_clear_queued_execution_locked(scheduler, request_id);
       }
-      rvs_session_request_remove_locked(session, request);
+      rvs_scheduler_request_remove_locked(scheduler, request);
     } else {
       request = 0;
     }
@@ -220,20 +216,20 @@ rvs_session_retire_undispatched_request_locked(RVS_Session *session, RVS_Message
 }
 
 internal RVS_Request *
-rvs_session_take_active_requests_locked(RVS_Session *session)
+rvs_scheduler_take_active_requests_locked(RVS_Scheduler *scheduler)
 {
-  RVS_Request *first = session->scheduler.request_first;
-  session->scheduler.request_first = 0;
-  session->scheduler.request_last = 0;
+  RVS_Request *first = scheduler->request_first;
+  scheduler->request_first = 0;
+  scheduler->request_last = 0;
   return first;
 }
 
 internal RVS_Request *
-rvs_session_take_operation_keys_locked(RVS_Session *session)
+rvs_scheduler_take_operation_keys_locked(RVS_Scheduler *scheduler)
 {
-  RVS_Request *first = session->scheduler.key_first;
-  session->scheduler.key_first = 0;
-  session->scheduler.key_last = 0;
+  RVS_Request *first = scheduler->key_first;
+  scheduler->key_first = 0;
+  scheduler->key_last = 0;
   return first;
 }
 
@@ -252,7 +248,7 @@ rvs_scheduler_admit_locked(RVS_Session *session, RVS_RequestPool *pool, U64 *nex
       }
     }
   }
-  if (rvs_session_has_conflicting_operation_locked(session, key)) {
+  if (rvs_scheduler_has_conflicting_operation_locked(&session->scheduler, key)) {
     return RVS_Result_AlreadyPending;
   }
 
@@ -263,24 +259,24 @@ rvs_scheduler_admit_locked(RVS_Session *session, RVS_RequestPool *pool, U64 *nex
     admission_out->registered = 1;
   }
   if (key.operation_class == RVS_OperationClass_SessionExecution) {
-    AssertAlways(rvs_session_reserve_execution_locked(session, request->request_id));
+    AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, request->request_id));
   }
   admission_out->request = request;
   return RVS_Result_Ok;
 }
 
 internal void
-rvs_scheduler_rollback_admission_locked(RVS_Session *session, RVS_SchedulerAdmission *admission)
+rvs_scheduler_rollback_admission_locked(RVS_Scheduler *scheduler, RVS_SchedulerAdmission *admission)
 {
   AssertAlways(admission->request != 0 && !admission->joined);
   RVS_Request *request = admission->request;
   if (request->key.operation_class == RVS_OperationClass_SessionExecution) {
-    rvs_session_clear_queued_execution_locked(session, request->request_id);
+    rvs_scheduler_clear_queued_execution_locked(scheduler, request->request_id);
   }
-  rvs_session_request_remove_locked(session, request);
+  rvs_scheduler_request_remove_locked(scheduler, request);
   RVS_Request *registered_request = 0;
   if (admission->registered) {
-    registered_request = rvs_session_unregister_operation_locked(session, request->key);
+    registered_request = rvs_scheduler_unregister_operation_locked(scheduler, request->key);
     AssertAlways(registered_request == request);
   }
   rvs_request_release(request);
@@ -296,7 +292,7 @@ rvs_request_control_release(RVS_RequestControl *owner)
   RVS_Request *registered_request = 0;
   mutex_take(owner->control->mutex);
   if (owner->registered && !owner->control->is_shutdown) {
-    registered_request = rvs_session_unregister_operation_locked(owner->session, owner->key);
+    registered_request = rvs_scheduler_unregister_operation_locked(&owner->session->scheduler, owner->key);
   }
   mutex_drop(owner->control->mutex);
   if (registered_request) { rvs_request_release(registered_request); }
@@ -314,7 +310,7 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
   if (owner->control->is_shutdown) {
     result = RVS_Result_EngineStopped;
   } else {
-    RVS_Request *request = rvs_session_find_active_request_locked(owner->session, owner->request->request_id);
+    RVS_Request *request = rvs_scheduler_find_active_request_locked(&owner->session->scheduler, owner->request->request_id);
     if (request == owner->request) {
       mutex_take(request->mutex);
       if (request->is_dispatched) { result = RVS_Result_Unsupported; }

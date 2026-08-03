@@ -304,9 +304,9 @@ rvs_session_release_engine(RVS_Session *session)
 {
   // The engine holds control->mutex while releasing session ownership.
   if (session->scheduler.execution_state == RVS_SessionExecutionState_Queued) {
-    rvs_session_clear_queued_execution_locked(session, session->scheduler.execution_request_id);
+    rvs_scheduler_clear_queued_execution_locked(&session->scheduler, session->scheduler.execution_request_id);
   } else if (session->scheduler.execution_state == RVS_SessionExecutionState_RunInFlight) {
-    rvs_session_finish_run_locked(session, session->scheduler.execution_request_id);
+    rvs_scheduler_finish_run_locked(&session->scheduler, session->scheduler.execution_request_id);
   }
   for EachNode(program, RVS_Program, session->first_program) {
     arena_release(program->arena);
@@ -328,7 +328,7 @@ rvs_engine_request_mark_dispatched(RVS_Engine *engine, RVS_MessageID request_id,
   mutex_take(engine->control->mutex);
   RVS_Session *session = engine->session;
   if ( ! engine->control->is_shutdown) {
-    RVS_Request *request = rvs_session_request_mark_dispatched_locked(session, request_id);
+    RVS_Request *request = rvs_scheduler_request_mark_dispatched_locked(&session->scheduler, request_id);
     if (request) {
       if (request->key.operation_class == RVS_OperationClass_SessionExecution) {
         AssertAlways(command->kind == RVS_EngineCommandKind_Run);
@@ -351,7 +351,7 @@ rvs_engine_retire_undispatched_request(RVS_Engine *engine, RVS_MessageID request
   RVS_Request *request = 0;
   mutex_take(engine->control->mutex);
   RVS_Session *session = engine->session;
-  request = rvs_session_retire_undispatched_request_locked(session, request_id);
+  request = rvs_scheduler_retire_undispatched_request_locked(&session->scheduler, request_id);
   mutex_drop(engine->control->mutex);
 
   if (request) {
@@ -382,7 +382,7 @@ rvs_engine_release_active_requests(RVS_Engine *engine, RVS_Result pending_result
   ProfBeginFunction();
   mutex_take(engine->control->mutex);
   RVS_Session *session = engine->session;
-  RVS_Request *first = rvs_session_take_active_requests_locked(session);
+  RVS_Request *first = rvs_scheduler_take_active_requests_locked(&session->scheduler);
   mutex_drop(engine->control->mutex);
 
   for (RVS_Request *n = first, *next = 0; n; n = next) {
@@ -405,7 +405,7 @@ rvs_engine_clear_operation_keys(RVS_Engine *engine)
   ProfBeginFunction();
   mutex_take(engine->control->mutex);
   RVS_Session *session = engine->session;
-  RVS_Request *first = rvs_session_take_operation_keys_locked(session);
+  RVS_Request *first = rvs_scheduler_take_operation_keys_locked(&session->scheduler);
   mutex_drop(engine->control->mutex);
 
   for (RVS_Request *n = first, *next = 0; n; n = next) {
@@ -437,12 +437,12 @@ rvs_engine_complete_reply(RVS_Engine *engine, RVS_EngineReply reply)
   RVS_Request *request = 0;
   mutex_take(engine->control->mutex);
   RVS_Session *session = engine->session;
-  request = rvs_session_find_active_request_locked(session, reply.request_id);
+  request = rvs_scheduler_find_active_request_locked(&session->scheduler, reply.request_id);
   if (request) {
     if (request->key.operation_class == RVS_OperationClass_SessionExecution && reply.result != RVS_Result_Ok) {
-      rvs_session_clear_queued_execution_locked(session, reply.request_id);
+      rvs_scheduler_clear_queued_execution_locked(&session->scheduler, reply.request_id);
     }
-    rvs_session_request_remove_locked(session, request);
+    rvs_scheduler_request_remove_locked(&session->scheduler, request);
     rvs_session_prepare_reply_locked(session, request, &reply);
   }
   mutex_drop(engine->control->mutex);
@@ -460,7 +460,7 @@ rvs_engine_begin_launch(RVS_Engine *engine, RVS_MessageID request_id, U32 pid)
   ProfBeginFunction();
   B32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
+  RVS_Request *request = rvs_scheduler_find_active_request_locked(&engine->session->scheduler, request_id);
   if (request) {
     mutex_take(request->mutex);
     if (request->command_kind == RVS_EngineCommandKind_Launch &&
@@ -489,7 +489,7 @@ rvs_engine_complete_launch(RVS_Engine *engine, RVS_MessageID request_id, RVS_Res
 
   mutex_take(engine->control->mutex);
   RVS_Session *session = engine->session;
-  RVS_Request *candidate = rvs_session_find_active_request_locked(session, request_id);
+  RVS_Request *candidate = rvs_scheduler_find_active_request_locked(&session->scheduler, request_id);
   if (candidate) {
     mutex_take(candidate->mutex);
     B32 matching_launch = candidate->command_kind == RVS_EngineCommandKind_Launch &&
@@ -509,7 +509,7 @@ rvs_engine_complete_launch(RVS_Engine *engine, RVS_MessageID request_id, RVS_Res
         reply.result = RVS_Result_Error;
       }
       rvs_session_prepare_reply_locked(session, candidate, &reply);
-      rvs_session_request_remove_locked(session, candidate);
+      rvs_scheduler_request_remove_locked(&session->scheduler, candidate);
       request = candidate;
       completed = 1;
     }
@@ -531,7 +531,7 @@ rvs_engine_launch_is_pending(RVS_Engine *engine, RVS_MessageID request_id)
   ProfBeginFunction();
   B32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
+  RVS_Request *request = rvs_scheduler_find_active_request_locked(&engine->session->scheduler, request_id);
   if (request) {
     mutex_take(request->mutex);
     result = request->command_kind == RVS_EngineCommandKind_Launch &&
@@ -549,7 +549,7 @@ rvs_engine_launch_matches_pid(RVS_Engine *engine, RVS_MessageID request_id, U32 
   ProfBeginFunction();
   B32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
+  RVS_Request *request = rvs_scheduler_find_active_request_locked(&engine->session->scheduler, request_id);
   if (request) {
     mutex_take(request->mutex);
     result = request->command_kind == RVS_EngineCommandKind_Launch &&
@@ -567,7 +567,7 @@ rvs_engine_launch_pid(RVS_Engine *engine, RVS_MessageID request_id)
   ProfBeginFunction();
   U32 result = 0;
   mutex_take(engine->control->mutex);
-  RVS_Request *request = rvs_session_find_active_request_locked(engine->session, request_id);
+  RVS_Request *request = rvs_scheduler_find_active_request_locked(&engine->session->scheduler, request_id);
   if (request) {
     mutex_take(request->mutex);
     if (request->command_kind == RVS_EngineCommandKind_Launch && request->reply.result == RVS_Result_Pending) {
@@ -807,9 +807,9 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
   case RVS_DemonReplyKind_Run: {
     mutex_take(engine->control->mutex);
     if (reply->result == RVS_Result_Ok) {
-      rvs_session_mark_run_in_flight_locked(engine->session, reply->request_id);
+      rvs_scheduler_mark_run_in_flight_locked(&engine->session->scheduler, reply->request_id);
     } else {
-      rvs_session_clear_queued_execution_locked(engine->session, reply->request_id);
+      rvs_scheduler_clear_queued_execution_locked(&engine->session->scheduler, reply->request_id);
     }
     mutex_drop(engine->control->mutex);
     rvs_engine_complete_reply(engine, (RVS_EngineReply){
@@ -859,7 +859,7 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
 
   case RVS_DemonReplyKind_RunFinished: {
     mutex_take(engine->control->mutex);
-    rvs_session_finish_run_locked(engine->session, reply->request_id);
+    rvs_scheduler_finish_run_locked(&engine->session->scheduler, reply->request_id);
     mutex_drop(engine->control->mutex);
   } break;
 
@@ -1107,7 +1107,7 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
     goto exit_control_mutex;
   }
 
-  if (rvs_session_execution_blocks_operation_locked(session, key.operation_class)) {
+  if (rvs_scheduler_execution_blocks_operation_locked(&session->scheduler, key.operation_class)) {
     result = RVS_Result_AlreadyPending;
     goto exit_control_mutex;
   }
@@ -1155,7 +1155,7 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
     submit_out->request = request;
     submit_out->control = rvs_request_control_alloc(session, request, key, admission.registered);
   } else {
-    rvs_scheduler_rollback_admission_locked(session, &admission);
+    rvs_scheduler_rollback_admission_locked(&session->scheduler, &admission);
   }
   exit_arena_mutex:;
   mutex_drop(engine->arena_mutex);

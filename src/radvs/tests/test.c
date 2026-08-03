@@ -297,7 +297,7 @@ entry_point(CmdLine *cmdline)
   RVS_SubmitInfo blocked_launch_submit = {0};
   AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &blocked_launch_submit) == RVS_Result_AlreadyPending);
   mutex_take(session->control->mutex);
-  AssertAlways( ! rvs_session_execution_blocks_operation_locked(session, RVS_OperationClass_ReadOnly));
+  AssertAlways( ! rvs_scheduler_execution_blocks_operation_locked(&session->scheduler, RVS_OperationClass_ReadOnly));
   mutex_drop(session->control->mutex);
   AssertAlways(rvs_request_control_cancel(cancelled_run_submit.control) == RVS_Result_Ok);
   rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Queued);
@@ -322,8 +322,8 @@ entry_point(CmdLine *cmdline)
   // Exercise DEMON reply transitions directly without fabricating backend failures.
   RVS_MessageID test_run_request_id = 0x1000;
   mutex_take(session->control->mutex);
-  AssertAlways(rvs_session_reserve_execution_locked(session, test_run_request_id));
-  AssertAlways( ! rvs_session_mark_run_in_flight_locked(session, test_run_request_id + 1));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, test_run_request_id));
+  AssertAlways( ! rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, test_run_request_id + 1));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_Run,
@@ -348,9 +348,9 @@ entry_point(CmdLine *cmdline)
   rvs_test_wait_until_execution_state(session, RVS_SessionExecutionState_Idle);
 
   mutex_take(session->control->mutex);
-  AssertAlways(rvs_session_reserve_execution_locked(session, test_run_request_id));
-  AssertAlways(rvs_session_clear_queued_execution_locked(session, test_run_request_id));
-  AssertAlways(rvs_session_reserve_execution_locked(session, test_run_request_id));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, test_run_request_id));
+  AssertAlways(rvs_scheduler_clear_queued_execution_locked(&session->scheduler, test_run_request_id));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, test_run_request_id));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_Run,
@@ -371,8 +371,8 @@ entry_point(CmdLine *cmdline)
                                                                  join_key);
   AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_Ok);
   AssertAlways(rvs_session_register_operation_locked(session, join_key, join_request) == RVS_Result_AlreadyPending);
-  AssertAlways(rvs_session_unregister_operation_locked(session, join_key) == join_request);
-  rvs_session_request_remove_locked(session, join_request);
+  AssertAlways(rvs_scheduler_unregister_operation_locked(&session->scheduler, join_key) == join_request);
+  rvs_scheduler_request_remove_locked(&session->scheduler, join_request);
   mutex_drop(session->control->mutex);
   rvs_request_release(join_request); // drop engine ownership
   rvs_request_release(join_request); // drop caller ownership
@@ -385,7 +385,7 @@ entry_point(CmdLine *cmdline)
                                                                      ins_atomic_u64_inc_eval(&session->engine->next_request_id),
                                                                      join_key);
   AssertAlways(rvs_session_register_operation_locked(session, join_key, foreign_request) == RVS_Result_Error);
-  rvs_session_request_remove_locked(session, foreign_request);
+  rvs_scheduler_request_remove_locked(&session->scheduler, foreign_request);
   mutex_drop(session->control->mutex);
   rvs_request_release(foreign_request); // drop engine ownership
   rvs_request_release(foreign_request); // drop caller ownership
