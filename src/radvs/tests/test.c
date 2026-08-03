@@ -139,7 +139,7 @@ entry_point(CmdLine *cmdline)
   rvs_request_control_release(second_launch_submit.control);
 
   RVS_OperationKey lifecycle_key = {
-    .operation_class = RVS_OperationClass_SessionLifecycle,
+    .operation_class = RVS_OperationClass_Topology,
     .operation_id = RVS_EngineCommandKind_Launch,
   };
   RVS_Request *correlated_launch = rvs_test_request_alloc(session, lifecycle_key, RVS_EngineCommandKind_Launch, 0);
@@ -327,8 +327,9 @@ entry_point(CmdLine *cmdline)
 
   // Exercise DEMON reply transitions directly without fabricating backend failures.
   RVS_MessageID test_run_request_id = 0x1000;
+  RVS_TargetSnapshot test_target = { .target = reply.launch.program_id };
   mutex_take(session->control->mutex);
-  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &reply.launch.program_id, 1, test_run_request_id));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &test_target, 1, test_run_request_id));
   AssertAlways( ! rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, test_run_request_id + 1));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
@@ -337,6 +338,16 @@ entry_point(CmdLine *cmdline)
     .result = RVS_Result_Ok,
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_RunInFlight);
+  RVS_OperationKey interrupt_key = {
+    .operation_class = RVS_OperationClass_InterruptTransition,
+    .operation_id = 1,
+  };
+  mutex_take(session->control->mutex);
+  RVS_SchedulerAdmission interrupt_admission = {0};
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, interrupt_key, &reply.launch.program_id, 1, 0, &interrupt_admission) == RVS_Result_Ok);
+  AssertAlways(interrupt_admission.operation->targets[0].execution_generation == rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id)->execution_generation);
+  rvs_scheduler_rollback_admission_locked(&session->scheduler, &interrupt_admission);
+  mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_EventBatch,
     .request_id = test_run_request_id,
@@ -353,10 +364,31 @@ entry_point(CmdLine *cmdline)
   });
   rvs_test_wait_until_execution_state(session, reply.launch.program_id, RVS_TargetExecutionState_Idle);
 
+  RVS_OperationKey terminate_key = {
+    .operation_class = RVS_OperationClass_Termination,
+    .operation_id = 1,
+  };
   mutex_take(session->control->mutex);
-  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &reply.launch.program_id, 1, test_run_request_id));
+  RVS_TargetLedgerEntry *terminate_entry = rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id);
+  U64 state_generation = terminate_entry->state_generation;
+  U64 topology_generation = terminate_entry->topology_generation;
+  RVS_SchedulerAdmission terminate_admission = {0};
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, terminate_key, &reply.launch.program_id, 1, 0, &terminate_admission) == RVS_Result_Ok);
+  AssertAlways(terminate_entry->is_termination_fenced);
+  AssertAlways(terminate_entry->state_generation > state_generation && terminate_entry->topology_generation > topology_generation);
+  RVS_SchedulerAdmission fenced_query = {0};
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_RequestPolicy_RejectIfPending, (RVS_OperationKey){ .operation_class = RVS_OperationClass_ReadOnly, .program_id = reply.launch.program_id, .operation_id = 2 }, 0, 0, 0, &fenced_query) == RVS_Result_Ok);
+  AssertAlways(fenced_query.is_terminal && fenced_query.request->reply.result == RVS_Result_StaleState);
+  rvs_request_release(fenced_query.request);
+  rvs_scheduler_rollback_admission_locked(&session->scheduler, &terminate_admission);
+  AssertAlways( ! terminate_entry->is_termination_fenced);
+  AssertAlways(terminate_entry->state_generation == state_generation && terminate_entry->topology_generation == topology_generation);
+  mutex_drop(session->control->mutex);
+
+  mutex_take(session->control->mutex);
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &test_target, 1, test_run_request_id));
   AssertAlways(rvs_scheduler_clear_queued_execution_locked(&session->scheduler, test_run_request_id));
-  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &reply.launch.program_id, 1, test_run_request_id));
+  AssertAlways(rvs_scheduler_reserve_execution_locked(&session->scheduler, &test_target, 1, test_run_request_id));
   mutex_drop(session->control->mutex);
   rvs_engine_process_demon_reply(engine, &(RVS_DemonReply){
     .kind = RVS_DemonReplyKind_Run,
@@ -403,7 +435,7 @@ entry_point(CmdLine *cmdline)
 
   lifecycle_key.operation_id = 2;
   RVS_OperationKey session_execution_key = {
-    .operation_class = RVS_OperationClass_SessionExecution,
+    .operation_class = RVS_OperationClass_ExecutionWorkflow,
     .operation_id = RVS_EngineCommandKind_Run,
   };
   AssertAlways(rvs_operation_keys_conflict(lifecycle_key, session_execution_key));

@@ -24,7 +24,21 @@ struct RVS_TargetLedgerEntry
   RVS_TargetExecutionState  execution_state;
   U64                       execution_generation;
   RVS_MessageID             execution_request_id;
+  U64                       state_generation;
+  U64                       topology_generation;
+  U64                       configuration_generation;
+  B32                       is_termination_fenced;
 };
+
+typedef struct
+{
+  RVS_ProgramID target;
+  U64           state_generation;
+  U64           topology_generation;
+  U64           configuration_generation;
+  U64           execution_generation;
+  B32           is_termination_fenced;
+} RVS_TargetSnapshot;
 
 typedef struct
 {
@@ -41,8 +55,10 @@ typedef struct
 typedef struct
 {
   RVS_ScheduledOperation *operation;
+  RVS_Request            *request;
   B32                     joined;
   B32                     registered;
+  B32                     is_terminal;
 } RVS_SchedulerAdmission;
 
 struct RVS_ScheduledOperation
@@ -53,7 +69,7 @@ struct RVS_ScheduledOperation
   RVS_ScheduledOperation *key_prev;
   RVS_Scheduler          *scheduler;
   RVS_Request            *request;
-  RVS_ProgramID          *targets;
+  RVS_TargetSnapshot     *targets;
   U64                     targets_count;
   U32                     ref_count;
   B32                     is_dispatched;
@@ -77,10 +93,10 @@ struct RVS_RequestControl
 internal B32          rvs_operation_key_is_well_formed_for_policy(RVS_RequestPolicy policy, RVS_OperationKey key);
 internal B32          rvs_operation_key_match(RVS_OperationKey a, RVS_OperationKey b);
 internal B32          rvs_operation_keys_conflict(RVS_OperationKey a, RVS_OperationKey b);
-internal B32          rvs_scheduler_has_conflicting_operation_locked(RVS_Scheduler *scheduler, RVS_OperationKey key);
+internal B32          rvs_scheduler_has_conflicting_operation_locked(RVS_Scheduler *scheduler, RVS_OperationKey key, RVS_ProgramID *targets, U64 targets_count);
 internal void         rvs_scheduler_target_add_locked(RVS_Scheduler *scheduler, RVS_ProgramID target);
 internal RVS_TargetLedgerEntry *rvs_scheduler_target_from_id_locked(RVS_Scheduler *scheduler, RVS_ProgramID target);
-internal B32          rvs_scheduler_reserve_execution_locked(RVS_Scheduler *scheduler, RVS_ProgramID *targets, U64 targets_count, RVS_MessageID request_id);
+internal B32          rvs_scheduler_reserve_execution_locked(RVS_Scheduler *scheduler, RVS_TargetSnapshot *targets, U64 targets_count, RVS_MessageID request_id);
 internal B32          rvs_scheduler_mark_run_in_flight_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal B32          rvs_scheduler_clear_queued_execution_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal B32          rvs_scheduler_finish_run_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);

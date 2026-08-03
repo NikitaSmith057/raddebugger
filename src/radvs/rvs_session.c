@@ -41,6 +41,9 @@ rvs_session_bump_program_state_epoch_locked(RVS_Session *session, RVS_ProgramID 
   RVS_Program *program = rvs_session_program_from_id_locked(session, program_id);
   if (program) {
     program->state_epoch += 1;
+    RVS_TargetLedgerEntry *entry = rvs_scheduler_target_from_id_locked(&session->scheduler, program_id);
+    AssertAlways(entry != 0);
+    entry->state_generation += 1;
   }
   ProfEnd();
 }
@@ -48,8 +51,11 @@ rvs_session_bump_program_state_epoch_locked(RVS_Session *session, RVS_ProgramID 
 internal B32
 rvs_session_operation_key_resolves_locked(RVS_Session *session, RVS_OperationKey key)
 {
-  if (key.operation_class == RVS_OperationClass_SessionLifecycle ||
-      key.operation_class == RVS_OperationClass_SessionExecution) {
+  if (key.operation_class == RVS_OperationClass_Topology ||
+      key.operation_class == RVS_OperationClass_ExecutionWorkflow ||
+      key.operation_class == RVS_OperationClass_InterruptTransition ||
+      key.operation_class == RVS_OperationClass_Termination ||
+      key.operation_class == RVS_OperationClass_TargetConfiguration) {
     return 1;
   }
 
@@ -92,6 +98,17 @@ rvs_session_prepare_reply_locked(RVS_Session *session, RVS_ScheduledOperation *o
     reply->program_state_epoch = operation->captured_program_state_epoch;
     if (reply->program_state_epoch != rvs_session_program_state_epoch_locked(session, operation->key.program_id)) {
       reply->result = RVS_Result_StaleState;
+    }
+    for EachIndex(target_idx, operation->targets_count) {
+      RVS_TargetSnapshot *snapshot = &operation->targets[target_idx];
+      RVS_TargetLedgerEntry *entry = rvs_scheduler_target_from_id_locked(&session->scheduler, snapshot->target);
+      if (entry == 0 || entry->is_termination_fenced ||
+          entry->state_generation != snapshot->state_generation ||
+          entry->topology_generation != snapshot->topology_generation ||
+          entry->configuration_generation != snapshot->configuration_generation) {
+        reply->result = RVS_Result_StaleState;
+        break;
+      }
     }
   }
 }
@@ -261,8 +278,13 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   if (result != RVS_Result_Ok) {
     goto exit_arena_mutex;
   }
+  if (admission.is_terminal) {
+    submit_out->request = admission.request;
+    result = RVS_Result_Ok;
+    goto exit_arena_mutex;
+  }
   if (admission.joined) {
-    submit_out->request = admission.operation->request;
+    submit_out->request = admission.request;
     goto exit_arena_mutex;
   }
 

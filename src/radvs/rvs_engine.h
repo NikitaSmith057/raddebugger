@@ -37,18 +37,23 @@ typedef enum
   // It remains admissible while program execution is active and relies on epoch freshness.
   // It does not conflict with other read-only requests.
   // It does not conflict with execution requests.
-  // It conflicts with SessionLifecycle, because lifecycle is session-wide lock.
+  // It becomes stale when the target's captured state, topology, or configuration changes.
   RVS_OperationClass_ReadOnly,
 
-  // Operation controls multiple programs through the session's single execution controller.
-  // It has no single program ID and does not conflict with ReadOnly work.
-  RVS_OperationClass_SessionExecution,
+  // Operation mutates session topology, including launch and attach.
+  RVS_OperationClass_Topology,
 
-  // Operation temporarily requires exclusive access to session-wide backend/topology state.
-  // It is rejected while program execution is queued or in flight.
-  // It does not invalidate program state epochs.
-  // A conflicting keyed submission is rejected with RVS_Result_AlreadyPending.
-  RVS_OperationClass_SessionLifecycle,
+  // Workflow holds execution leases for selected stopped targets.
+  RVS_OperationClass_ExecutionWorkflow,
+
+  // Temporarily transitions selected actively executing targets to stopped state.
+  RVS_OperationClass_InterruptTransition,
+
+  // Permanently terminates selected targets and fences them from new target work.
+  RVS_OperationClass_Termination,
+
+  // Mutates target-local backend configuration, such as physical breakpoint bindings.
+  RVS_OperationClass_TargetConfiguration,
 } RVS_OperationClass;
 
 typedef struct
@@ -74,8 +79,8 @@ typedef struct
 // Command
 
 #define RVS_ENGINE_COMMAND_XLIST \
-  X(Launch, RVS_OperationClass_SessionLifecycle, RVS_RequestPolicy_RejectIfPending, "Launch program and stop at the entry point") \
-  X(Run,    RVS_OperationClass_SessionExecution, RVS_RequestPolicy_RejectIfPending, "Run selected programs")
+  X(Launch, RVS_OperationClass_Topology,          RVS_RequestPolicy_RejectIfPending, "Launch program and stop at the entry point") \
+  X(Run,    RVS_OperationClass_ExecutionWorkflow, RVS_RequestPolicy_RejectIfPending, "Run selected programs")
 
 typedef enum
 {

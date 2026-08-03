@@ -204,7 +204,7 @@ rvs_engine_request_mark_dispatched(RVS_Engine *engine, RVS_MessageID request_id,
   if ( ! engine->control->is_shutdown) {
     RVS_ScheduledOperation *operation = rvs_scheduler_operation_mark_dispatched_locked(&session->scheduler, request_id);
     if (operation) {
-      if (operation->key.operation_class == RVS_OperationClass_SessionExecution) {
+      if (operation->key.operation_class == RVS_OperationClass_ExecutionWorkflow) {
         AssertAlways(command->kind == RVS_EngineCommandKind_Run);
         for EachIndex(program_idx, command->run.programs_count) {
           rvs_session_bump_program_state_epoch_locked(session, command->run.programs[program_idx]);
@@ -302,7 +302,7 @@ rvs_engine_complete_reply(RVS_Engine *engine, RVS_EngineReply reply)
   RVS_Session *session = engine->session;
   operation = rvs_scheduler_find_active_operation_locked(&session->scheduler, reply.request_id);
   if (operation) {
-    if (operation->key.operation_class == RVS_OperationClass_SessionExecution && reply.result != RVS_Result_Ok) {
+    if (operation->key.operation_class == RVS_OperationClass_ExecutionWorkflow && reply.result != RVS_Result_Ok) {
       rvs_scheduler_clear_queued_execution_locked(&session->scheduler, reply.request_id);
     }
     rvs_scheduler_operation_remove_locked(&session->scheduler, operation);
