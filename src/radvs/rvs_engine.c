@@ -126,7 +126,7 @@ rvs_engine_command_scheduler_op(RVS_EngineCommand command, RVS_SchedulerOp *op_o
     return 1;
   };
 
-  default: { InvalidPath; } break;
+  default: break;
   }
   return 0;
 }

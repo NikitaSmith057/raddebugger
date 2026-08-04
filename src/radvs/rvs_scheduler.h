@@ -108,11 +108,7 @@ typedef enum
 typedef enum
 {
   RVS_SchedulerPhase_Stopped,
-  RVS_SchedulerPhase_PreparingResume,
   RVS_SchedulerPhase_Running,
-  RVS_SchedulerPhase_Interrupting,
-  RVS_SchedulerPhase_CollectingStop,
-  RVS_SchedulerPhase_PublishingStop,
   RVS_SchedulerPhase_Exited,
 } RVS_SchedulerPhase;
 
@@ -145,21 +141,6 @@ typedef enum
 
 typedef enum
 {
-  RVS_ExecutionOwnerKind_Null,
-  RVS_ExecutionOwnerKind_Operation,
-  RVS_ExecutionOwnerKind_ControlTransaction,
-  RVS_ExecutionOwnerKind_Shutdown,
-} RVS_ExecutionOwnerKind;
-
-typedef struct
-{
-  RVS_ExecutionOwnerKind kind;
-  RVS_MessageID          request_id;
-  U64                    transaction_id;
-} RVS_ExecutionOwner;
-
-typedef enum
-{
   RVS_ScheduledOperationState_Null,
   RVS_ScheduledOperationState_Queued,
   RVS_ScheduledOperationState_Active,
@@ -172,21 +153,11 @@ typedef enum
 typedef enum
 {
   RVS_ControlTransactionPhase_Null,
-  RVS_ControlTransactionPhase_PreparingInterrupt,
   RVS_ControlTransactionPhase_WaitingForInterrupt,
   RVS_ControlTransactionPhase_CollectingBatch,
   RVS_ControlTransactionPhase_Stable,
   RVS_ControlTransactionPhase_WaitingForResume,
-  RVS_ControlTransactionPhase_Complete,
 } RVS_ControlTransactionPhase;
-
-typedef struct
-{
-  U64           control_transaction_id;
-  U64           stable_stop_generation;
-  RVS_StopCause cause;
-  B32           requires_reconciliation;
-} RVS_OperationInterruption;
 
 typedef struct RVS_Program RVS_Program;
 typedef struct RVS_ThreadLedgerEntry RVS_ThreadLedgerEntry;
@@ -231,7 +202,6 @@ typedef struct
   RVS_StepUnit       step_unit;
   RVS_ThreadID       thread;
   RVS_RunIntentState state;
-  RVS_MessageID      execution_owner;
 } RVS_RunIntent;
 
 typedef struct
@@ -321,31 +291,15 @@ struct RVS_Plan
 typedef struct
 {
   RVS_ScheduledOperation *owner;
-  RVS_ExecutionOwner      previous_owner;
-  RVS_MessageID           execution_owner;
-  U64                     transaction_id;
+  RVS_MessageID           execution_request_id;
   RVS_SchedulerCommandToken interrupt_token;
   RVS_ControlTransactionPhase phase;
-  U64                     cycle_epoch;
   U64                     stable_stop_generation;
-  U32                     interrupt_attempt;
-  U64                     collected_events_count;
   RVS_StopCause           primary_cause;
   RVS_ProgramID           primary_target;
-  B32                     backend_stable;
-  B32                     event_published;
   // Post-fence exits affect settlement only; they never redispatch policy for this generation.
   B32                     amended_while_resume_pending;
 } RVS_StopTransaction;
-
-typedef struct
-{
-  RVS_ScheduledOperation *owner;
-  RVS_MessageID           execution_owner;
-  U64                     cycle_epoch;
-  U64                     stable_stop_generation;
-  U32                     resume_attempt;
-} RVS_ResumeTransaction;
 
 typedef struct
 {
@@ -456,7 +410,6 @@ struct RVS_Scheduler
   RVS_ThreadLedgerEntry     *thread_first;
   RVS_ThreadLedgerEntry     *thread_last;
   U64                        next_command_id;
-  U64                        next_control_transaction_id;
   U64                        next_stable_stop_generation;
   U64                        next_plan_id;
   U64                        last_dispatched_stable_stop_generation;
@@ -475,14 +428,12 @@ struct RVS_Scheduler
   RVS_PlanID                    test_first_plan_visited;
   RVS_PlanID                    test_second_plan_visited;
 #endif
-  RVS_ExecutionOwner         execution_owner;
+  RVS_MessageID              active_execution_request_id;
   RVS_SchedulerPhase         phase;
-  U64                        run_cycle_epoch;
   RVS_RunIntent              run_intent;
   RVS_ProgramID              selected_target;
   RVS_ThreadID               selected_thread;
   RVS_StopTransaction        stop_transaction;
-  RVS_ResumeTransaction      resume_transaction;
 };
 
 typedef enum
@@ -512,7 +463,6 @@ struct RVS_ScheduledOperation
   RVS_TargetSnapshotStorage   *target_storage;
   U32                          ref_count;
   RVS_ScheduledOperationState  state;
-  RVS_OperationInterruption    interruption;
   B32                          is_dispatched;
   B32                          is_keyed;
   B32                          request_completed;

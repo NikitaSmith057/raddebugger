@@ -83,7 +83,7 @@ internal void
 rvs_session_release_engine(RVS_Session *session)
 {
   // The engine holds control->mutex while releasing session ownership.
-  AssertAlways(session->scheduler.stop_transaction.owner == 0 && session->scheduler.resume_transaction.owner == 0);
+  AssertAlways(session->scheduler.stop_transaction.owner == 0);
   for EachNode(program, RVS_Program, session->scheduler.target_first) {
     AssertAlways(program->state == RVS_TargetExecutionState_Idle || program->state == RVS_TargetState_Removed);
   }
