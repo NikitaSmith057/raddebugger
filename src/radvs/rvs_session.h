@@ -5,6 +5,7 @@
 
 #include "radvs/rvs_engine.h"
 #include "radvs/rvs_async.h"
+#include "radvs/rvs_entity.h"
 #include "radvs/rvs_scheduler.h"
 
 struct RVS_Session
@@ -15,6 +16,7 @@ struct RVS_Session
   U32                ref_count;
   B32                engine_released;
   RVS_Queue         *event_queue;
+  RVS_EntityStore    entities;
   RVS_Scheduler      scheduler;
 };
 

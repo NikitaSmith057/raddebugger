@@ -186,7 +186,7 @@ entry_point(CmdLine *cmdline)
         continue;
       }
 
-      rci_printf("Launch: program 0x%llx (%S) started with pid %u\n", reply.launch.program_id.u64[0], exe_path, reply.launch.pid);
+      rci_printf("Launch: program 0x%llx (%S) started with pid %u\n", reply.launch.program_id.value, exe_path, reply.launch.pid);
     } break;
 
     case RCI_CmdKind_Run: {
@@ -196,7 +196,7 @@ entry_point(CmdLine *cmdline)
       }
 
       RVS_ProgramID program_id;
-      if ( ! try_u64_from_str8_c_rules(cmd_raw.last->string, &program_id.u64[0])) {
+      if ( ! try_u64_from_str8_c_rules(cmd_raw.last->string, &program_id.value)) {
         rci_printf("Run: failed to parse program ID string %S\n", cmd_raw.last->string);
         continue;
       }
@@ -204,7 +204,7 @@ entry_point(CmdLine *cmdline)
       RVS_SubmitInfo submit;
       RVS_Result     run_result = rvs_session_run(session, program_id, &submit);
       if (run_result != RVS_Result_Ok) {
-        rci_printf("Run: failed to submit program 0x%llx, error code %u\n", program_id.u64[0], run_result);
+        rci_printf("Run: failed to submit program 0x%llx, error code %u\n", program_id.value, run_result);
         continue;
       }
 
@@ -216,7 +216,7 @@ entry_point(CmdLine *cmdline)
         rci_printf("Run: request failed, error code %u\n", reply_result != RVS_Result_Ok ? reply_result : reply.result);
         continue;
       }
-      rci_printf("Run: program 0x%llx resumed\n", program_id.u64[0]);
+      rci_printf("Run: program 0x%llx resumed\n", program_id.value);
     } break;
 
     case RCI_CmdKind_RunAddr: {
@@ -238,12 +238,12 @@ entry_point(CmdLine *cmdline)
         continue;
       }
 
-      RVS_ProgramID program_id = { .u64 = { program_id_u64 } };
+      RVS_ProgramID program_id = { .value = program_id_u64 };
       RVS_SubmitInfo submit;
       RVS_Result run_result = rvs_session_run_to_address(session, program_id, address, &submit);
       if (run_result != RVS_Result_Ok) {
         rci_printf("RunAddr: failed to submit program 0x%llx, error code %u\n",
-                    program_id.u64[0], run_result);
+                    program_id.value, run_result);
         continue;
       }
 
@@ -256,7 +256,7 @@ entry_point(CmdLine *cmdline)
                     reply_result != RVS_Result_Ok ? reply_result : reply.result);
         continue;
       }
-      rci_printf("RunAddr: program 0x%llx resumed toward 0x%llx\n", program_id.u64[0], address);
+      rci_printf("RunAddr: program 0x%llx resumed toward 0x%llx\n", program_id.value, address);
     } break;
 
     case RCI_CmdKind_Teardown: {
@@ -264,13 +264,19 @@ entry_point(CmdLine *cmdline)
     } break;
 
     case RCI_CmdKind_LsProg: {
-      rci_printf("--- Programs -------------------------------------------------------------------\n");
-      rci_printf("  %-3s %-10s %-8s %-9s %s\n", "No.", "PROGRAM-ID", "PID", "LIFECYCLE", "PATH");
-      rci_printf("  --- ---------- -------- --------- ----\n");
-      U64 program_idx = 0; 
-      for EachNode(prog, RVS_Program, engine->session->scheduler.target_first) {
-        String8 lifecycle = prog->state == RVS_TargetState_Removed ? str8_lit("Removed") : str8_lit("Live");
-        rci_printf("  %-3u %-10llx %-8u %-8S\n", program_idx, prog->target.u64[0], prog->pid, lifecycle);
+      RVS_ProgramSnapshot *programs       = 0;
+      U64                  programs_count = 0;
+      RVS_Result           result         = rvs_session_copy_programs(temp.arena, session, &programs, &programs_count);
+      if (result == RVS_Result_Ok) {
+        rci_printf("--- Programs -------------------------------------------------------------------\n");
+        rci_printf("  %-3s %-10s %-8s %-8s %s\n", "No.", "PROGRAM-ID", "PID", "STATUS", "PATH");
+        for EachIndex(program_idx, programs_count) {
+          RVS_ProgramSnapshot snapshot = programs[program_idx];
+          String8 lifecycle = snapshot.is_retired ? str8_lit("Retired") : str8_lit("Live");
+          rci_printf("  %-3llu %-10llx %-8u %-8S\n", program_idx, snapshot.id.value, snapshot.pid, lifecycle);
+        }
+      } else {
+        rci_printf("LsProg: failed to read programs; error code %u\n", result);
       }
     } break;
 

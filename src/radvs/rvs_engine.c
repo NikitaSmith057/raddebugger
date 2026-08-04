@@ -1,17 +1,16 @@
+// Copyright (c) Epic Games Tools
+// Licensed under the MIT license (https://opensource.org/license/mit/)
+
+////////////////////////////////
+
 #include "radvs/rvs_engine.h"
 #include "radvs/rvs_async.h"
 #include "radvs/rvs_demon.h"
+#include "radvs/rvs_entity.h"
 #include "radvs/rvs_request.h"
 #include "radvs/rvs_scheduler.h"
 
 ////////////////////////////////
-// Types
-
-typedef enum
-{
-  RVS_RunMode_Normal,
-  RVS_RunMode_ToAddress,
-} RVS_RunMode;
 
 typedef struct
 {
@@ -82,55 +81,6 @@ typedef struct
   };
 } RVS_EngineMessage;
 
-internal B32
-rvs_engine_command_scheduler_op(RVS_EngineCommand command, RVS_SchedulerOp *op_out)
-{
-  switch (command.kind) {
-  case RVS_EngineCommandKind_Launch: {
-    *op_out = RVS_SchedulerOp_Launch;
-    return 1;
-  };
-
-  case RVS_EngineCommandKind_Run:
-  case RVS_EngineCommandKind_Interrupt: {
-    RVS_ProgramID *programs       = command.kind == RVS_EngineCommandKind_Run ? command.run.programs : command.interrupt.programs;
-    U64            programs_count = command.kind == RVS_EngineCommandKind_Run ? command.run.programs_count : command.interrupt.programs_count;
-
-    if (programs_count == 0 || programs == 0) {
-      return 0;
-    }
-
-    if (command.kind == RVS_EngineCommandKind_Run &&
-        ((command.run.mode != RVS_RunMode_Normal && command.run.mode != RVS_RunMode_ToAddress) ||
-         (command.run.mode == RVS_RunMode_Normal && command.run.address != 0) ||
-         (command.run.mode == RVS_RunMode_ToAddress && (command.run.address == 0 || programs_count != 1)))) {
-      return 0;
-    }
-    if (command.run.intent.kind != RVS_RunIntentKind_Execute && command.run.intent.kind != RVS_RunIntentKind_Continue) {
-      return 0;
-    }
-
-    for EachIndex(program_idx, programs_count) {
-      if (dmn_handle_match(programs[program_idx], dmn_handle_zero())) {
-        return 0;
-      }
-      for EachIndex(previous_idx, program_idx) {
-        if (dmn_handle_match(programs[previous_idx], programs[program_idx])) {
-          return 0;
-        }
-      }
-    }
-
-    *op_out = command.kind == RVS_EngineCommandKind_Run ? RVS_SchedulerOp_Run : RVS_SchedulerOp_Interrupt;
-
-    return 1;
-  };
-
-  default: break;
-  }
-  return 0;
-}
-
 struct RVS_EngineControl
 {
   Arena *arena;
@@ -139,7 +89,73 @@ struct RVS_EngineControl
   B32    is_shutdown;
 };
 
+struct RVS_Engine
+{
+  Arena             *arena;
+  RVS_Queue         *inbox_queue;
+  RVS_MessageID      next_request_id;
+  RVS_ThreadState    state;
+  Thread             thread;
+  RVS_EngineControl *control;
+  RVS_RequestPool   *request_pool;
+  RVS_Session       *session;
+  RVS_Demon         *demon;
+
+#if RVS_ENGINE_TESTING
+  U32 test_fail_command_enqueue;
+  U32 test_hold_before_dispatch;
+  U32 test_is_held_before_dispatch;
+  U32 test_hold_after_dispatch_prepare;
+  U32 test_is_held_after_dispatch_prepare;
+  U32 test_fail_demon_message_type;
+  U32 test_effect_sequence;
+  U32 test_first_emission_sequence;
+  U32 test_first_command_sequence;
+#endif
+};
+
 thread_static U32 rvs_control_mutex_depth;
+
+////////////////////////////////
+// Types
+
+internal void
+rvs_engine_assert_well_formed_programs(RVS_ProgramID *programs, U64 programs_count)
+{
+  AssertAlways(programs != 0 && programs_count != 0);
+  for EachIndex(program_idx, programs_count) {
+    AssertAlways(!rvs_program_id_is_zero(programs[program_idx]));
+    for EachIndex(previous_idx, program_idx) {
+      AssertAlways(!rvs_program_id_match(programs[previous_idx], programs[program_idx]));
+    }
+  }
+}
+
+internal void
+rvs_engine_command_scheduler_op(RVS_EngineCommand command, RVS_SchedulerOp *op_out)
+{
+  AssertAlways(op_out != 0);
+  switch (command.kind) {
+  case RVS_EngineCommandKind_Launch: {
+    *op_out = RVS_SchedulerOp_Launch;
+  } break;
+
+  case RVS_EngineCommandKind_Run: {
+    rvs_engine_assert_well_formed_programs(command.run.programs, command.run.programs_count);
+    AssertAlways((command.run.mode == RVS_RunMode_Normal && command.run.address == 0) ||
+                 (command.run.mode == RVS_RunMode_ToAddress && command.run.address != 0 && command.run.programs_count == 1));
+    AssertAlways(command.run.intent.kind == RVS_RunIntentKind_Execute || command.run.intent.kind == RVS_RunIntentKind_Continue);
+    *op_out = RVS_SchedulerOp_Run;
+  } break;
+
+  case RVS_EngineCommandKind_Interrupt: {
+    rvs_engine_assert_well_formed_programs(command.interrupt.programs, command.interrupt.programs_count);
+    *op_out = RVS_SchedulerOp_Interrupt;
+  } break;
+
+  default: { InvalidPath; } break;
+  }
+}
 
 internal void
 rvs_control_mutex_take(RVS_EngineControl *control)
@@ -162,33 +178,6 @@ rvs_control_assert_unlocked(void)
 {
   AssertAlways(rvs_control_mutex_depth == 0);
 }
-
-struct RVS_Engine
-{
-  Arena          *arena;
-  RVS_Queue      *inbox_queue;
-  RVS_MessageID   next_request_id;
-  RVS_ThreadState state;
-  Thread          thread;
-
-  RVS_EngineControl *control;
-  RVS_RequestPool   *request_pool;
-  RVS_Session       *session;
-
-  RVS_Demon *demon;
-
-#if RVS_ENGINE_TESTING
-  U32 test_fail_command_enqueue;
-  U32 test_hold_before_dispatch;
-  U32 test_is_held_before_dispatch;
-  U32 test_hold_after_dispatch_prepare;
-  U32 test_is_held_after_dispatch_prepare;
-  U32 test_fail_demon_message_type;
-  U32 test_effect_sequence;
-  U32 test_first_emission_sequence;
-  U32 test_first_command_sequence;
-#endif
-};
 
 #include "radvs/rvs_session.h"
 
@@ -343,31 +332,34 @@ rvs_engine_control_release(RVS_EngineControl *control)
 }
 
 #include "radvs/rvs_request.c"
+#include "radvs/rvs_entity.c"
 #include "radvs/rvs_scheduler.c"
 #include "radvs/rvs_session.c"
 
 internal B32
 rvs_engine_collect_operation_traps_locked(Arena *arena, RVS_Engine *engine, RVS_ScheduledOperation *operation,
-                                          RVS_ProgramID *allowed_targets, U64 allowed_targets_count,
-                                          DMN_TrapChunkList *traps_out)
+                                           RVS_ProgramID *allowed_targets, U64 allowed_targets_count,
+                                           DMN_TrapChunkList *traps_out)
 {
-  if (operation == 0 || operation->key.op != RVS_SchedulerOp_Run || traps_out == 0) { return 0; }
+  AssertAlways(operation != 0 && operation->key.op == RVS_SchedulerOp_Run && traps_out != 0);
   for (RVS_PlanID plan_id = operation->active_plan_id; plan_id != 0;) {
     RVS_Plan *plan = rvs_scheduler_plan_from_id_locked(&engine->session->scheduler, plan_id);
     if (plan == 0 || plan->operation_request_id != operation->request->request_id) { return 0; }
     if (plan->header.kind == RVS_PlanKind_RunToAddress) {
       B32 target_allowed = 0;
       for EachIndex(target_idx, allowed_targets_count) {
-        if (dmn_handle_match(allowed_targets[target_idx], plan->run_to_address.target)) {
+        if (rvs_program_id_match(allowed_targets[target_idx], plan->run_to_address.target)) {
           target_allowed = 1;
           break;
         }
       }
       if (target_allowed) {
-        RVS_Program *program = rvs_scheduler_program_from_id_locked(&engine->session->scheduler, plan->run_to_address.target);
+        RVS_TargetControl *program = rvs_scheduler_target_from_id_locked(&engine->session->scheduler, plan->run_to_address.target);
         if (program == 0 || program->state == RVS_TargetState_Removed) { return 0; }
+        RVS_ProcessSnapshot process = {0};
+        if (!rvs_entity_live_process_for_program_locked(&engine->session->entities, program->id, &process)) { return 0; }
         DMN_Trap trap = {
-          .process = program->target,
+          .process = rvs_process_id_handle(process.process),
           .vaddr = plan->run_to_address.vaddr,
           .id = plan->header.id,
         };
@@ -389,24 +381,25 @@ rvs_engine_request_mark_dispatched_locked(RVS_Engine *engine, RVS_MessageID requ
   if ( ! engine->control->is_shutdown) {
     RVS_SchedulerOp         command_op = RVS_SchedulerOp_Null;
     RVS_ScheduledOperation *operation  = rvs_scheduler_operation_from_request_id_locked(&session->scheduler, request_id);
-    if (operation &&
-        rvs_engine_command_scheduler_op(*command, &command_op) &&
-        operation->key.op == command_op) {
-      RVS_SchedulerDecision decision = {0};
-      rvs_scheduler_apply_locked(&session->scheduler, (RVS_SchedulerEvent){
-        .kind = RVS_SchedulerEvent_DispatchStarted,
-        .request = { .request_id = request_id },
-      }, &decision);
-      result = decision.result == RVS_Result_Ok && decision.emissions.first == 0;
-      if (result && decision.command.kind != RVS_SchedulerCommand_Null) {
-        AssertAlways(command->kind == RVS_EngineCommandKind_Interrupt &&
-                     decision.command.kind == RVS_SchedulerCommand_InterruptExecution);
-        prepared->command_prepare_result = RVS_Result_Ok;
-        prepared->command_kind = decision.command.kind;
-        prepared->command_token = decision.command.token;
-        prepared->execution_request_id = decision.command.interrupt_execution.execution_request_id;
+    if (operation) {
+      rvs_engine_command_scheduler_op(*command, &command_op);
+      if (operation->key.op == command_op) {
+        RVS_SchedulerDecision decision = {0};
+        rvs_scheduler_apply_locked(&session->scheduler, (RVS_SchedulerEvent){
+          .kind = RVS_SchedulerEvent_DispatchStarted,
+          .request = { .request_id = request_id },
+        }, &decision);
+        result = decision.result == RVS_Result_Ok && decision.emissions.first == 0;
+        if (result && decision.command.kind != RVS_SchedulerCommand_Null) {
+          AssertAlways(command->kind == RVS_EngineCommandKind_Interrupt &&
+                       decision.command.kind == RVS_SchedulerCommand_InterruptExecution);
+          prepared->command_prepare_result = RVS_Result_Ok;
+          prepared->command_kind = decision.command.kind;
+          prepared->command_token = decision.command.token;
+          prepared->execution_request_id = decision.command.interrupt_execution.execution_request_id;
+        }
+        rvs_scheduler_decision_release(&decision);
       }
-      rvs_scheduler_decision_release(&decision);
     }
   }
   ProfEnd();
@@ -461,7 +454,7 @@ rvs_engine_prepare_scheduler_decision_locked(RVS_Engine *engine, RVS_SchedulerDe
         prepared_emission->reply = emission->reply;
         rvs_request_addref(prepared_emission->request);
       } else {
-        rvs_demon_event_copy(scratch, &prepared_emission->event, &emission->event);
+        prepared_emission->event = emission->event;
       }
       SLLQueuePush(prepared->emission_first, prepared->emission_last, prepared_emission);
     }
@@ -481,12 +474,17 @@ rvs_engine_prepare_scheduler_decision_locked(RVS_Engine *engine, RVS_SchedulerDe
     prepared->execution_request_id = command->resume_target_subset.execution_request_id;
     for EachIndex(target_idx, command->resume_target_subset.targets_count) {
       RVS_ProgramID target = command->resume_target_subset.targets[target_idx];
-      RVS_Program *program = rvs_scheduler_program_from_id_locked(&engine->session->scheduler, target);
+      RVS_TargetControl *program = rvs_scheduler_target_from_id_locked(&engine->session->scheduler, target);
       if (program == 0 || program->state == RVS_TargetState_Removed) {
         prepared->command_prepare_result = RVS_Result_Error;
         break;
       }
-      prepared->processes[target_idx] = program->target;
+        RVS_ProcessSnapshot process = {0};
+        if (!rvs_entity_live_process_for_program_locked(&engine->session->entities, program->id, &process)) {
+          prepared->command_prepare_result = RVS_Result_Error;
+          break;
+        }
+        prepared->processes[target_idx] = rvs_process_id_handle(process.process);
     }
   } else if (prepared->command_kind == RVS_SchedulerCommand_ResumeTargetSubset) {
     prepared->execution_request_id = command->resume_target_subset.execution_request_id;
@@ -603,7 +601,7 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
         .command_kind = RVS_SchedulerCommand_PublishTarget,
         .command = prepared->command_token,
         .result = RVS_Result_Ok,
-        .target = prepared->process,
+        .process = rvs_process_id_from_handle(prepared->process),
         .pid = prepared->pid,
       },
     };
@@ -730,12 +728,17 @@ rvs_engine_execute_root_dispatch(RVS_Engine *engine, RVS_MessageID request_id, R
       processes_count = command->run.programs_count;
       processes = push_array(scratch.arena, DMN_Handle, processes_count);
       for EachIndex(program_idx, processes_count) {
-        RVS_Program *program = rvs_scheduler_program_from_id_locked(&engine->session->scheduler, programs[program_idx]);
+        RVS_TargetControl *program = rvs_scheduler_target_from_id_locked(&engine->session->scheduler, programs[program_idx]);
         if (program == 0 || program->state == RVS_TargetState_Removed) {
           dispatch_ready = 0;
           break;
         }
-        processes[program_idx] = program->target;
+        RVS_ProcessSnapshot process = {0};
+        if (!rvs_entity_live_process_for_program_locked(&engine->session->entities, program->id, &process)) {
+          dispatch_ready = 0;
+          break;
+        }
+        processes[program_idx] = rvs_process_id_handle(process.process);
       }
       if (dispatch_ready) {
         dispatch_ready = rvs_engine_collect_operation_traps_locked(scratch.arena, engine, queued_operation,
