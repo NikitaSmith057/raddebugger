@@ -336,12 +336,13 @@ rvs_session_select_thread(RVS_Session *session, RVS_ProgramID program_id, RVS_Th
     return RVS_Result_InvalidArgument;
   }
   Temp scratch = scratch_begin(0, 0);
-  RVS_EnginePreparedDecision prepared = {0};
+  RVS_SchedulerDecision decision = {0};
   RVS_Result result = rvs_control_reduce_scheduler_event(session, (RVS_SchedulerEvent){
     .kind = RVS_SchedulerEvent_ThreadSelected,
     .thread_selected = { .target = program_id, .thread = thread_id },
-  }, scratch.arena, 1, &prepared);
-  AssertAlways(prepared.emission_first == 0 && prepared.command_kind == RVS_SchedulerCommand_Null);
+  }, scratch.arena, 1, &decision);
+  AssertAlways(decision.emissions.first == 0 && decision.command.kind == RVS_SchedulerCommand_Null);
+  rvs_scheduler_decision_release(&decision);
   scratch_end(scratch);
   return result;
 }
@@ -439,10 +440,11 @@ rvs_session_ack_event(RVS_Session *session, U64 sequence)
   if (session == 0 || sequence == 0) { return RVS_Result_InvalidArgument; }
   Temp scratch = scratch_begin(0, 0);
 
-  RVS_EnginePreparedDecision prepared = {0};
+  RVS_SchedulerDecision decision = {0};
   RVS_SchedulerEvent event  = { .kind = RVS_SchedulerEvent_AcknowledgeEvent, .acknowledged = { .sequence = sequence } };
-  RVS_Result         result = rvs_control_reduce_scheduler_event(session, event, scratch.arena, 1, &prepared);
-  AssertAlways(prepared.emission_first == 0 && prepared.command_kind == RVS_SchedulerCommand_Null);
+  RVS_Result         result = rvs_control_reduce_scheduler_event(session, event, scratch.arena, 1, &decision);
+  AssertAlways(decision.emissions.first == 0 && decision.command.kind == RVS_SchedulerCommand_Null);
+  rvs_scheduler_decision_release(&decision);
   scratch_end(scratch);
   return result == RVS_Result_StaleState ? RVS_Result_Ok : result;
 }

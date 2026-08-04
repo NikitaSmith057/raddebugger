@@ -239,6 +239,44 @@ rvs_entity_live_process_for_program_locked(RVS_EntityStore *store, RVS_ProgramID
   return rvs_entity_live_process_for_program_node_locked(&store->root, id, snapshot_out);
 }
 
+internal U64
+rvs_entity_live_process_count_node_locked(RVS_Entity *node)
+{
+  U64 count = 0;
+  for (RVS_Entity *entity = node->first_child; entity; entity = entity->next) {
+    if (entity->kind == RVS_EntityKind_Process && !(CastFromMember(RVS_Process, entity, entity))->snapshot.is_retired) {
+      count += 1;
+    }
+    count += rvs_entity_live_process_count_node_locked(entity);
+  }
+  return count;
+}
+
+internal void
+rvs_entity_copy_live_processes_node_locked(RVS_Entity *node, RVS_ProcessSnapshot *snapshots, U64 *index)
+{
+  for (RVS_Entity *entity = node->first_child; entity; entity = entity->next) {
+    if (entity->kind == RVS_EntityKind_Process) {
+      RVS_ProcessSnapshot snapshot = (CastFromMember(RVS_Process, entity, entity))->snapshot;
+      if (!snapshot.is_retired) { snapshots[(*index)++] = snapshot; }
+    }
+    rvs_entity_copy_live_processes_node_locked(entity, snapshots, index);
+  }
+}
+
+internal void
+rvs_entity_copy_live_processes_locked(RVS_EntityStore *store, Arena *arena, RVS_ProcessSnapshot **snapshots_out,
+                                      U64 *snapshots_count_out)
+{
+  U64 count = rvs_entity_live_process_count_node_locked(&store->root);
+  RVS_ProcessSnapshot *snapshots = count ? push_array(arena, RVS_ProcessSnapshot, count) : 0;
+  U64 index = 0;
+  rvs_entity_copy_live_processes_node_locked(&store->root, snapshots, &index);
+  AssertAlways(index == count);
+  *snapshots_out = snapshots;
+  *snapshots_count_out = count;
+}
+
 internal B32
 rvs_entity_program_snapshot_locked(RVS_EntityStore *store, RVS_ProgramID id, RVS_ProgramSnapshot *snapshot_out)
 {

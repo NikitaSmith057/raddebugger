@@ -27,6 +27,8 @@ typedef enum
 typedef enum
 {
   RVS_SchedulerCommand_Null,
+  RVS_SchedulerCommand_LaunchExecution,
+  RVS_SchedulerCommand_RunExecution,
   RVS_SchedulerCommand_InterruptExecution,
   RVS_SchedulerCommand_ResumeTargetSubset,
   RVS_SchedulerCommand_PumpLaunch,
@@ -261,6 +263,17 @@ typedef struct
   RVS_ScheduledOperation   *operation;
   union {
     struct {
+      ProcessLaunchParams params;
+    } launch_execution;
+    struct {
+      RVS_ProgramID    *targets;
+      U64               targets_count;
+      DMN_Handle       *processes;
+      U64               processes_count;
+      DMN_TrapChunkList traps;
+      RVS_Result        prepare_result;
+    } run_execution;
+    struct {
       // GlobalWithResume interruption covers the complete active execution lease, not only the selected subset.
       RVS_MessageID execution_request_id;
     } interrupt_execution;
@@ -268,6 +281,10 @@ typedef struct
       RVS_ProgramID *targets;
       U64            targets_count;
       RVS_MessageID  execution_request_id;
+      DMN_Handle       *processes;
+      U64               processes_count;
+      DMN_TrapChunkList traps;
+      RVS_Result        prepare_result;
     } resume_target_subset;
     struct {
       U32        pid;
@@ -493,6 +510,8 @@ internal void                    rvs_scheduler_operation_release                
 internal void                    rvs_scheduler_operation_remove_locked          (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation);
 internal RVS_ScheduledOperation *rvs_scheduler_operation_from_request_id_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
 internal void                    rvs_scheduler_prepare_reply_locked             (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation, RVS_EngineReply *reply);
+internal void                    rvs_scheduler_prepare_decision_locked          (RVS_Scheduler *scheduler, RVS_SchedulerDecision *decision,
+                                                                                   RVS_ProcessSnapshot *processes, U64 processes_count, Arena *arena);
 internal RVS_Result              rvs_scheduler_register_operation_locked        (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_SchedulerKey key, RVS_ScheduledOperation *operation);
 internal RVS_ScheduledOperation *rvs_scheduler_unregister_operation_locked      (RVS_Scheduler *scheduler, RVS_SchedulerKey key, RVS_ScheduledOperation *expected_operation);
 

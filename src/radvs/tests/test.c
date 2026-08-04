@@ -1820,25 +1820,19 @@ entry_point(CmdLine *cmdline)
                                                                      reply.launch.program_id, 0x12345678);
   RVS_PlanID run_to_plan_id = run_to_plan->header.id;
   AssertAlways(run_to_plan->header.parent == run_to_root_id && run_to_operation->active_plan_id == run_to_plan_id);
-  Temp run_to_scratch = scratch_begin(0, 0);
-  DMN_TrapChunkList run_to_traps = {0};
-  AssertAlways(rvs_engine_collect_operation_traps_locked(run_to_scratch.arena, engine, run_to_operation,
-                                                         &reply.launch.program_id, 1, &run_to_traps));
   RVS_TargetControl *run_to_program = rvs_scheduler_target_from_id_locked(&session->scheduler, reply.launch.program_id);
   RVS_ProcessSnapshot run_to_process = {0};
   AssertAlways(rvs_entity_live_process_for_program_locked(&session->entities, run_to_program->id, &run_to_process));
-  AssertAlways(run_to_traps.trap_count == 1 && run_to_traps.first->v[0].vaddr == 0x12345678 &&
-               run_to_traps.first->v[0].id == run_to_plan_id && run_to_traps.first->v[0].flags == 0 &&
-                 dmn_handle_match(run_to_traps.first->v[0].process,
-                                   rvs_process_id_handle(run_to_process.process)));
-  DMN_TrapChunkList excluded_run_to_traps = {0};
-  AssertAlways(rvs_engine_collect_operation_traps_locked(run_to_scratch.arena, engine, run_to_operation,
-                                                         0, 0, &excluded_run_to_traps));
-  AssertAlways(excluded_run_to_traps.trap_count == 0);
+  Temp run_to_scratch = scratch_begin(0, 0);
+  RVS_ProcessSnapshot *run_to_processes = 0;
+  U64 run_to_processes_count = 0;
+  rvs_entity_copy_live_processes_locked(&session->entities, run_to_scratch.arena,
+                                        &run_to_processes, &run_to_processes_count);
   RVS_ProgramID resume_run_to_target = reply.launch.program_id;
   RVS_SchedulerDecision run_to_resume_source = {
     .command = {
       .kind = RVS_SchedulerCommand_ResumeTargetSubset,
+      .operation = run_to_operation,
       .resume_target_subset = {
         .targets = &resume_run_to_target,
         .targets_count = 1,
@@ -1846,10 +1840,19 @@ entry_point(CmdLine *cmdline)
       },
     },
   };
-  RVS_EnginePreparedDecision run_to_prepared = {0};
-  rvs_engine_prepare_scheduler_decision_locked(engine, &run_to_resume_source, run_to_scratch.arena, &run_to_prepared);
-  AssertAlways(run_to_prepared.traps.trap_count == 1 &&
-               run_to_prepared.traps.first->v[0].id == run_to_plan_id);
+  rvs_scheduler_prepare_decision_locked(&session->scheduler, &run_to_resume_source,
+                                        run_to_processes, run_to_processes_count, run_to_scratch.arena);
+  AssertAlways(run_to_resume_source.command.resume_target_subset.prepare_result == RVS_Result_Ok &&
+               run_to_resume_source.command.resume_target_subset.traps.trap_count == 1 &&
+               run_to_resume_source.command.resume_target_subset.traps.first->v[0].vaddr == 0x12345678 &&
+               run_to_resume_source.command.resume_target_subset.traps.first->v[0].id == run_to_plan_id &&
+               run_to_resume_source.command.resume_target_subset.traps.first->v[0].flags == 0 &&
+               dmn_handle_match(run_to_resume_source.command.resume_target_subset.traps.first->v[0].process,
+                                rvs_process_id_handle(run_to_process.process)));
+  run_to_resume_source.command.resume_target_subset.targets_count = 0;
+  rvs_scheduler_prepare_decision_locked(&session->scheduler, &run_to_resume_source,
+                                        run_to_processes, run_to_processes_count, run_to_scratch.arena);
+  AssertAlways(run_to_resume_source.command.resume_target_subset.traps.trap_count == 0);
   scratch_end(run_to_scratch);
   rvs_scheduler_operation_remove_locked(&session->scheduler, run_to_operation);
   AssertAlways(rvs_scheduler_plan_from_id_locked(&session->scheduler, run_to_root_id) == 0 &&

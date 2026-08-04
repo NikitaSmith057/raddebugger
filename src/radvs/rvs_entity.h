@@ -92,6 +92,8 @@ internal RVS_Thread  *rvs_entity_thread_create_locked  (RVS_EntityStore *store, 
 internal void         rvs_entity_thread_exit_locked    (RVS_EntityStore *store, RVS_ThreadID id);
 internal void         rvs_entity_program_ack_destroyed_locked(RVS_EntityStore *store, RVS_ProgramID id);
 internal B32          rvs_entity_live_process_for_program_locked(RVS_EntityStore *store, RVS_ProgramID id, RVS_ProcessSnapshot *snapshot_out);
+internal void         rvs_entity_copy_live_processes_locked    (RVS_EntityStore *store, Arena *arena, RVS_ProcessSnapshot **snapshots_out,
+                                                                 U64 *snapshots_count_out);
 internal B32          rvs_entity_program_snapshot_locked(RVS_EntityStore *store, RVS_ProgramID id, RVS_ProgramSnapshot *snapshot_out);
 
 internal RVS_Result rvs_entity_copy_programs(RVS_EntityStore *store, Arena *arena,
