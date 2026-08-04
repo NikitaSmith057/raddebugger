@@ -224,6 +224,12 @@ str8_cstring_capped(void *cstr, void *cap)
   return str8(cstr, size);
 }
 
+internal String8
+str8_cstring_cappeds(void *cstr, U64 size)
+{
+  return str8_cstring_capped(cstr, (char*)cstr + size);
+}
+
 internal String16
 str16_cstring_capped(void *cstr, void *cap)
 {

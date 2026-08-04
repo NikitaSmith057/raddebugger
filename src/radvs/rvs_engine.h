@@ -85,7 +85,7 @@ typedef DMN_Event RVS_Event;
 // Engine API
 
 RVS_Result rvs_engine_init(RVS_Engine **engine_out);
-void       rvs_engine_shutdown(RVS_Engine *engine);
+RVS_Result rvs_engine_shutdown(RVS_Engine *engine);
 
 // The singleton-backed DEMON implementation supports one active session per engine.
 RVS_Result rvs_engine_create_session(RVS_Engine *engine, RVS_Session **session_out);

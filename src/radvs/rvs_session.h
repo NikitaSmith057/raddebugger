@@ -9,21 +9,28 @@
 
 typedef struct RVS_Program RVS_Program;
 
+#define RVS_PROGRAM_LIFECYCLE_XLIST \
+  X(Live) \
+  X(Removed)
+
 typedef enum
 {
-  RVS_ProgramLifecycle_Live,
-  RVS_ProgramLifecycle_Removed,
+#define X(id) RVS_ProgramLifecycle_##id,
+  RVS_PROGRAM_LIFECYCLE_XLIST
+#undef X
 } RVS_ProgramLifecycle;
 
 struct RVS_Program
 {
-  RVS_Program   *next;
-  Arena         *arena;
-  RVS_ProgramID  id;
-  U32            pid;
-  DMN_Handle     process;
-  RVS_ProgramLifecycle lifecycle;
-  U32            exit_code;
+  RVS_Program          *next;
+  Arena                *arena;
+  RVS_ProgramID         id;
+  U32                   pid;
+  DMN_Handle            process;
+  RVS_ProgramLifecycle  lifecycle;
+  U32                   exit_code;
+  String8               exe_path;
+  ProcessLaunchParams   exe_params;
 };
 
 struct RVS_Session
@@ -50,3 +57,18 @@ internal void         rvs_session_program_retire_locked(RVS_Session *session, RV
 internal B32          rvs_session_programs_to_processes_locked(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, DMN_Handle *processes_out);
 internal RVS_Result   rvs_session_push_event(RVS_Session *session, RVS_Event *event);
 internal void         rvs_session_close_events(RVS_Session *session);
+
+////////////////////////////////
+// Enum
+
+internal String8
+rvs_string_from_live_lifecycle(RVS_ProgramLifecycle v)
+{
+  switch (v) {
+#define X(id) case RVS_ProgramLifecycle_##id: return str8_lit(Stringify(id));
+RVS_PROGRAM_LIFECYCLE_XLIST
+#undef X
+  }
+  return str8_zero();
+}
+

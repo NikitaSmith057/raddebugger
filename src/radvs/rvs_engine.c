@@ -1099,13 +1099,19 @@ rvs_engine_init(RVS_Engine **engine_out)
 {
   ProfBeginFunction();
   RVS_Result result = RVS_Result_Error;
-  static RVS_Engine engine = {0};
+
+  MemoryZeroStruct(engine_out);
+
   if (engine_out == 0) {
     goto exit;
   }
+
+  static RVS_Engine engine = {0};
+
   if (ins_atomic_u32_eval_cond_assign(&engine.state, RVS_ThreadState_Initing, RVS_ThreadState_Null) != RVS_ThreadState_Null) {
     goto exit;
   }
+
 
   engine.arena              = arena_alloc(.name = "Engine");
   engine.inbox_queue        = rvs_queue_alloc(sizeof(RVS_EngineMessage), AlignOf(RVS_EngineMessage));
@@ -1140,10 +1146,15 @@ RVS_Result
 rvs_engine_create_session(RVS_Engine *engine, RVS_Session **session_out)
 {
   RVS_Result result = RVS_Result_Error;
+
+  MemoryZeroStruct(session_out);
+
   if (session_out) { *session_out = 0; }
   if (engine == 0 || session_out == 0) {
     return result;
   }
+
+
   rvs_control_mutex_take(engine->control);
   if (engine->control->is_shutdown || ins_atomic_u32_eval(&engine->state) != RVS_ThreadState_Live) {
     result = RVS_Result_EngineStopped;
@@ -1158,20 +1169,26 @@ rvs_engine_create_session(RVS_Engine *engine, RVS_Session **session_out)
   return result;
 }
 
-void
+RVS_Result
 rvs_engine_shutdown(RVS_Engine *engine)
 {
   ProfBeginFunction();
+
+  RVS_Result result = RVS_Result_Ok;
+
   if (ins_atomic_u32_eval_cond_assign(&engine->state, RVS_ThreadState_Terminating, RVS_ThreadState_Live) != RVS_ThreadState_Live) {
+    result = RVS_Result_EngineStopped;
     goto exit;
   }
 
   rvs_control_mutex_take(engine->control);
   engine->control->is_shutdown = 1;
+
 #if RVS_ENGINE_TESTING
   ins_atomic_u32_eval_assign(&engine->test_hold_before_dispatch, 0);
   ins_atomic_u32_eval_assign(&engine->test_hold_after_dispatch_prepare, 0);
 #endif
+
   RVS_Session *session = engine->session;
   rvs_control_mutex_drop(engine->control);
   if (session) { rvs_session_close_events(session); }
@@ -1214,6 +1231,7 @@ rvs_engine_shutdown(RVS_Engine *engine)
 
   exit:;
   ProfEnd();
+  return result;
 }
 
 ////////////////////////////////

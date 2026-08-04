@@ -184,6 +184,7 @@ internal String8  str8_cstring(char *c);
 internal String16 str16_cstring(U16 *c);
 internal String32 str32_cstring(U32 *c);
 internal String8  str8_cstring_capped(void *cstr, void *cap);
+internal String8  str8_cstring_cappeds(void *cstr, U64 size);
 internal String16 str16_cstring_capped(void *cstr, void *cap);
 
 ////////////////////////////////

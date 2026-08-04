@@ -1329,11 +1329,28 @@ dmn_ctrl_launch(DMN_CtrlCtx *ctx, ProcessLaunchParams *params)
     // wait for seize
     if(LNX_RETRY_ON_EINTR(raise(SIGSTOP)) < 0) { goto child_exit; }
     
-    // change work directory to tracee
-    if(LNX_RETRY_ON_EINTR(chdir(work_dir_path)) < 0) { goto child_exit; }
+    // An empty path inherits the debugger's current working directory.
+    if(params->path.size != 0 && LNX_RETRY_ON_EINTR(chdir(work_dir_path)) < 0) { goto child_exit; }
     
-    // replace process with target program
-    if(LNX_RETRY_ON_EINTR(execve(argv[0], argv, envp)) < 0) { goto child_exit; }
+    // paths execute directly; bare names first check the working directory,
+    // then resolve through PATH, matching the Windows launch behavior
+    String8 exe_path = params->cmd_line.first->string;
+    char   *exe      = (char*)exe_path.str;
+    if(str8_find_needle(exe_path, 0, str8_lit("/"), 0) < exe_path.size)
+    {
+      if(LNX_RETRY_ON_EINTR(execve(exe, argv, envp)) < 0) { goto child_exit; }
+    }
+    else
+    {
+      String8 local_exe = str8f(scratch.arena, "./%S", exe_path);
+
+      LNX_RETRY_ON_EINTR(execve((char*)local_exe.str, argv, envp));
+
+      if (errno == ENOENT || errno == ENOTDIR)
+      {
+        LNX_RETRY_ON_EINTR(execvpe(exe, argv, envp));
+      }
+    }
     
     child_exit:;
     exit(0);

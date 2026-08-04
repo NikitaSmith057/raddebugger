@@ -168,7 +168,7 @@ if "%mule_peb_trample%"=="1" (
 if "%radvs_radvs_first_version%"=="1" set didbuild=1 && %compile% -DBUILD_DLL_INTERFACE=1 ..\src\radvs\radvs-first-version\radvs_bridge_main.c %link_dll% %out%RadDbg.dll || exit /b 1
 if "%radvs_cli%"=="1"                 set didbuild=1 && %compile% -DNO_WIN32_RIO=1 ..\src\radvs\radvs_cli.c               %compile_link% %out%radvs_cli.exe || exit /b 1
 if "%rvs_dll%"=="1"                       set didbuild=1 && %compile% ..\src\radvs\rvs_main.c %link_dll% %out%RadVs.dll || exit /b 1
-if "%rvs_cli%"=="1"                       set didbuild=1 && %compile% ..\src\radvs\rvs_cli.c %compile_link% %out%rci.exe || exit /b 1
+if "%rvs_cli%"=="1"                       set didbuild=1 && %compile% ..\src\radvs\rvs_cli.c %compile_link% %out%rvs_cli.exe || exit /b 1
 if "%rvs_test%"=="1"                      set didbuild=1 && %compile% ..\src\radvs\tests\test.c %compile_link% %out%rvs_test.exe || exit /b 1
 popd
 
