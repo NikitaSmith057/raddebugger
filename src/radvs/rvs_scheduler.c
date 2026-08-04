@@ -1789,165 +1789,191 @@ rvs_scheduler_apply_locked(RVS_Scheduler         *scheduler,
   case RVS_SchedulerEvent_DemonEventBatch: {
     RVS_ScheduledOperation *owned_stop_before = scheduler->stop_transaction.owner;
     U64 owned_stable_generation_before = scheduler->stop_transaction.stable_stop_generation;
-    U64 batch_event_count = 0;
-    for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) { batch_event_count += 1; }
-    if (event.demon_events.dispositions_count < batch_event_count ||
-        (event.demon_events.dispositions_count != 0 && event.demon_events.dispositions == 0)) {
-      rvs_scheduler_decision_reject(decision_out, RVS_Result_InvalidArgument);
-      break;
-    }
-    RVS_ScheduledOperation *launch = 0;
-    if (event.demon_events.source == RVS_SchedulerEventBatchSource_PumpLaunch) {
-      launch = rvs_scheduler_operation_from_request_id_locked(scheduler, event.demon_events.command.request_id);
-      B32 phase_matches = launch && launch->key.op == RVS_SchedulerOp_Launch &&
-                          launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess;
-      if (event.demon_events.request_id != event.demon_events.command.request_id ||
-          launch == 0 || !rvs_scheduler_consume_command_locked(scheduler, launch, event.demon_events.command,
-                                                                RVS_SchedulerCommand_PumpLaunch, phase_matches)) {
-        for EachIndex(disposition_idx, event.demon_events.dispositions_count) {
-          event.demon_events.dispositions[disposition_idx] = RVS_SchedulerEventDisposition_Suppress;
-        }
-        rvs_scheduler_decision_ignore_stale(decision_out);
+    // Validate disposition storage before consuming a command token.
+    {
+      U64 batch_event_count = 0;
+      for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) { batch_event_count += 1; }
+      if (event.demon_events.dispositions_count < batch_event_count ||
+          (event.demon_events.dispositions_count != 0 && event.demon_events.dispositions == 0)) {
+        rvs_scheduler_decision_reject(decision_out, RVS_Result_InvalidArgument);
         break;
       }
     }
 
-    B32 accepts_stop_events = 0;
-    if (event.demon_events.source == RVS_SchedulerEventBatchSource_Execution &&
-        scheduler->phase == RVS_SchedulerPhase_Running &&
-        scheduler->run_intent.state == RVS_RunIntentState_Active &&
-        scheduler->active_execution_request_id == event.demon_events.request_id &&
-        scheduler->stop_transaction.owner == 0) {
-      scheduler->stop_transaction = (RVS_StopTransaction){
-        .execution_request_id = event.demon_events.request_id,
-        .phase = RVS_ControlTransactionPhase_CollectingBatch,
-      };
-      accepts_stop_events = 1;
-    } else if (event.demon_events.source == RVS_SchedulerEventBatchSource_Execution &&
-               scheduler->phase == RVS_SchedulerPhase_Running &&
-               scheduler->stop_transaction.owner != 0 &&
-               (scheduler->stop_transaction.phase == RVS_ControlTransactionPhase_WaitingForInterrupt ||
-                scheduler->stop_transaction.phase == RVS_ControlTransactionPhase_CollectingBatch) &&
-               scheduler->stop_transaction.execution_request_id == event.demon_events.request_id) {
-      scheduler->stop_transaction.phase = RVS_ControlTransactionPhase_CollectingBatch;
-      accepts_stop_events = 1;
+    RVS_ScheduledOperation *launch = 0;
+    // Authenticate a launch pump batch against its exact pending command.
+    {
+      if (event.demon_events.source == RVS_SchedulerEventBatchSource_PumpLaunch) {
+        launch = rvs_scheduler_operation_from_request_id_locked(scheduler, event.demon_events.command.request_id);
+        B32 phase_matches = launch && launch->key.op == RVS_SchedulerOp_Launch &&
+                            launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess;
+        if (event.demon_events.request_id != event.demon_events.command.request_id ||
+            launch == 0 || !rvs_scheduler_consume_command_locked(scheduler, launch, event.demon_events.command,
+                                                                  RVS_SchedulerCommand_PumpLaunch, phase_matches)) {
+          for EachIndex(disposition_idx, event.demon_events.dispositions_count) {
+            event.demon_events.dispositions[disposition_idx] = RVS_SchedulerEventDisposition_Suppress;
+          }
+          rvs_scheduler_decision_ignore_stale(decision_out);
+          break;
+        }
+      }
     }
+
+    B32 accepts_stop_events = 0;
+    // Open or extend the execution stop collection for this batch.
+    {
+      if (event.demon_events.source == RVS_SchedulerEventBatchSource_Execution &&
+          scheduler->phase == RVS_SchedulerPhase_Running &&
+          scheduler->run_intent.state == RVS_RunIntentState_Active &&
+          scheduler->active_execution_request_id == event.demon_events.request_id &&
+          scheduler->stop_transaction.owner == 0) {
+        scheduler->stop_transaction = (RVS_StopTransaction){
+          .execution_request_id = event.demon_events.request_id,
+          .phase = RVS_ControlTransactionPhase_CollectingBatch,
+        };
+        accepts_stop_events = 1;
+      } else if (event.demon_events.source == RVS_SchedulerEventBatchSource_Execution &&
+                 scheduler->phase == RVS_SchedulerPhase_Running &&
+                 scheduler->stop_transaction.owner != 0 &&
+                 (scheduler->stop_transaction.phase == RVS_ControlTransactionPhase_WaitingForInterrupt ||
+                  scheduler->stop_transaction.phase == RVS_ControlTransactionPhase_CollectingBatch) &&
+                 scheduler->stop_transaction.execution_request_id == event.demon_events.request_id) {
+        scheduler->stop_transaction.phase = RVS_ControlTransactionPhase_CollectingBatch;
+        accepts_stop_events = 1;
+      }
+    }
+
     DMN_Event *launch_created = 0;
     U64 launch_created_index = 0;
     B32 launch_error = 0;
     B32 launch_exited = 0;
-    if (launch && launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess) {
-      U64 candidate_index = 0;
-      for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) {
-        DMN_Event *demon_event = &event_node->v;
-        if (demon_event->kind == DMN_EventKind_CreateProcess && demon_event->system_process_id == launch->launch_pid) {
-          launch_created = demon_event;
-          launch_created_index = candidate_index;
-          break;
+    // Correlate launch creation before events mutate thread and target ledgers.
+    {
+      if (launch && launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess) {
+        U64 candidate_index = 0;
+        for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) {
+          DMN_Event *demon_event = &event_node->v;
+          if (demon_event->kind == DMN_EventKind_CreateProcess && demon_event->system_process_id == launch->launch_pid) {
+            launch_created = demon_event;
+            launch_created_index = candidate_index;
+            break;
+          }
+          candidate_index += 1;
         }
-        candidate_index += 1;
       }
     }
-    U64 event_index = 0;
-    for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) {
-      DMN_Event *demon_event = &event_node->v;
-      RVS_Program *entry = rvs_scheduler_program_from_id_locked(scheduler, demon_event->process);
-      if (demon_event->kind == DMN_EventKind_CreateThread) {
-        B32 is_launch_thread = launch_created && !launch_exited && dmn_handle_match(demon_event->process, launch_created->process);
-        if ((entry && entry->state != RVS_TargetState_Removed) || is_launch_thread) {
-          rvs_scheduler_thread_add_locked(scheduler, demon_event->process, demon_event->thread);
-        }
-      } else if (demon_event->kind == DMN_EventKind_ExitThread) {
-        RVS_ThreadLedgerEntry *thread = rvs_scheduler_thread_from_id_locked(scheduler, demon_event->thread);
-        if (thread) {
-          thread->is_removed = 1;
-          if (dmn_handle_match(scheduler->selected_thread, thread->thread)) {
-            scheduler->selected_target = dmn_handle_zero();
-            scheduler->selected_thread = dmn_handle_zero();
+    // Apply raw events to scheduler state and decide which events to suppress.
+    {
+      U64 event_index = 0;
+      for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) {
+        DMN_Event *demon_event = &event_node->v;
+        RVS_Program *entry = rvs_scheduler_program_from_id_locked(scheduler, demon_event->process);
+        if (demon_event->kind == DMN_EventKind_CreateThread) {
+          B32 is_launch_thread = launch_created && !launch_exited && dmn_handle_match(demon_event->process, launch_created->process);
+          if ((entry && entry->state != RVS_TargetState_Removed) || is_launch_thread) {
+            rvs_scheduler_thread_add_locked(scheduler, demon_event->process, demon_event->thread);
           }
-        }
-      } else if (demon_event->kind == DMN_EventKind_ExitProcess) {
-        if (accepts_stop_events) {
-          rvs_scheduler_note_primary_stop_locked(scheduler, RVS_StopCause_ProcessExit, demon_event->process);
-        }
-        if (launch_created && dmn_handle_match(demon_event->process, launch_created->process)) {
-          launch_exited = 1;
-          for EachNode(thread, RVS_ThreadLedgerEntry, scheduler->thread_first) {
-            if (dmn_handle_match(thread->target, launch_created->process)) { thread->is_removed = 1; }
+        } else if (demon_event->kind == DMN_EventKind_ExitThread) {
+          RVS_ThreadLedgerEntry *thread = rvs_scheduler_thread_from_id_locked(scheduler, demon_event->thread);
+          if (thread) {
+            thread->is_removed = 1;
+            if (dmn_handle_match(scheduler->selected_thread, thread->thread)) {
+              scheduler->selected_target = dmn_handle_zero();
+              scheduler->selected_thread = dmn_handle_zero();
+            }
           }
-          if (launch_created_index < event.demon_events.dispositions_count) {
-            event.demon_events.dispositions[launch_created_index] = RVS_SchedulerEventDisposition_Suppress;
+        } else if (demon_event->kind == DMN_EventKind_ExitProcess) {
+          if (accepts_stop_events) {
+            rvs_scheduler_note_primary_stop_locked(scheduler, RVS_StopCause_ProcessExit, demon_event->process);
           }
-          if (event_index < event.demon_events.dispositions_count) {
-            event.demon_events.dispositions[event_index] = RVS_SchedulerEventDisposition_Suppress;
+          if (launch_created && dmn_handle_match(demon_event->process, launch_created->process)) {
+            launch_exited = 1;
+            for EachNode(thread, RVS_ThreadLedgerEntry, scheduler->thread_first) {
+              if (dmn_handle_match(thread->target, launch_created->process)) { thread->is_removed = 1; }
+            }
+            if (launch_created_index < event.demon_events.dispositions_count) {
+              event.demon_events.dispositions[launch_created_index] = RVS_SchedulerEventDisposition_Suppress;
+            }
+            if (event_index < event.demon_events.dispositions_count) {
+              event.demon_events.dispositions[event_index] = RVS_SchedulerEventDisposition_Suppress;
+            }
+          } else if (entry) {
+            rvs_scheduler_retire_target_locked(scheduler, entry, event.demon_events.request_id, demon_event);
           }
-        } else if (entry) {
-          rvs_scheduler_retire_target_locked(scheduler, entry, event.demon_events.request_id, demon_event);
-        }
-      } else if (demon_event->kind == DMN_EventKind_Error) {
-        if (launch && launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess &&
-            (demon_event->error_kind == DMN_ErrorKind_NotAttached || demon_event->system_process_id == launch->launch_pid)) {
-          launch_error = 1;
-          if (demon_event->system_process_id == launch->launch_pid && event_index < event.demon_events.dispositions_count) {
-            event.demon_events.dispositions[event_index] = RVS_SchedulerEventDisposition_Suppress;
+        } else if (demon_event->kind == DMN_EventKind_Error) {
+          if (launch && launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess &&
+              (demon_event->error_kind == DMN_ErrorKind_NotAttached || demon_event->system_process_id == launch->launch_pid)) {
+            launch_error = 1;
+            if (demon_event->system_process_id == launch->launch_pid && event_index < event.demon_events.dispositions_count) {
+              event.demon_events.dispositions[event_index] = RVS_SchedulerEventDisposition_Suppress;
+            }
           }
-        }
-      } else if (demon_event->kind == DMN_EventKind_Halt) {
-        B32 selected = 0;
-        if (scheduler->stop_transaction.owner) {
-          for EachIndex(target_idx, scheduler->stop_transaction.owner->targets_count) {
-            RVS_TargetSnapshot *target = &scheduler->stop_transaction.owner->targets[target_idx];
-            if (dmn_handle_match(target->target, demon_event->process)) {
-              selected = target->is_selected;
-              break;
+        } else if (demon_event->kind == DMN_EventKind_Halt) {
+          B32 selected = 0;
+          if (scheduler->stop_transaction.owner) {
+            for EachIndex(target_idx, scheduler->stop_transaction.owner->targets_count) {
+              RVS_TargetSnapshot *target = &scheduler->stop_transaction.owner->targets[target_idx];
+              if (dmn_handle_match(target->target, demon_event->process)) {
+                selected = target->is_selected;
+                break;
+              }
+            }
+          }
+          if (accepts_stop_events) {
+            rvs_scheduler_note_primary_stop_locked(scheduler, selected ? RVS_StopCause_UserInterrupt : RVS_StopCause_Incidental, demon_event->process);
+            if (!selected && event_index < event.demon_events.dispositions_count) {
+              event.demon_events.dispositions[event_index] = RVS_SchedulerEventDisposition_Suppress;
+            }
+          }
+          if (entry && entry->execution_owner != 0) {
+            rvs_scheduler_observe_target_locked(scheduler, (RVS_SchedulerEvent){
+              .observed = { .request_id = event.demon_events.request_id, .target = demon_event->process },
+            }, DMN_EventKind_Halt);
+          }
+        } else if (demon_event->kind == DMN_EventKind_Exception || demon_event->kind == DMN_EventKind_Breakpoint) {
+          if (accepts_stop_events) {
+            RVS_StopCause cause = demon_event->kind == DMN_EventKind_Exception ? RVS_StopCause_Exception : RVS_StopCause_Breakpoint;
+            rvs_scheduler_note_primary_stop_locked(scheduler, cause, demon_event->process);
+            if (cause == RVS_StopCause_Exception && scheduler->run_intent.state == RVS_RunIntentState_Active) {
+              scheduler->run_intent.state = RVS_RunIntentState_Cancelled;
             }
           }
         }
-        if (accepts_stop_events) {
-          rvs_scheduler_note_primary_stop_locked(scheduler, selected ? RVS_StopCause_UserInterrupt : RVS_StopCause_Incidental, demon_event->process);
-          if (!selected && event_index < event.demon_events.dispositions_count) {
-            event.demon_events.dispositions[event_index] = RVS_SchedulerEventDisposition_Suppress;
-          }
-        }
-        if (entry && entry->execution_owner != 0) {
-          rvs_scheduler_observe_target_locked(scheduler, (RVS_SchedulerEvent){
-            .observed = { .request_id = event.demon_events.request_id, .target = demon_event->process },
-          }, DMN_EventKind_Halt);
-        }
-      } else if (demon_event->kind == DMN_EventKind_Exception || demon_event->kind == DMN_EventKind_Breakpoint) {
-        if (accepts_stop_events) {
-          RVS_StopCause cause = demon_event->kind == DMN_EventKind_Exception ? RVS_StopCause_Exception : RVS_StopCause_Breakpoint;
-          rvs_scheduler_note_primary_stop_locked(scheduler, cause, demon_event->process);
-          if (cause == RVS_StopCause_Exception && scheduler->run_intent.state == RVS_RunIntentState_Active) {
-            scheduler->run_intent.state = RVS_RunIntentState_Cancelled;
-          }
-        }
-      }
-      event_index += 1;
-    }
-    event_index = 0;
-    for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) {
-      B32 suppressed = event_index < event.demon_events.dispositions_count &&
-                       event.demon_events.dispositions[event_index] == RVS_SchedulerEventDisposition_Suppress;
-      if (!suppressed) {
-        RVS_SchedulerEmission *emission = rvs_scheduler_emit_locked(scheduler, decision_out, RVS_SchedulerEmission_PublishEvent, 0);
-        emission->event = event_node->v;
-      }
-      event_index += 1;
-    }
-    if (launch) {
-      if (launch_created && !launch_exited && !dmn_handle_match(launch_created->process, dmn_handle_zero())) {
-        launch->launch_phase = RVS_LaunchPhase_AwaitTargetRegistration;
-        launch->launch_process = launch_created->process;
-        RVS_SchedulerCommand *command = rvs_scheduler_set_command_locked(scheduler, decision_out, RVS_SchedulerCommand_PublishTarget, launch);
-        command->publish_target.pid = launch->launch_pid;
-        command->publish_target.process = launch_created->process;
-      } else if (launch_error || launch_exited || launch_created) {
-        rvs_scheduler_complete_operation_locked(scheduler, launch, RVS_Result_Error, decision_out);
-      } else if (launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess) {
-        rvs_scheduler_set_command_locked(scheduler, decision_out, RVS_SchedulerCommand_PumpLaunch, launch);
+        event_index += 1;
       }
     }
+
+    // Publish only after the full batch has updated state and dispositions.
+    {
+      U64 event_index = 0;
+      for EachNode(event_node, DMN_EventNode, event.demon_events.events.first) {
+        B32 suppressed = event_index < event.demon_events.dispositions_count &&
+                         event.demon_events.dispositions[event_index] == RVS_SchedulerEventDisposition_Suppress;
+        if (!suppressed) {
+          RVS_SchedulerEmission *emission = rvs_scheduler_emit_locked(scheduler, decision_out, RVS_SchedulerEmission_PublishEvent, 0);
+          emission->event = event_node->v;
+        }
+        event_index += 1;
+      }
+    }
+
+    // Resolve the launch after its correlated events have been applied and published.
+    {
+      if (launch) {
+        if (launch_created && !launch_exited && !dmn_handle_match(launch_created->process, dmn_handle_zero())) {
+          launch->launch_phase = RVS_LaunchPhase_AwaitTargetRegistration;
+          launch->launch_process = launch_created->process;
+          RVS_SchedulerCommand *command = rvs_scheduler_set_command_locked(scheduler, decision_out, RVS_SchedulerCommand_PublishTarget, launch);
+          command->publish_target.pid = launch->launch_pid;
+          command->publish_target.process = launch_created->process;
+        } else if (launch_error || launch_exited || launch_created) {
+          rvs_scheduler_complete_operation_locked(scheduler, launch, RVS_Result_Error, decision_out);
+        } else if (launch->launch_phase == RVS_LaunchPhase_AwaitCreateProcess) {
+          rvs_scheduler_set_command_locked(scheduler, decision_out, RVS_SchedulerCommand_PumpLaunch, launch);
+        }
+      }
+    }
+
     if (owned_stop_before && scheduler->stop_transaction.owner == owned_stop_before) {
       AssertAlways(scheduler->stop_transaction.stable_stop_generation == owned_stable_generation_before);
     }
@@ -1962,61 +1988,67 @@ rvs_scheduler_apply_locked(RVS_Scheduler         *scheduler,
     RVS_SchedulerCommandKind command_kind = event.command_outcome.command_kind;
     RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(scheduler, token.request_id);
     RVS_StopTransaction *stop = &scheduler->stop_transaction;
-    B32 phase_matches = 0;
-    if (operation) {
-      if (command_kind == RVS_SchedulerCommand_PumpLaunch) {
-        phase_matches = operation->key.op == RVS_SchedulerOp_Launch &&
-                        operation->launch_phase == RVS_LaunchPhase_AwaitCreateProcess;
-      } else if (command_kind == RVS_SchedulerCommand_PublishTarget) {
-        phase_matches = operation->key.op == RVS_SchedulerOp_Launch &&
-                        operation->launch_phase == RVS_LaunchPhase_AwaitTargetRegistration;
-      } else if (command_kind == RVS_SchedulerCommand_InterruptExecution) {
-        phase_matches = operation->key.op == RVS_SchedulerOp_Interrupt && stop->owner == operation &&
-                        stop->interrupt_token.request_id == token.request_id &&
-                        stop->interrupt_token.command_id == token.command_id &&
-                        (stop->phase == RVS_ControlTransactionPhase_WaitingForInterrupt ||
-                         stop->phase == RVS_ControlTransactionPhase_CollectingBatch) &&
-                        scheduler->phase == RVS_SchedulerPhase_Running &&
-                        scheduler->active_execution_request_id == stop->execution_request_id;
-      } else if (command_kind == RVS_SchedulerCommand_ResumeTargetSubset) {
-        phase_matches = operation->key.op == RVS_SchedulerOp_Interrupt &&
-                        stop->owner == operation &&
-                        stop->phase == RVS_ControlTransactionPhase_WaitingForResume &&
-                        scheduler->phase == RVS_SchedulerPhase_Running;
+    // Derive the command-specific phase predicate and consume the exact token.
+    {
+      B32 phase_matches = 0;
+      if (operation) {
+        if (command_kind == RVS_SchedulerCommand_PumpLaunch) {
+          phase_matches = operation->key.op == RVS_SchedulerOp_Launch &&
+                          operation->launch_phase == RVS_LaunchPhase_AwaitCreateProcess;
+        } else if (command_kind == RVS_SchedulerCommand_PublishTarget) {
+          phase_matches = operation->key.op == RVS_SchedulerOp_Launch &&
+                          operation->launch_phase == RVS_LaunchPhase_AwaitTargetRegistration;
+        } else if (command_kind == RVS_SchedulerCommand_InterruptExecution) {
+          phase_matches = operation->key.op == RVS_SchedulerOp_Interrupt && stop->owner == operation &&
+                          stop->interrupt_token.request_id == token.request_id &&
+                          stop->interrupt_token.command_id == token.command_id &&
+                          (stop->phase == RVS_ControlTransactionPhase_WaitingForInterrupt ||
+                           stop->phase == RVS_ControlTransactionPhase_CollectingBatch) &&
+                          scheduler->phase == RVS_SchedulerPhase_Running &&
+                          scheduler->active_execution_request_id == stop->execution_request_id;
+        } else if (command_kind == RVS_SchedulerCommand_ResumeTargetSubset) {
+          phase_matches = operation->key.op == RVS_SchedulerOp_Interrupt &&
+                          stop->owner == operation &&
+                          stop->phase == RVS_ControlTransactionPhase_WaitingForResume &&
+                          scheduler->phase == RVS_SchedulerPhase_Running;
+        }
       }
-    }
-    if (operation == 0 || !rvs_scheduler_consume_command_locked(scheduler, operation, token, command_kind, phase_matches)) {
-      rvs_scheduler_decision_ignore_stale(decision_out);
-      break;
+      if (operation == 0 || !rvs_scheduler_consume_command_locked(scheduler, operation, token, command_kind, phase_matches)) {
+        rvs_scheduler_decision_ignore_stale(decision_out);
+        break;
+      }
     }
 
-    if (event.command_outcome.result != RVS_Result_Null &&
-        event.command_outcome.result != RVS_Result_Ok &&
-        event.command_outcome.result != RVS_Result_Pending) {
-      rvs_scheduler_abort_operation_locked(scheduler, token.request_id, event.command_outcome.result, 0, decision_out);
-    } else if (command_kind == RVS_SchedulerCommand_PublishTarget &&
-               event.command_outcome.result == RVS_Result_Ok &&
-               operation->launch_pid == event.command_outcome.pid &&
-               dmn_handle_match(operation->launch_process, event.command_outcome.target) &&
-                rvs_scheduler_program_from_id_locked(scheduler, event.command_outcome.target) == 0) {
-      rvs_scheduler_program_add_locked(scheduler, event.command_outcome.target, event.command_outcome.pid);
-      RVS_SchedulerEmission *emission = rvs_scheduler_complete_operation_locked(scheduler, operation, RVS_Result_Ok, decision_out);
-      emission->reply.launch.program_id = event.command_outcome.target;
-      emission->reply.launch.pid = event.command_outcome.pid;
-    } else if (command_kind == RVS_SchedulerCommand_InterruptExecution &&
-               event.command_outcome.result == RVS_Result_Ok) {
-      rvs_scheduler_establish_stable_stop_locked(scheduler, operation, token, decision_out);
-    } else if (command_kind == RVS_SchedulerCommand_ResumeTargetSubset &&
-               event.command_outcome.result == RVS_Result_Ok) {
-      RVS_Result result = rvs_scheduler_finish_stop_resume_locked(scheduler, token.request_id);
-      if (result == RVS_Result_Error) {
-        AssertAlways(rvs_scheduler_settle_stop_transaction_locked(scheduler, token.request_id));
+    // Apply transport failures and command-specific acknowledgements.
+    {
+      if (event.command_outcome.result != RVS_Result_Null &&
+          event.command_outcome.result != RVS_Result_Ok &&
+          event.command_outcome.result != RVS_Result_Pending) {
+        rvs_scheduler_abort_operation_locked(scheduler, token.request_id, event.command_outcome.result, 0, decision_out);
+      } else if (command_kind == RVS_SchedulerCommand_PublishTarget &&
+                 event.command_outcome.result == RVS_Result_Ok &&
+                 operation->launch_pid == event.command_outcome.pid &&
+                 dmn_handle_match(operation->launch_process, event.command_outcome.target) &&
+                  rvs_scheduler_program_from_id_locked(scheduler, event.command_outcome.target) == 0) {
+        rvs_scheduler_program_add_locked(scheduler, event.command_outcome.target, event.command_outcome.pid);
+        RVS_SchedulerEmission *emission = rvs_scheduler_complete_operation_locked(scheduler, operation, RVS_Result_Ok, decision_out);
+        emission->reply.launch.program_id = event.command_outcome.target;
+        emission->reply.launch.pid = event.command_outcome.pid;
+      } else if (command_kind == RVS_SchedulerCommand_InterruptExecution &&
+                 event.command_outcome.result == RVS_Result_Ok) {
+        rvs_scheduler_establish_stable_stop_locked(scheduler, operation, token, decision_out);
+      } else if (command_kind == RVS_SchedulerCommand_ResumeTargetSubset &&
+                 event.command_outcome.result == RVS_Result_Ok) {
+        RVS_Result result = rvs_scheduler_finish_stop_resume_locked(scheduler, token.request_id);
+        if (result == RVS_Result_Error) {
+          AssertAlways(rvs_scheduler_settle_stop_transaction_locked(scheduler, token.request_id));
+        }
+        rvs_scheduler_complete_operation_locked(scheduler, operation, result, decision_out);
+        rvs_scheduler_retire_exhausted_suspended_locked(scheduler);
+      } else {
+        // The token was valid, but the payload was not. Fail the owning operation rather than leave it suspended.
+        rvs_scheduler_abort_operation_locked(scheduler, token.request_id, RVS_Result_Error, 0, decision_out);
       }
-      rvs_scheduler_complete_operation_locked(scheduler, operation, result, decision_out);
-      rvs_scheduler_retire_exhausted_suspended_locked(scheduler);
-    } else {
-      // The token was valid, but the payload was not. Fail the owning operation rather than leave it suspended.
-      rvs_scheduler_abort_operation_locked(scheduler, token.request_id, RVS_Result_Error, 0, decision_out);
     }
   } break;
 
@@ -2048,12 +2080,10 @@ rvs_scheduler_apply_locked(RVS_Scheduler         *scheduler,
   } break;
 
   case RVS_SchedulerEvent_Shutdown: {
-    for EachNode(operation, RVS_ScheduledOperation, scheduler->operation_first) {
-      MemoryZeroStruct(&operation->pending_command);
-    }
     MemoryZeroStruct(&scheduler->stop_transaction);
     for (RVS_ScheduledOperation *operation = scheduler->operation_first, *next = 0; operation; operation = next) {
       next = operation->next;
+      // Retiring or completing requires this operation's command to be clear.
       MemoryZeroStruct(&operation->pending_command);
       if (operation->request_completed) {
         rvs_scheduler_retire_operation_locked(scheduler, operation, RVS_ScheduledOperationState_Failed);
