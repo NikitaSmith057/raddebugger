@@ -1569,12 +1569,9 @@ rvs_request_control_release(RVS_RequestControl *owner)
   if (owner->registered) {
     Temp scratch = scratch_begin(0, 0);
     RVS_EnginePreparedDecision prepared = {0};
-    (void)rvs_control_reduce_scheduler_outcome(owner->session, (RVS_EngineSchedulerOutcome){
-      .kind = RVS_EngineSchedulerOutcomeKind_Event,
-      .event = {
-        .kind = RVS_SchedulerEvent_RequestControlReleased,
-        .request = { .request_id = owner->request_id },
-      },
+    (void)rvs_control_reduce_scheduler_event(owner->session, (RVS_SchedulerEvent){
+      .kind = RVS_SchedulerEvent_RequestControlReleased,
+      .request = { .request_id = owner->request_id },
     }, scratch.arena, 1, &prepared);
     AssertAlways(prepared.emission_first == 0 && prepared.command_kind == RVS_SchedulerCommand_Null);
     scratch_end(scratch);
@@ -1590,18 +1587,15 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
   if (owner == 0 || owner->request_id == 0 || owner->session == 0) { return RVS_Result_Error; }
   Temp scratch = scratch_begin(0, 0);
   RVS_EnginePreparedDecision prepared = {0};
-  RVS_Result result = rvs_control_reduce_scheduler_outcome(owner->session, (RVS_EngineSchedulerOutcome){
-    .kind = RVS_EngineSchedulerOutcomeKind_Event,
-    .event = (RVS_SchedulerEvent){
-      .kind = RVS_SchedulerEvent_PreDispatchCancelled,
-      .request = { .request_id = owner->request_id },
-    },
+  RVS_Result result = rvs_control_reduce_scheduler_event(owner->session, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_PreDispatchCancelled,
+    .request = { .request_id = owner->request_id },
   }, scratch.arena, 1, &prepared);
   if (prepared.emission_first && prepared.emission_first->kind == RVS_SchedulerEmission_CompleteRequest) {
     result = RVS_Result_Ok;
   }
-  RVS_EngineSchedulerOutcome outcome = rvs_engine_execute_prepared_decision(0, &prepared);
-  AssertAlways(outcome.kind == RVS_EngineSchedulerOutcomeKind_Null);
+  RVS_SchedulerEvent event = rvs_engine_execute_prepared_decision(0, &prepared);
+  AssertAlways(event.kind == RVS_SchedulerEvent_Null);
   scratch_end(scratch);
   return result;
 }

@@ -38,25 +38,9 @@ typedef enum
   RVS_EngineMessageType_Null,
   RVS_EngineMessageType_DispatchRequest,
   RVS_EngineMessageType_DemonReply,
-  RVS_EngineMessageType_SchedulerOutcome,
+  RVS_EngineMessageType_SchedulerEvent,
   RVS_EngineMessageType_Shutdown,
 } RVS_EngineMessageType;
-
-typedef enum
-{
-  RVS_EngineSchedulerOutcomeKind_Null,
-  RVS_EngineSchedulerOutcomeKind_Event,
-  RVS_EngineSchedulerOutcomeKind_PublishTarget,
-} RVS_EngineSchedulerOutcomeKind;
-
-typedef struct
-{
-  RVS_EngineSchedulerOutcomeKind kind;
-  RVS_SchedulerEvent             event;
-  RVS_SchedulerCommandToken      command;
-  U32                            pid;
-  DMN_Handle                     process;
-} RVS_EngineSchedulerOutcome;
 
 typedef struct RVS_EnginePreparedEmission RVS_EnginePreparedEmission;
 struct RVS_EnginePreparedEmission
@@ -92,12 +76,8 @@ typedef struct
       RVS_EngineCommand command;
       RVS_MessageID     request_id;
     };
-    struct {
-      RVS_Demon      *source;
-      RVS_DemonReply *reply;
-      ArenaNode      *arena_node;
-    } demon_reply;
-    RVS_EngineSchedulerOutcome scheduler_outcome;
+    RVS_DemonReply      demon_reply;
+    RVS_SchedulerEvent  scheduler_event;
   };
 } RVS_EngineMessage;
 
@@ -192,10 +172,6 @@ struct RVS_Engine
   RVS_Session       *session;
 
   RVS_Demon *demon;
-  Arena     *demon_reply_arena;
-  Mutex      demon_reply_mutex;
-  ArenaNode *demon_reply_arena_active_list;
-  ArenaNode *demon_reply_arena_free_list;
 
 #if RVS_ENGINE_TESTING
   U32 test_fail_command_enqueue;
@@ -215,10 +191,10 @@ struct RVS_Engine
 ////////////////////////////////
 // Internals
 
-internal RVS_Result rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOutcome outcome, Arena *scratch,
-                                                          B32 reject_if_shutdown, RVS_EnginePreparedDecision *prepared);
+internal RVS_Result rvs_control_reduce_scheduler_event(RVS_Session *session, RVS_SchedulerEvent event, Arena *scratch,
+                                                        B32 reject_if_shutdown, RVS_EnginePreparedDecision *prepared);
 
-internal RVS_EngineSchedulerOutcome rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecision *prepared);
+internal RVS_SchedulerEvent rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecision *prepared);
 
 internal B32 rvs_engine_collect_operation_traps_locked(Arena *arena, RVS_Engine *engine, RVS_ScheduledOperation *operation,
                                                        RVS_ProgramID *allowed_targets, U64 allowed_targets_count,
@@ -226,8 +202,6 @@ internal B32 rvs_engine_collect_operation_traps_locked(Arena *arena, RVS_Engine 
 
 
 internal void rvs_engine_drive_scheduler_event(RVS_Engine *engine, RVS_SchedulerEvent event);
-
-internal void rvs_engine_drive_scheduler_outcome(RVS_Engine *engine, RVS_EngineSchedulerOutcome outcome);
 
 internal RVS_Result rvs_engine_send_demon_message(RVS_Engine *engine, RVS_DemonMessage message);
 
@@ -288,8 +262,10 @@ rvs_engine_message_copy(Arena *arena, RVS_EngineMessage *dst, RVS_EngineMessage 
     rvs_engine_command_copy(arena, &dst->command, &src->command);
   } break;
   case RVS_EngineMessageType_DemonReply: {
+    rvs_demon_reply_copy(arena, &dst->demon_reply, &src->demon_reply);
   } break;
-  case RVS_EngineMessageType_SchedulerOutcome: {
+  case RVS_EngineMessageType_SchedulerEvent: {
+    AssertAlways(src->scheduler_event.kind == RVS_SchedulerEvent_CommandOutcome);
   } break;
   case RVS_EngineMessageType_Shutdown: {
   } break;
@@ -465,26 +441,6 @@ rvs_engine_complete_reply(RVS_Engine *engine, RVS_EngineReply reply)
 }
 
 internal void
-rvs_engine_apply_scheduler_outcome_locked(RVS_Engine *engine, RVS_EngineSchedulerOutcome outcome, RVS_SchedulerDecision *decision_out)
-{
-  if (outcome.kind == RVS_EngineSchedulerOutcomeKind_Event) {
-    rvs_engine_apply_scheduler_event_locked(engine, outcome.event, decision_out);
-  } else if (outcome.kind == RVS_EngineSchedulerOutcomeKind_PublishTarget) {
-    RVS_SchedulerEvent event = {
-      .kind = RVS_SchedulerEvent_CommandOutcome,
-      .command_outcome = {
-        .command_kind = RVS_SchedulerCommand_PublishTarget,
-        .command = outcome.command,
-        .result = RVS_Result_Ok,
-        .target = outcome.process,
-        .pid = outcome.pid,
-      },
-    };
-    rvs_engine_apply_scheduler_event_locked(engine, event, decision_out);
-  }
-}
-
-internal void
 rvs_engine_prepare_scheduler_decision_locked(RVS_Engine *engine, RVS_SchedulerDecision *decision, Arena *scratch, RVS_EnginePreparedDecision *prepared)
 {
   MemoryZeroStruct(prepared);
@@ -549,7 +505,7 @@ rvs_engine_prepare_scheduler_decision_locked(RVS_Engine *engine, RVS_SchedulerDe
   }
 }
 
-internal RVS_EngineSchedulerOutcome
+internal RVS_SchedulerEvent
 rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecision *prepared)
 {
   rvs_control_assert_unlocked();
@@ -569,7 +525,7 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
     }
   }
 
-  RVS_EngineSchedulerOutcome outcome = {0};
+  RVS_SchedulerEvent event = {0};
 #if RVS_ENGINE_TESTING
   if (engine && prepared->command_kind != RVS_SchedulerCommand_Null) {
     U32 command_sequence = ++engine->test_effect_sequence;
@@ -586,8 +542,7 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
       },
     });
     if (result != RVS_Result_Ok) {
-      outcome.kind = RVS_EngineSchedulerOutcomeKind_Event;
-      outcome.event = (RVS_SchedulerEvent){
+      event = (RVS_SchedulerEvent){
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
           .command_kind = prepared->command_kind,
@@ -612,8 +567,7 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
       });
     }
     if (result != RVS_Result_Ok) {
-      outcome.kind = RVS_EngineSchedulerOutcomeKind_Event;
-      outcome.event = (RVS_SchedulerEvent){
+      event = (RVS_SchedulerEvent){
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
           .command_kind = prepared->command_kind,
@@ -629,8 +583,7 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
       .pump = { .command_id = prepared->command_token.command_id },
     });
     if (result != RVS_Result_Ok) {
-      outcome.kind = RVS_EngineSchedulerOutcomeKind_Event;
-      outcome.event = (RVS_SchedulerEvent){
+      event = (RVS_SchedulerEvent){
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
           .command_kind = prepared->command_kind,
@@ -640,34 +593,29 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
       };
     }
   } else if (prepared->command_kind == RVS_SchedulerCommand_PublishTarget) {
-    outcome = (RVS_EngineSchedulerOutcome){
-      .kind = RVS_EngineSchedulerOutcomeKind_PublishTarget,
-      .command = prepared->command_token,
-      .pid = prepared->pid,
-      .process = prepared->process,
+    event = (RVS_SchedulerEvent){
+      .kind = RVS_SchedulerEvent_CommandOutcome,
+      .command_outcome = {
+        .command_kind = RVS_SchedulerCommand_PublishTarget,
+        .command = prepared->command_token,
+        .result = RVS_Result_Ok,
+        .target = prepared->process,
+        .pid = prepared->pid,
+      },
     };
   }
-  return outcome;
+  return event;
 }
 
 internal RVS_Result
-rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOutcome outcome, Arena *scratch,
-                                     B32 reject_if_shutdown, RVS_EnginePreparedDecision *prepared)
+rvs_control_reduce_scheduler_event(RVS_Session *session, RVS_SchedulerEvent event, Arena *scratch,
+                                   B32 reject_if_shutdown, RVS_EnginePreparedDecision *prepared)
 {
   RVS_Result result = RVS_Result_EngineStopped;
   rvs_control_mutex_take(session->control);
-  if (session->control->is_shutdown && outcome.kind == RVS_EngineSchedulerOutcomeKind_PublishTarget) {
-    outcome = (RVS_EngineSchedulerOutcome){
-      .kind = RVS_EngineSchedulerOutcomeKind_Event,
-      .event = {
-        .kind = RVS_SchedulerEvent_CommandOutcome,
-        .command_outcome = {
-          .command_kind = RVS_SchedulerCommand_PublishTarget,
-          .command = outcome.command,
-          .result = RVS_Result_EngineStopped,
-        },
-      },
-    };
+  if (session->control->is_shutdown && event.kind == RVS_SchedulerEvent_CommandOutcome &&
+      event.command_outcome.command_kind == RVS_SchedulerCommand_PublishTarget) {
+    event.command_outcome.result = RVS_Result_EngineStopped;
   }
   if (reject_if_shutdown && (session->control->is_shutdown || session->engine_released || session->engine == 0)) {
     MemoryZeroStruct(prepared);
@@ -675,7 +623,7 @@ rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOu
     RVS_SchedulerDecision decision = {0};
     RVS_Engine *engine = session->engine;
     AssertAlways(engine != 0);
-    rvs_engine_apply_scheduler_outcome_locked(engine, outcome, &decision);
+    rvs_engine_apply_scheduler_event_locked(engine, event, &decision);
     rvs_engine_prepare_scheduler_decision_locked(engine, &decision, scratch, prepared);
     result = decision.result;
     rvs_scheduler_decision_release(&decision);
@@ -685,38 +633,28 @@ rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOu
 }
 
 internal void
-rvs_engine_drive_scheduler_outcome(RVS_Engine *engine, RVS_EngineSchedulerOutcome outcome)
+rvs_engine_drive_scheduler_event(RVS_Engine *engine, RVS_SchedulerEvent event)
 {
   enum { immediate_transition_limit = 64 };
 
   for (U32 transition_idx = 0;; transition_idx += 1) {
     Temp scratch = scratch_begin(0, 0);
     RVS_EnginePreparedDecision prepared = {0};
-    (void)rvs_control_reduce_scheduler_outcome(engine->session, outcome, scratch.arena, 0, &prepared);
+    (void)rvs_control_reduce_scheduler_event(engine->session, event, scratch.arena, 0, &prepared);
 
-    outcome = rvs_engine_execute_prepared_decision(engine, &prepared);
+    event = rvs_engine_execute_prepared_decision(engine, &prepared);
     scratch_end(scratch);
-    if (outcome.kind == RVS_EngineSchedulerOutcomeKind_Null) { break; }
+    if (event.kind == RVS_SchedulerEvent_Null) { break; }
     if (transition_idx + 1 >= immediate_transition_limit) {
-      AssertAlways(outcome.kind == RVS_EngineSchedulerOutcomeKind_PublishTarget ||
-                   (outcome.kind == RVS_EngineSchedulerOutcomeKind_Event && outcome.event.kind == RVS_SchedulerEvent_CommandOutcome));
+      AssertAlways(event.kind == RVS_SchedulerEvent_CommandOutcome);
       RVS_Result enqueue_result = rvs_engine_send_message(engine, &(RVS_EngineMessage){
-        .type = RVS_EngineMessageType_SchedulerOutcome,
-        .scheduler_outcome = outcome,
+        .type = RVS_EngineMessageType_SchedulerEvent,
+        .scheduler_event = event,
       });
       AssertAlways(enqueue_result == RVS_Result_Ok || enqueue_result == RVS_Result_EngineStopped);
       break;
     }
   }
-}
-
-internal void
-rvs_engine_drive_scheduler_event(RVS_Engine *engine, RVS_SchedulerEvent event)
-{
-  rvs_engine_drive_scheduler_outcome(engine, (RVS_EngineSchedulerOutcome){
-    .kind = RVS_EngineSchedulerOutcomeKind_Event,
-    .event = event,
-  });
 }
 
 internal void
@@ -747,78 +685,16 @@ rvs_engine_send_demon_message(RVS_Engine *engine, RVS_DemonMessage message)
   return result;
 }
 
-////////////////////////////////
-// DEMON Output
-
-internal void
-rvs_engine_recycle_demon_reply_arena(RVS_Engine *engine, ArenaNode *arena_node)
-{
-  ProfBeginFunction();
-  mutex_take(engine->demon_reply_mutex);
-
-  // TODO: replace with a hash map
-  ArenaNode **node_ptr = &engine->demon_reply_arena_active_list;
-  while (*node_ptr && *node_ptr != arena_node) {
-    node_ptr = &(*node_ptr)->next;
-  }
-  AssertAlways(*node_ptr == arena_node);
-  *node_ptr = arena_node->next;
-
-  arena_clear(arena_node->v);
-  SLLStackPush(engine->demon_reply_arena_free_list, arena_node);
-
-  mutex_drop(engine->demon_reply_mutex);
-  ProfEnd();
-}
-
-internal RVS_Result
-rvs_engine_push_demon_reply(RVS_Engine *engine, RVS_Demon *source, RVS_DemonReply *reply)
-{
-  ProfBeginFunction();
-  mutex_take(engine->demon_reply_mutex);
-
-  ArenaNode *arena_node = engine->demon_reply_arena_free_list;
-  if (arena_node) {
-    SLLStackPop(engine->demon_reply_arena_free_list);
-  } else {
-    arena_node    = push_array(engine->demon_reply_arena, ArenaNode, 1);
-    arena_node->v = arena_alloc(.name = "Engine DEMON Reply");
-  }
-  arena_clear(arena_node->v);
-
-  RVS_DemonReply *reply_copy = push_array(arena_node->v, RVS_DemonReply, 1);
-  rvs_demon_reply_copy(arena_node->v, reply_copy, reply);
-  SLLStackPush(engine->demon_reply_arena_active_list, arena_node);
-
-  RVS_EngineMessage message = {
-    .type = RVS_EngineMessageType_DemonReply,
-    .demon_reply = {
-      .source     = source,
-      .reply      = reply_copy,
-      .arena_node = arena_node,
-    },
-  };
-  RVS_Result result = rvs_engine_send_message(engine, &message);
-
-  // on failure, put resources on the free lists
-  if (result != RVS_Result_Ok) {
-    AssertAlways(engine->demon_reply_arena_active_list == arena_node);
-    SLLStackPop(engine->demon_reply_arena_active_list);
-    arena_clear(arena_node->v);
-    SLLStackPush(engine->demon_reply_arena_free_list, arena_node);
-  }
-
-  mutex_drop(engine->demon_reply_mutex);
-  ProfEnd();
-  return result;
-}
-
 internal void
 rvs_engine_demon_reply_callback(RVS_Demon *demon, RVS_DemonReply *reply, void *ud)
 {
   ProfBeginFunction();
   rvs_control_assert_unlocked();
-  AssertAlways(rvs_engine_push_demon_reply(ud, demon, reply) == RVS_Result_Ok);
+  (void)demon;
+  AssertAlways(rvs_engine_send_message(ud, &(RVS_EngineMessage){
+    .type = RVS_EngineMessageType_DemonReply,
+    .demon_reply = *reply,
+  }) == RVS_Result_Ok);
   ProfEnd();
 }
 
@@ -913,9 +789,9 @@ rvs_engine_execute_root_dispatch(RVS_Engine *engine, RVS_MessageID request_id, R
   } break;
   case RVS_EngineCommandKind_Interrupt: {
     AssertAlways(dispatch_prepared.command_kind == RVS_SchedulerCommand_InterruptExecution);
-    RVS_EngineSchedulerOutcome outcome = rvs_engine_execute_prepared_decision(engine, &dispatch_prepared);
-    if (outcome.kind != RVS_EngineSchedulerOutcomeKind_Null) {
-      rvs_engine_drive_scheduler_outcome(engine, outcome);
+    RVS_SchedulerEvent event = rvs_engine_execute_prepared_decision(engine, &dispatch_prepared);
+    if (event.kind != RVS_SchedulerEvent_Null) {
+      rvs_engine_drive_scheduler_event(engine, event);
     }
   } break;
   default: { InvalidPath; } break;
@@ -1052,12 +928,11 @@ rvs_engine_worker(void *user_data)
     } break;
 
     case RVS_EngineMessageType_DemonReply: {
-      rvs_engine_process_demon_reply(engine, message->demon_reply.reply);
-      rvs_engine_recycle_demon_reply_arena(engine, message->demon_reply.arena_node);
+      rvs_engine_process_demon_reply(engine, &message->demon_reply);
     } break;
 
-    case RVS_EngineMessageType_SchedulerOutcome: {
-      rvs_engine_drive_scheduler_outcome(engine, message->scheduler_outcome);
+    case RVS_EngineMessageType_SchedulerEvent: {
+      rvs_engine_drive_scheduler_event(engine, message->scheduler_event);
     } break;
 
     case RVS_EngineMessageType_Shutdown: {
@@ -1104,8 +979,6 @@ rvs_engine_init(RVS_Engine **engine_out)
   engine.inbox_queue        = rvs_queue_alloc(sizeof(RVS_EngineMessage), AlignOf(RVS_EngineMessage));
   engine.control            = rvs_engine_control_alloc();
   engine.request_pool       = rvs_request_pool_alloc();
-  engine.demon_reply_arena = arena_alloc(.name = "Engine DEMON Reply Nodes");
-  engine.demon_reply_mutex = mutex_alloc();
 
   result = rvs_demon_init(&engine, rvs_engine_demon_reply_callback, &engine.demon);
   if (result != RVS_Result_Ok) {
@@ -1195,13 +1068,6 @@ rvs_engine_shutdown(RVS_Engine *engine)
   }
   rvs_request_pool_release_engine(engine->request_pool);
 
-  // release arenas for DEMON outputs after both workers have drained them
-  mutex_take(engine->demon_reply_mutex);
-  AssertAlways(engine->demon_reply_arena_active_list == 0);
-  for EachNode(n, ArenaNode, engine->demon_reply_arena_free_list) { arena_release(n->v); }
-  engine->demon_reply_arena_free_list = 0;
-  mutex_drop(engine->demon_reply_mutex);
-
   // release engine thread resources
   rvs_queue_release(engine->inbox_queue);
   if (engine->session) {
@@ -1211,8 +1077,6 @@ rvs_engine_shutdown(RVS_Engine *engine)
     rvs_control_mutex_drop(engine->control);
   }
   rvs_engine_control_release(engine->control);
-  mutex_release(engine->demon_reply_mutex);
-  arena_release(engine->demon_reply_arena);
   arena_release(engine->arena);
   MemoryZeroStruct(engine);
 

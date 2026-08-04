@@ -313,12 +313,9 @@ rvs_session_select_thread(RVS_Session *session, RVS_ProgramID program_id, RVS_Th
   }
   Temp scratch = scratch_begin(0, 0);
   RVS_EnginePreparedDecision prepared = {0};
-  RVS_Result result = rvs_control_reduce_scheduler_outcome(session, (RVS_EngineSchedulerOutcome){
-    .kind = RVS_EngineSchedulerOutcomeKind_Event,
-    .event = {
-      .kind = RVS_SchedulerEvent_ThreadSelected,
-      .thread_selected = { .target = program_id, .thread = thread_id },
-    },
+  RVS_Result result = rvs_control_reduce_scheduler_event(session, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_ThreadSelected,
+    .thread_selected = { .target = program_id, .thread = thread_id },
   }, scratch.arena, 1, &prepared);
   AssertAlways(prepared.emission_first == 0 && prepared.command_kind == RVS_SchedulerCommand_Null);
   scratch_end(scratch);

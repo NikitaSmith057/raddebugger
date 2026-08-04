@@ -204,7 +204,22 @@ entry_point(CmdLine *cmdline)
     .execution_stopped = { .command_id = copy_command_id },
   });
   AssertAlways(execution_stopped_copy.request_id == 7 && execution_stopped_copy.execution_stopped.command_id == copy_command_id);
+
+  RVS_Queue *demon_reply_queue = rvs_queue_alloc(sizeof(RVS_EngineMessage), AlignOf(RVS_EngineMessage));
+  AssertAlways(rvs_queue_push_copy(demon_reply_queue, &(RVS_EngineMessage){
+    .type = RVS_EngineMessageType_DemonReply,
+    .demon_reply = {
+      .kind = RVS_DemonReplyKind_EventBatch,
+      .event_batch = { .events = copy_events, .command_id = copy_command_id },
+    },
+  }, rvs_engine_message_queue_copy) == RVS_Result_Ok);
   scratch_end(terminate_copy_scratch);
+  RVS_EngineMessage *queued_demon_reply = rvs_queue_pop_struct(demon_reply_queue, RVS_EngineMessage, 0);
+  AssertAlways(queued_demon_reply && queued_demon_reply->demon_reply.kind == RVS_DemonReplyKind_EventBatch &&
+               queued_demon_reply->demon_reply.event_batch.command_id == copy_command_id &&
+               queued_demon_reply->demon_reply.event_batch.events.first->v.kind == DMN_EventKind_Halt);
+  rvs_queue_recycle(demon_reply_queue, &queued_demon_reply->base);
+  rvs_queue_release(demon_reply_queue);
 
   RVS_Engine *engine = 0;
   AssertAlways(rvs_engine_init(&engine) == RVS_Result_Ok);
