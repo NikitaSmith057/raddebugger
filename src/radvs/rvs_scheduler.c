@@ -188,9 +188,9 @@ rvs_scheduler_key_is_well_formed(RVS_SchedulerKey key)
   RVS_SchedulerOperationRule *rule = rvs_scheduler_operation_rule(key.op);
   if (rule == 0 || key.identity == 0) { return 0; }
   if (key.op == RVS_SchedulerOp_ReadOnly || key.op == RVS_SchedulerOp_TargetConfiguration) {
-    return !dmn_handle_match(key.target, dmn_handle_zero());
+    return !MemoryIsZeroStruct(&key.target);
   }
-  return dmn_handle_match(key.target, dmn_handle_zero());
+  return MemoryIsZeroStruct(&key.target);
 }
 
 internal B32

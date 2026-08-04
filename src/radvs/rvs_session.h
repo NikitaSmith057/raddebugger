@@ -45,6 +45,7 @@ struct RVS_Session
   RVS_Program       *first_program;
   RVS_Program       *last_program;
   RVS_Scheduler      scheduler;
+  U64                next_program_id;
 };
 
 internal RVS_Session *rvs_session_alloc(RVS_Engine *engine);
@@ -65,8 +66,8 @@ internal String8
 rvs_string_from_live_lifecycle(RVS_ProgramLifecycle v)
 {
   switch (v) {
-#define X(id) case RVS_ProgramLifecycle_##id: return str8_lit(Stringify(id));
-RVS_PROGRAM_LIFECYCLE_XLIST
+#define X(id, ...) case RVS_ProgramLifecycle_##id: return str8_lit(Stringify(id));
+  RVS_PROGRAM_LIFECYCLE_XLIST
 #undef X
   }
   return str8_zero();

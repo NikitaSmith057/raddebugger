@@ -33,6 +33,7 @@
 #include "radvs/rvs_async.c"
 #include "radvs/rvs_demon.c"
 #include "radvs/rvs_engine.c"
+#include "radvs/tests/rvs_scheduler_test_support.c"
 
 typedef struct
 {
@@ -444,7 +445,7 @@ entry_point(CmdLine *cmdline)
   AssertAlways(suppressed_decision.emissions.first && suppressed_decision.emissions.first->kind == RVS_SchedulerEmission_CompleteRequest);
   AssertAlways(suppressed_dispositions[0] == RVS_SchedulerEventDisposition_Suppress);
   AssertAlways(suppressed_dispositions[1] == RVS_SchedulerEventDisposition_Suppress);
-  rvs_engine_execute_scheduler_decision(engine, &suppressed_decision);
+  rvs_test_execute_scheduler_decision(engine, &suppressed_decision);
   scratch_end(suppressed_scratch);
   RVS_EngineReply suppressed_reply = {0};
   AssertAlways(rvs_request_wait(suppressed_launch, max_U64, &suppressed_reply) == RVS_Result_Ok);
@@ -534,7 +535,7 @@ entry_point(CmdLine *cmdline)
   }, &malformed_outcome_decision);
   AssertAlways(malformed_outcome_decision.emissions.first &&
                malformed_outcome_decision.emissions.first->reply.result == RVS_Result_Error);
-  rvs_engine_execute_scheduler_decision(engine, &malformed_outcome_decision);
+  rvs_test_execute_scheduler_decision(engine, &malformed_outcome_decision);
   RVS_EngineReply malformed_outcome_reply = {0};
   AssertAlways(rvs_request_wait(malformed_outcome_launch, max_U64, &malformed_outcome_reply) == RVS_Result_Ok);
   AssertAlways(malformed_outcome_reply.result == RVS_Result_Error);
@@ -2085,7 +2086,7 @@ rvs_test_launch_event(RVS_Engine *engine, RVS_MessageID request_id, DMN_Event ev
     },
   }, &decision);
   B32 accepted = decision.status == RVS_SchedulerDecisionStatus_Applied;
-  rvs_engine_execute_scheduler_decision(engine, &decision);
+  rvs_test_execute_scheduler_decision(engine, &decision);
   scratch_end(scratch);
   return accepted;
 }

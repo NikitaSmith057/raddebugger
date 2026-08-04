@@ -27,6 +27,9 @@ union DMN_Handle
   U32 u32[2];
   U64 u64[1];
 };
+typedef DMN_Handle DMN_ProcessHandle;
+typedef DMN_Handle DMN_ThreadHandle;
+typedef DMN_Handle DMN_ModuleHandle;
 
 typedef struct DMN_HandleNode DMN_HandleNode;
 struct DMN_HandleNode

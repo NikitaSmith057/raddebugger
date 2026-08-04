@@ -116,16 +116,17 @@ rvs_session_close_events(RVS_Session *session)
 internal RVS_Session *
 rvs_session_alloc(RVS_Engine *engine)
 {
-  Arena *arena = arena_alloc(.name = "Session");
+  Arena *arena = arena_alloc(.name = "Debug Engine Session");
   RVS_Session *session = push_array(arena, RVS_Session, 1);
-  session->arena = arena;
-  session->engine = engine;
-  session->control = engine->control;
-  session->scheduler.arena = arena;
+  session->arena                   = arena;
+  session->engine                  = engine;
+  session->control                 = engine->control;
+  session->scheduler.arena         = arena;
   session->scheduler.recycle_mutex = mutex_alloc();
-  session->ref_count = 2; // engine ownership plus the returned handle
-  session->event_queue = rvs_queue_alloc(sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
-  session->program_arena = arena_alloc(.name = "Session Programs");
+  session->ref_count               = 2; // engine ownership plus the returned handle
+  session->event_queue             = rvs_queue_alloc(sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
+  session->program_arena           = arena_alloc(.name = "Debug Engine Session Programs");
+  session->next_program_id         = 1;
   rvs_engine_control_addref(session->control);
   return session;
 }

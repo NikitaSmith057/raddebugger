@@ -155,7 +155,7 @@ entry_point(CmdLine *cmdline)
     switch (cmd_kind) {
     case RCI_CmdKind_Launch: {
       if (cmd_raw.node_count != 2) {
-        rci_printf("launch: invalid number of arguments\n");
+        rci_printf("Launch: invalid number of arguments\n");
         continue;
       }
 
@@ -164,7 +164,7 @@ entry_point(CmdLine *cmdline)
       RVS_Result     launch_result  = rvs_session_launch(session, exe_path, str8_zero(), &submit);
 
       if (launch_result != RVS_Result_Ok) {
-        rci_printf("launch: failed to launch program %S, error code %u\n", exe_path, launch_result);
+        rci_printf("Launch: failed to launch program %S, error code %u\n", exe_path, launch_result);
         continue;
       }
 
@@ -174,37 +174,37 @@ entry_point(CmdLine *cmdline)
       rvs_request_control_release(submit.control);
 
       if (reply_result != RVS_Result_Ok) {
-        rci_printf("launch: request failed, error code %u\n", reply_result);
+        rci_printf("Launch: request failed, error code %u\n", reply_result);
         continue;
       }
       if (reply.result != RVS_Result_Ok) {
-        rci_printf("launch: request failed, error code %u\n", reply.result);
+        rci_printf("Launch: request failed, error code %u\n", reply.result);
         continue;
       }
       if (reply.kind != RVS_EngineReplyKind_Launch) {
-        rci_printf("launch: received an invalid completion\n");
+        rci_printf("Launch: received an invalid completion\n");
         continue;
       }
 
-      rci_printf("launch: program 0x%llx (%S) started with pid %u\n", reply.launch.program_id.u64[0], exe_path, reply.launch.pid);
+      rci_printf("Launch: program 0x%llx (%S) started with pid %u\n", reply.launch.program_id.u64[0], exe_path, reply.launch.pid);
     } break;
 
     case RCI_CmdKind_Run: {
       if (cmd_raw.node_count != 2) {
-        rci_printf("run: invalid number of arguments\n");
+        rci_printf("Run: invalid number of arguments\n");
         continue;
       }
 
       RVS_ProgramID program_id;
       if ( ! try_u64_from_str8_c_rules(cmd_raw.last->string, &program_id.u64[0])) {
-        rci_printf("run: failed to parse program ID string %S\n", cmd_raw.last->string);
+        rci_printf("Run: failed to parse program ID string %S\n", cmd_raw.last->string);
         continue;
       }
 
       RVS_SubmitInfo submit;
       RVS_Result     run_result = rvs_session_run(session, program_id, &submit);
       if (run_result != RVS_Result_Ok) {
-        rci_printf("run: failed to submit program 0x%llx, error code %u\n", program_id.u64[0], run_result);
+        rci_printf("Run: failed to submit program 0x%llx, error code %u\n", program_id.u64[0], run_result);
         continue;
       }
 
@@ -213,15 +213,15 @@ entry_point(CmdLine *cmdline)
       rvs_request_release(submit.request);
       rvs_request_control_release(submit.control);
       if (reply_result != RVS_Result_Ok || reply.result != RVS_Result_Ok || reply.kind != RVS_EngineReplyKind_Run) {
-        rci_printf("run: request failed, error code %u\n", reply_result != RVS_Result_Ok ? reply_result : reply.result);
+        rci_printf("Run: request failed, error code %u\n", reply_result != RVS_Result_Ok ? reply_result : reply.result);
         continue;
       }
-      rci_printf("run: program 0x%llx resumed\n", program_id.u64[0]);
+      rci_printf("Run: program 0x%llx resumed\n", program_id.u64[0]);
     } break;
 
     case RCI_CmdKind_RunAddr: {
       if (cmd_raw.node_count != 3) {
-        rci_printf("run-to-address: expected <program-id> <absolute-address>\n");
+        rci_printf("RunAddr: expected <program-id> <absolute-address>\n");
         continue;
       }
 
@@ -230,11 +230,11 @@ entry_point(CmdLine *cmdline)
       U64     program_id_u64 = 0;
       U64     address        = 0;
       if (!try_u64_from_str8_c_rules(program_string, &program_id_u64)) {
-        rci_printf("run-to-address: failed to parse program ID string %S\n", program_string);
+        rci_printf("RunAddr: failed to parse program ID string %S\n", program_string);
         continue;
       }
       if (!try_u64_from_str8_c_rules(address_string, &address) || address == 0) {
-        rci_printf("run-to-address: failed to parse non-zero address string %S\n", address_string);
+        rci_printf("RunAddr: failed to parse non-zero address string %S\n", address_string);
         continue;
       }
 
@@ -242,7 +242,7 @@ entry_point(CmdLine *cmdline)
       RVS_SubmitInfo submit;
       RVS_Result run_result = rvs_session_run_to_address(session, program_id, address, &submit);
       if (run_result != RVS_Result_Ok) {
-        rci_printf("run-to-address: failed to submit program 0x%llx, error code %u\n",
+        rci_printf("RunAddr: failed to submit program 0x%llx, error code %u\n",
                     program_id.u64[0], run_result);
         continue;
       }
@@ -252,11 +252,11 @@ entry_point(CmdLine *cmdline)
       rvs_request_release(submit.request);
       rvs_request_control_release(submit.control);
       if (reply_result != RVS_Result_Ok || reply.result != RVS_Result_Ok || reply.kind != RVS_EngineReplyKind_Run) {
-        rci_printf("run-to-address: request failed, error code %u\n",
+        rci_printf("RunAddr: request failed, error code %u\n",
                     reply_result != RVS_Result_Ok ? reply_result : reply.result);
         continue;
       }
-      rci_printf("run-to-address: program 0x%llx resumed toward 0x%llx\n", program_id.u64[0], address);
+      rci_printf("RunAddr: program 0x%llx resumed toward 0x%llx\n", program_id.u64[0], address);
     } break;
 
     case RCI_CmdKind_Teardown: {
@@ -265,9 +265,11 @@ entry_point(CmdLine *cmdline)
 
     case RCI_CmdKind_LsProg: {
       rci_printf("--- Programs -------------------------------------------------------------------\n");
-      rci_printf("  %-10s %-8s %-8s %s\n", "PROGRAM-ID", "PID", "LIFECYCLE", "PATH");
+      rci_printf("  %-3s %-10s %-8s %-9s %s\n", "No.", "PROGRAM-ID", "PID", "LIFECYCLE", "PATH");
+      rci_printf("  --- ---------- -------- --------- ----\n");
+      U64 program_idx = 0; 
       for EachNode(prog, RVS_Program, engine->session->first_program) {
-        rci_printf("  %-10llx %-8u %-8s\n", prog->id.u64[0], prog->pid, rvs_string_from_live_lifecycle(prog->lifecycle));
+        rci_printf("  %-3u %-10llx %-8u %-8S\n", program_idx, prog->id.u64[0], prog->pid, rvs_string_from_live_lifecycle(prog->lifecycle));
       }
     } break;
 
