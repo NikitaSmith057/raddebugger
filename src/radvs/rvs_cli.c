@@ -268,8 +268,9 @@ entry_point(CmdLine *cmdline)
       rci_printf("  %-3s %-10s %-8s %-9s %s\n", "No.", "PROGRAM-ID", "PID", "LIFECYCLE", "PATH");
       rci_printf("  --- ---------- -------- --------- ----\n");
       U64 program_idx = 0; 
-      for EachNode(prog, RVS_Program, engine->session->first_program) {
-        rci_printf("  %-3u %-10llx %-8u %-8S\n", program_idx, prog->id.u64[0], prog->pid, rvs_string_from_live_lifecycle(prog->lifecycle));
+      for EachNode(prog, RVS_Program, engine->session->scheduler.target_first) {
+        String8 lifecycle = prog->state == RVS_TargetState_Removed ? str8_lit("Removed") : str8_lit("Live");
+        rci_printf("  %-3u %-10llx %-8u %-8S\n", program_idx, prog->target.u64[0], prog->pid, lifecycle);
       }
     } break;
 

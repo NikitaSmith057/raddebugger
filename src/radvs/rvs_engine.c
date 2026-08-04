@@ -384,10 +384,10 @@ rvs_engine_collect_operation_traps_locked(Arena *arena, RVS_Engine *engine, RVS_
         }
       }
       if (target_allowed) {
-        RVS_Program *program = rvs_session_program_from_id_locked(engine->session, plan->run_to_address.target);
-        if (program == 0 || program->lifecycle != RVS_ProgramLifecycle_Live) { return 0; }
+        RVS_Program *program = rvs_scheduler_program_from_id_locked(&engine->session->scheduler, plan->run_to_address.target);
+        if (program == 0 || program->state == RVS_TargetState_Removed) { return 0; }
         DMN_Trap trap = {
-          .process = program->process,
+          .process = program->target,
           .vaddr = plan->run_to_address.vaddr,
           .id = plan->header.id,
         };
@@ -417,8 +417,7 @@ rvs_engine_request_mark_dispatched_locked(RVS_Engine *engine, RVS_MessageID requ
         .kind = RVS_SchedulerEvent_DispatchStarted,
         .request = { .request_id = request_id },
       }, &decision);
-      result = decision.result == RVS_Result_Ok &&
-               decision.projections.first == 0 && decision.emissions.first == 0;
+      result = decision.result == RVS_Result_Ok && decision.emissions.first == 0;
       if (result && decision.command.kind != RVS_SchedulerCommand_Null) {
         AssertAlways(command->kind == RVS_EngineCommandKind_Interrupt &&
                      decision.command.kind == RVS_SchedulerCommand_InterruptExecution);
@@ -492,15 +491,6 @@ rvs_engine_prepare_scheduler_decision_locked(RVS_Engine *engine, RVS_SchedulerDe
 
   prepared->command_prepare_result = RVS_Result_Ok;
 
-  for EachNode(projection, RVS_SchedulerProjection, decision->projections.first) {
-    if (projection->kind == RVS_SchedulerProjection_TargetPublished) {
-      AssertAlways(rvs_session_program_from_id_locked(engine->session, projection->target) == 0);
-      rvs_session_program_add_locked(engine->session, projection->pid, projection->target);
-    } else if (projection->kind == RVS_SchedulerProjection_TargetRetired) {
-      rvs_session_program_retire_locked(engine->session, projection->target, projection->exit_code);
-    }
-  }
-
   for EachNode(emission, RVS_SchedulerEmission, decision->emissions.first) {
     if (emission->kind == RVS_SchedulerEmission_CompleteRequest || emission->kind == RVS_SchedulerEmission_PublishEvent) {
       RVS_EnginePreparedEmission *prepared_emission = push_array(scratch, RVS_EnginePreparedEmission, 1);
@@ -529,11 +519,14 @@ rvs_engine_prepare_scheduler_decision_locked(RVS_Engine *engine, RVS_SchedulerDe
     prepared->processes            = push_array(scratch, DMN_Handle, command->resume_target_subset.targets_count);
     prepared->processes_count      = command->resume_target_subset.targets_count;
     prepared->execution_request_id = command->resume_target_subset.execution_request_id;
-    if (!rvs_session_programs_to_processes_locked(engine->session,
-                                                  command->resume_target_subset.targets,
-                                                  command->resume_target_subset.targets_count,
-                                                  prepared->processes)) {
-      prepared->command_prepare_result = RVS_Result_Error;
+    for EachIndex(target_idx, command->resume_target_subset.targets_count) {
+      RVS_ProgramID target = command->resume_target_subset.targets[target_idx];
+      RVS_Program *program = rvs_scheduler_program_from_id_locked(&engine->session->scheduler, target);
+      if (program == 0 || program->state == RVS_TargetState_Removed) {
+        prepared->command_prepare_result = RVS_Result_Error;
+        break;
+      }
+      prepared->processes[target_idx] = program->target;
     }
   } else if (prepared->command_kind == RVS_SchedulerCommand_ResumeTargetSubset) {
     prepared->execution_request_id = command->resume_target_subset.execution_request_id;
@@ -856,7 +849,14 @@ rvs_engine_execute_root_dispatch(RVS_Engine *engine, RVS_MessageID request_id, R
       RVS_ProgramID *programs = command->run.programs;
       processes_count = command->run.programs_count;
       processes = push_array(scratch.arena, DMN_Handle, processes_count);
-      dispatch_ready = rvs_session_programs_to_processes_locked(engine->session, programs, processes_count, processes);
+      for EachIndex(program_idx, processes_count) {
+        RVS_Program *program = rvs_scheduler_program_from_id_locked(&engine->session->scheduler, programs[program_idx]);
+        if (program == 0 || program->state == RVS_TargetState_Removed) {
+          dispatch_ready = 0;
+          break;
+        }
+        processes[program_idx] = program->target;
+      }
       if (dispatch_ready) {
         dispatch_ready = rvs_engine_collect_operation_traps_locked(scratch.arena, engine, queued_operation,
                                                                     programs, processes_count, &traps);

@@ -12,30 +12,6 @@ typedef struct
 
 internal void rvs_session_event_message_copy(Arena *arena, void *dst, void *src);
 
-internal RVS_Program *
-rvs_session_program_from_id_locked(RVS_Session *session, RVS_ProgramID program_id)
-{
-  for EachNode(program, RVS_Program, session->first_program) {
-    if (dmn_handle_match(program->id, program_id)) {
-      return program;
-    }
-  }
-  return 0;
-}
-
-internal U64
-rvs_session_program_state_epoch_locked(RVS_Session *session, RVS_ProgramID program_id)
-{
-  ProfBeginFunction();
-  U64 result = 0;
-  RVS_TargetLedgerEntry *entry = rvs_scheduler_target_from_id_locked(&session->scheduler, program_id);
-  if (entry) {
-    result = entry->revision;
-  }
-  ProfEnd();
-  return result;
-}
-
 internal B32
 rvs_session_operation_key_resolves_locked(RVS_Session *session, RVS_SchedulerKey key)
 {
@@ -43,46 +19,8 @@ rvs_session_operation_key_resolves_locked(RVS_Session *session, RVS_SchedulerKey
     return 1;
   }
 
-  RVS_Program *program = rvs_session_program_from_id_locked(session, key.target);
-  return program != 0 && program->lifecycle == RVS_ProgramLifecycle_Live;
-}
-
-internal RVS_Program *
-rvs_session_program_add_locked(RVS_Session *session, U32 pid, DMN_Handle process)
-{
-  AssertAlways(rvs_session_program_from_id_locked(session, process) == 0);
-  RVS_Program *program = push_array(session->program_arena, RVS_Program, 1);
-  program->arena       = arena_alloc(.name = "Engine Program");
-  program->id          = process;
-  program->pid         = pid;
-  program->process     = process;
-  SLLQueuePush(session->first_program, session->last_program, program);
-  return program;
-}
-
-internal void
-rvs_session_program_retire_locked(RVS_Session *session, RVS_ProgramID program_id, U32 exit_code)
-{
-  RVS_Program *program = rvs_session_program_from_id_locked(session, program_id);
-  AssertAlways(program && program->lifecycle == RVS_ProgramLifecycle_Live);
-  program->lifecycle = RVS_ProgramLifecycle_Removed;
-  program->exit_code = exit_code;
-}
-
-internal B32
-rvs_session_programs_to_processes_locked(RVS_Session *session, RVS_ProgramID *programs, U64 programs_count, DMN_Handle *processes_out)
-{
-  B32 all_programs_found = programs_count != 0;
-  for EachIndex(program_idx, programs_count) {
-    RVS_Program *program = rvs_session_program_from_id_locked(session, programs[program_idx]);
-    if (program == 0 || program->lifecycle != RVS_ProgramLifecycle_Live ||
-        dmn_handle_match(program->process, dmn_handle_zero())) {
-      all_programs_found = 0;
-      break;
-    }
-    processes_out[program_idx] = program->process;
-  }
-  return all_programs_found;
+  RVS_Program *program = rvs_scheduler_program_from_id_locked(&session->scheduler, key.target);
+  return program != 0 && program->state != RVS_TargetState_Removed;
 }
 
 internal RVS_Result
@@ -125,8 +63,6 @@ rvs_session_alloc(RVS_Engine *engine)
   session->scheduler.recycle_mutex = mutex_alloc();
   session->ref_count               = 2; // engine ownership plus the returned handle
   session->event_queue             = rvs_queue_alloc(sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
-  session->program_arena           = arena_alloc(.name = "Debug Engine Session Programs");
-  session->next_program_id         = 1;
   rvs_engine_control_addref(session->control);
   return session;
 }
@@ -148,16 +84,9 @@ rvs_session_release_engine(RVS_Session *session)
 {
   // The engine holds control->mutex while releasing session ownership.
   AssertAlways(session->scheduler.stop_transaction.owner == 0 && session->scheduler.resume_transaction.owner == 0);
-  for EachNode(entry, RVS_TargetLedgerEntry, session->scheduler.target_first) {
-    AssertAlways(entry->state == RVS_TargetExecutionState_Idle || entry->state == RVS_TargetState_Removed);
+  for EachNode(program, RVS_Program, session->scheduler.target_first) {
+    AssertAlways(program->state == RVS_TargetExecutionState_Idle || program->state == RVS_TargetState_Removed);
   }
-  for EachNode(program, RVS_Program, session->first_program) {
-    arena_release(program->arena);
-  }
-  arena_release(session->program_arena);
-  session->program_arena = 0;
-  session->first_program = 0;
-  session->last_program = 0;
   session->engine = 0;
   session->engine_released = 1;
   rvs_session_release_ref(session); // drop engine ownership
@@ -208,11 +137,11 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
     RVS_ProgramID *programs = command.kind == RVS_EngineCommandKind_Run ? command.run.programs : command.interrupt.programs;
     U64 programs_count = command.kind == RVS_EngineCommandKind_Run ? command.run.programs_count : command.interrupt.programs_count;
     for EachIndex(program_idx, programs_count) {
-      RVS_Program *program = rvs_session_program_from_id_locked(session, programs[program_idx]);
+      RVS_Program *program = rvs_scheduler_program_from_id_locked(&session->scheduler, programs[program_idx]);
       if (program == 0) {
         goto exit_control_mutex;
       }
-      if (program->lifecycle != RVS_ProgramLifecycle_Live) {
+      if (program->state == RVS_TargetState_Removed) {
         result = RVS_Result_StaleState;
         goto exit_control_mutex;
       }
@@ -220,7 +149,8 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   }
   U64 captured_program_state_epoch = 0;
   if (op == RVS_SchedulerOp_ReadOnly) {
-    captured_program_state_epoch = rvs_session_program_state_epoch_locked(session, key.target);
+    RVS_Program *program = rvs_scheduler_program_from_id_locked(&session->scheduler, key.target);
+    if (program) { captured_program_state_epoch = program->revision; }
   }
   RVS_ProgramID *targets = 0;
   U64 targets_count = 0;

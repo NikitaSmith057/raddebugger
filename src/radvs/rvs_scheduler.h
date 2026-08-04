@@ -38,13 +38,6 @@ typedef enum
 
 typedef enum
 {
-  RVS_SchedulerProjection_Null,
-  RVS_SchedulerProjection_TargetPublished,
-  RVS_SchedulerProjection_TargetRetired,
-} RVS_SchedulerProjectionKind;
-
-typedef enum
-{
   RVS_SchedulerCommand_Null,
   RVS_SchedulerCommand_InterruptExecution,
   RVS_SchedulerCommand_ResumeTargetSubset,
@@ -197,17 +190,19 @@ typedef struct
   B32           requires_reconciliation;
 } RVS_OperationInterruption;
 
-typedef struct RVS_TargetLedgerEntry RVS_TargetLedgerEntry;
+typedef struct RVS_Program RVS_Program;
 typedef struct RVS_ThreadLedgerEntry RVS_ThreadLedgerEntry;
-struct RVS_TargetLedgerEntry
+struct RVS_Program
 {
-  RVS_TargetLedgerEntry    *next;
-  RVS_ProgramID             target;
-  RVS_TargetState           state;
-  U64                       revision;
-  U64                       execution_token;
-  RVS_MessageID             execution_owner;
-  B32                       is_termination_fenced;
+  RVS_Program      *next;
+  RVS_ProgramID     target;
+  U32               pid;
+  U32               exit_code;
+  RVS_TargetState   state;
+  U64               revision;
+  U64               execution_token;
+  RVS_MessageID     execution_owner;
+  B32               is_termination_fenced;
 };
 
 struct RVS_ThreadLedgerEntry
@@ -358,17 +353,6 @@ typedef struct
 } RVS_SchedulerPendingCommand;
 
 typedef struct RVS_SchedulerEmission RVS_SchedulerEmission;
-typedef struct RVS_SchedulerProjection RVS_SchedulerProjection;
-struct RVS_SchedulerProjection
-{
-  RVS_SchedulerProjection    *next;
-  RVS_Scheduler              *scheduler;
-  RVS_SchedulerProjectionKind kind;
-  RVS_ProgramID                target;
-  U32                          pid;
-  U32                          exit_code;
-};
-
 struct RVS_SchedulerEmission
 {
   RVS_SchedulerEmission    *next;
@@ -410,12 +394,6 @@ struct RVS_TargetSnapshotStorage
 
 typedef struct
 {
-  RVS_SchedulerProjection *first;
-  RVS_SchedulerProjection *last;
-} RVS_SchedulerProjectionList;
-
-typedef struct
-{
   RVS_SchedulerEmission *first;
   RVS_SchedulerEmission *last;
 } RVS_SchedulerEmissionList;
@@ -425,7 +403,6 @@ typedef struct
   RVS_Result                  result;
   // State and pending-command changes are committed before return. Emissions are
   // ordered, best-effort consequences and never cause scheduler rollback.
-  RVS_SchedulerProjectionList projections;
   RVS_SchedulerEmissionList   emissions;
   RVS_SchedulerCommand        command;
 } RVS_SchedulerDecision;
@@ -470,11 +447,10 @@ struct RVS_Scheduler
   RVS_Plan                  *plan_first;
   RVS_Plan                  *plan_last;
   RVS_Plan                  *plan_free_first;
-  RVS_SchedulerProjection   *projection_free_first;
   RVS_SchedulerEmission     *emission_free_first;
   RVS_TargetSnapshotStorage *target_storage_free_first;
-  RVS_TargetLedgerEntry     *target_first;
-  RVS_TargetLedgerEntry     *target_last;
+  RVS_Program               *target_first;
+  RVS_Program               *target_last;
   RVS_ThreadLedgerEntry     *thread_first;
   RVS_ThreadLedgerEntry     *thread_last;
   U64                        next_command_id;
@@ -558,8 +534,8 @@ internal B32                     rvs_scheduler_key_match                        
 internal B32                     rvs_scheduler_keys_conflict                    (RVS_SchedulerKey a, RVS_SchedulerKey b);
 
 internal B32                     rvs_scheduler_has_conflicting_operation_locked (RVS_Scheduler *scheduler, RVS_SchedulerKey key, RVS_ProgramID *targets, U64 targets_count);
-internal void                    rvs_scheduler_target_add_locked                (RVS_Scheduler *scheduler, RVS_ProgramID target);
-internal RVS_TargetLedgerEntry  *rvs_scheduler_target_from_id_locked            (RVS_Scheduler *scheduler, RVS_ProgramID target);
+internal void                    rvs_scheduler_program_add_locked                (RVS_Scheduler *scheduler, RVS_ProgramID id, U32 pid);
+internal RVS_Program            *rvs_scheduler_program_from_id_locked           (RVS_Scheduler *scheduler, RVS_ProgramID id);
 internal RVS_ThreadLedgerEntry  *rvs_scheduler_thread_from_id_locked            (RVS_Scheduler *scheduler, RVS_ThreadID thread);
 internal void                    rvs_scheduler_release_execution_leases_locked  (RVS_Scheduler *scheduler);
 internal B32                     rvs_scheduler_execution_blocks_operation_locked(RVS_Scheduler *scheduler, RVS_SchedulerOp op);
