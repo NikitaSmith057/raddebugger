@@ -160,18 +160,21 @@ rvs_session_submit(RVS_Session *session, RVS_EngineCommand command, RVS_SubmitIn
   }
   RVS_SchedulerAdmission admission = {0};
   result = rvs_scheduler_admit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id,
-                                      op, key, targets, targets_count, captured_program_state_epoch, &admission);
+                                      key, targets, targets_count, captured_program_state_epoch, &admission);
   if (result != RVS_Result_Ok) {
     goto exit_control_mutex;
   }
-  if (admission.is_terminal || admission.joined) {
+  if (admission.kind != RVS_SchedulerAdmissionKind_New) {
     submit_out->request = admission.request;
     result = RVS_Result_Ok;
     goto exit_control_mutex;
   }
   RVS_ScheduledOperation *operation = admission.operation;
-  if (command.kind == RVS_EngineCommandKind_Run && command.run.mode == RVS_RunMode_ToAddress) {
-    rvs_scheduler_attach_run_to_address_locked(&session->scheduler, operation, command.run.programs[0], command.run.address);
+  if (command.kind == RVS_EngineCommandKind_Run) {
+    operation->run_intent = command.run.intent;
+    if (command.run.mode == RVS_RunMode_ToAddress) {
+      rvs_scheduler_attach_run_to_address_locked(&session->scheduler, operation, command.run.programs[0], command.run.address);
+    }
   }
 
   RVS_EngineMessage message = {
@@ -247,7 +250,8 @@ rvs_session_run_many(RVS_Session *session, RVS_ProgramID *programs, U64 programs
     .run  = {
       .programs_count = programs_count,
       .programs       = programs,
-      .mode           = RVS_RunMode_Continue,
+      .mode           = RVS_RunMode_Normal,
+      .intent         = { .kind = RVS_RunIntentKind_Execute },
     },
   };
 
@@ -282,6 +286,7 @@ rvs_session_run_to_address(RVS_Session *session, RVS_ProgramID program_id, U64 v
       .programs = &program_id,
       .mode = RVS_RunMode_ToAddress,
       .address = vaddr,
+      .intent = { .kind = RVS_RunIntentKind_Execute },
     },
   }, submit_out);
 }
@@ -343,15 +348,28 @@ rvs_session_selected_thread(RVS_Session *session, RVS_ProgramID *program_id_out,
 RVS_Result
 rvs_session_continue(RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out)
 {
-  return rvs_session_run(session, program_id, submit_out);
+  if (submit_out) { MemoryZeroStruct(submit_out); }
+  if (session == 0 || dmn_handle_match(program_id, dmn_handle_zero()) || submit_out == 0) {
+    return RVS_Result_InvalidArgument;
+  }
+  return rvs_session_submit(session, (RVS_EngineCommand){
+    .kind = RVS_EngineCommandKind_Run,
+    .run = {
+      .programs_count = 1,
+      .programs = &program_id,
+      .mode = RVS_RunMode_Normal,
+      .intent = { .kind = RVS_RunIntentKind_Continue },
+    },
+  }, submit_out);
 }
 
 RVS_Result
-rvs_session_step(RVS_Session *session, RVS_StepKind kind, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out)
+rvs_session_step(RVS_Session *session, RVS_StepKind kind, RVS_StepUnit unit, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out)
 {
   if (submit_out) { MemoryZeroStruct(submit_out); }
   if (session == 0 || submit_out == 0 || dmn_handle_match(thread_id, dmn_handle_zero()) ||
-      (kind != RVS_StepKind_Into && kind != RVS_StepKind_Over && kind != RVS_StepKind_Out)) {
+      (kind != RVS_StepKind_Into && kind != RVS_StepKind_Over && kind != RVS_StepKind_Out) ||
+      (unit != RVS_StepUnit_Statement && unit != RVS_StepUnit_Line && unit != RVS_StepUnit_Instruction)) {
     return RVS_Result_InvalidArgument;
   }
   rvs_control_mutex_take(session->control);

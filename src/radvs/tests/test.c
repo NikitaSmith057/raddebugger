@@ -650,8 +650,9 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_session_selected_thread(session, &selected_program, &selected_thread_query) == RVS_Result_Ok);
   AssertAlways(dmn_handle_match(selected_program, run_programs[1]) && dmn_handle_match(selected_thread_query, selected_thread));
   RVS_SubmitInfo unsupported_step = {0};
-  AssertAlways(rvs_session_step(session, RVS_StepKind_Into, selected_thread, &unsupported_step) == RVS_Result_Unsupported);
+  AssertAlways(rvs_session_step(session, RVS_StepKind_Into, RVS_StepUnit_Line, selected_thread, &unsupported_step) == RVS_Result_Unsupported);
   AssertAlways(unsupported_step.request == 0 && unsupported_step.control == 0);
+  AssertAlways(rvs_session_step(session, RVS_StepKind_Into, (RVS_StepUnit)3, selected_thread, &unsupported_step) == RVS_Result_InvalidArgument);
   Temp thread_exit_scratch = scratch_begin(0, 0);
   DMN_EventList thread_exit_events = {0};
   *dmn_event_list_push(thread_exit_scratch.arena, &thread_exit_events) = (DMN_Event){
@@ -875,7 +876,7 @@ entry_point(CmdLine *cmdline)
   session->scheduler.phase = RVS_SchedulerPhase_Running;
   U64 interrupt_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
   RVS_SchedulerAdmission interrupt_admission = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_Interrupt, interrupt_key, &reply.launch.program_id, 1, 0, &interrupt_admission) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, interrupt_key, &reply.launch.program_id, 1, 0, &interrupt_admission) == RVS_Result_Ok);
   AssertAlways(session->scheduler.stop_transaction.owner == 0);
   AssertAlways(session->scheduler.run_cycle_epoch + 1 == interrupt_cycle_epoch);
   RVS_SchedulerEventDisposition predispatch_stop_disposition = RVS_SchedulerEventDisposition_Forward;
@@ -998,7 +999,7 @@ entry_point(CmdLine *cmdline)
   };
   U64 exited_interrupt_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
   RVS_SchedulerAdmission exited_interrupt_admission = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_Interrupt, interrupt_key, &reply.launch.program_id, 1, 0, &exited_interrupt_admission) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, interrupt_key, &reply.launch.program_id, 1, 0, &exited_interrupt_admission) == RVS_Result_Ok);
   rvs_test_activate_interrupt_locked(session, &exited_interrupt_admission);
   RVS_SchedulerCommandToken exited_interrupt_stop_token = exited_interrupt_admission.operation->pending_command.token;
   AssertAlways(session->scheduler.run_cycle_epoch == exited_interrupt_cycle_epoch);
@@ -1043,12 +1044,12 @@ entry_point(CmdLine *cmdline)
   RVS_Program *terminate_entry = rvs_scheduler_program_from_id_locked(&session->scheduler, terminate_target);
   U64 revision = terminate_entry->revision;
   RVS_SchedulerAdmission terminate_admission = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_Terminate, terminate_key, &terminate_target, 1, 0, &terminate_admission) == RVS_Result_Ok);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, terminate_key, &terminate_target, 1, 0, &terminate_admission) == RVS_Result_Ok);
   AssertAlways(terminate_entry->is_termination_fenced);
   AssertAlways(terminate_entry->revision > revision);
   RVS_SchedulerAdmission fenced_query = {0};
-  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, RVS_SchedulerOp_ReadOnly, (RVS_SchedulerKey){ .op = RVS_SchedulerOp_ReadOnly, .target = terminate_target, .identity = 2 }, 0, 0, 0, &fenced_query) == RVS_Result_Ok);
-  AssertAlways(fenced_query.is_terminal && fenced_query.request->reply.result == RVS_Result_StaleState);
+  AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool, &session->engine->next_request_id, (RVS_SchedulerKey){ .op = RVS_SchedulerOp_ReadOnly, .target = terminate_target, .identity = 2 }, 0, 0, 0, &fenced_query) == RVS_Result_Ok);
+  AssertAlways(fenced_query.kind == RVS_SchedulerAdmissionKind_Terminal && fenced_query.request->reply.result == RVS_Result_StaleState);
   rvs_request_release(fenced_query.request);
   rvs_scheduler_rollback_admission_locked(&session->scheduler, &terminate_admission);
   AssertAlways( ! terminate_entry->is_termination_fenced);
@@ -1100,8 +1101,7 @@ entry_point(CmdLine *cmdline)
   U64 reducer_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
   RVS_SchedulerAdmission reducer_interrupt_admission = {0};
   AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
-                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
-                                          interrupt_key, &run_programs[0], 1, 0,
+                                           &session->engine->next_request_id, interrupt_key, &run_programs[0], 1, 0,
                                           &reducer_interrupt_admission) == RVS_Result_Ok);
   rvs_test_activate_interrupt_locked(session, &reducer_interrupt_admission);
   AssertAlways(session->scheduler.run_cycle_epoch == reducer_cycle_epoch);
@@ -1198,8 +1198,7 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_scheduler_mark_run_in_flight_locked(&session->scheduler, failed_resume_run_request_id));
   RVS_SchedulerAdmission failed_resume_admission = {0};
   AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
-                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
-                                          interrupt_key, &run_programs[0], 1, 0,
+                                           &session->engine->next_request_id, interrupt_key, &run_programs[0], 1, 0,
                                           &failed_resume_admission) == RVS_Result_Ok);
   rvs_test_activate_interrupt_locked(session, &failed_resume_admission);
   RVS_SchedulerCommandToken failed_interrupt_stop_token = failed_resume_admission.operation->pending_command.token;
@@ -1277,8 +1276,7 @@ entry_point(CmdLine *cmdline)
   };
   RVS_SchedulerAdmission invalid_resume_admission = {0};
   AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
-                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
-                                          interrupt_key, &invalid_resume_targets[0], 1, 0,
+                                           &session->engine->next_request_id, interrupt_key, &invalid_resume_targets[0], 1, 0,
                                           &invalid_resume_admission) == RVS_Result_Ok);
   rvs_test_activate_interrupt_locked(session, &invalid_resume_admission);
   RVS_SchedulerCommandToken invalid_interrupt_token = invalid_resume_admission.operation->pending_command.token;
@@ -1330,8 +1328,7 @@ entry_point(CmdLine *cmdline)
   U64 reducer_exit_cycle_epoch = session->scheduler.run_cycle_epoch + 1;
   RVS_SchedulerAdmission exit_interrupt_admission = {0};
   AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
-                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
-                                          interrupt_key, &run_programs[0], 1, 0,
+                                           &session->engine->next_request_id, interrupt_key, &run_programs[0], 1, 0,
                                           &exit_interrupt_admission) == RVS_Result_Ok);
   rvs_test_activate_interrupt_locked(session, &exit_interrupt_admission);
   RVS_ScheduledOperation *exit_interrupt_operation = exit_interrupt_admission.operation;
@@ -1410,8 +1407,7 @@ entry_point(CmdLine *cmdline)
   session->scheduler.phase = RVS_SchedulerPhase_Running;
   RVS_SchedulerAdmission batch_interrupt_admission = {0};
   AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
-                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
-                                          (RVS_SchedulerKey){ .op = RVS_SchedulerOp_Interrupt, .identity = 2 },
+                                           &session->engine->next_request_id, (RVS_SchedulerKey){ .op = RVS_SchedulerOp_Interrupt, .identity = 2 },
                                           &batch_targets[0], 1, 0, &batch_interrupt_admission) == RVS_Result_Ok);
   rvs_test_activate_interrupt_locked(session, &batch_interrupt_admission);
   RVS_SchedulerCommandToken batch_interrupt_stop_token = batch_interrupt_admission.operation->pending_command.token;
@@ -1829,8 +1825,7 @@ entry_point(CmdLine *cmdline)
   };
   RVS_SchedulerAdmission run_plan_interrupt_admission = {0};
   AssertAlways(rvs_scheduler_admit_locked(&session->scheduler, session->engine->request_pool,
-                                          &session->engine->next_request_id, RVS_SchedulerOp_Interrupt,
-                                          (RVS_SchedulerKey){ .op = RVS_SchedulerOp_Interrupt, .identity = 0x7200 },
+                                           &session->engine->next_request_id, (RVS_SchedulerKey){ .op = RVS_SchedulerOp_Interrupt, .identity = 0x7200 },
                                           &run_plan_target, 1, 0, &run_plan_interrupt_admission) == RVS_Result_Ok);
   rvs_test_activate_interrupt_locked(session, &run_plan_interrupt_admission);
   RVS_SchedulerCommandToken run_plan_interrupt_token = run_plan_interrupt_admission.operation->pending_command.token;

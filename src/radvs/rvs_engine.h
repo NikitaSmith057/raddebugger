@@ -23,6 +23,13 @@ typedef enum
   RVS_StepKind_Out,
 } RVS_StepKind;
 
+typedef enum
+{
+  RVS_StepUnit_Statement,
+  RVS_StepUnit_Line,
+  RVS_StepUnit_Instruction,
+} RVS_StepUnit;
+
 typedef struct
 {
   RVS_Request        *request;
@@ -102,7 +109,7 @@ RVS_Result rvs_session_interrupt      (RVS_Session *session, RVS_ProgramID progr
 RVS_Result rvs_session_select_thread  (RVS_Session *session, RVS_ProgramID program_id, RVS_ThreadID thread_id);
 RVS_Result rvs_session_selected_thread(RVS_Session *session, RVS_ProgramID *program_id_out, RVS_ThreadID *thread_id_out);
 RVS_Result rvs_session_continue       (RVS_Session *session, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
-RVS_Result rvs_session_step           (RVS_Session *session, RVS_StepKind kind, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_session_step           (RVS_Session *session, RVS_StepKind kind, RVS_StepUnit unit, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_session_wait_for_event (Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out);
 
 ////////////////////////////////

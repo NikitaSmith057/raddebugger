@@ -118,11 +118,9 @@ typedef enum
 
 typedef enum
 {
-  RVS_RunIntentKind_None,
+  RVS_RunIntentKind_Execute,
   RVS_RunIntentKind_Continue,
-  RVS_RunIntentKind_StepInto,
-  RVS_RunIntentKind_StepOver,
-  RVS_RunIntentKind_StepOut,
+  RVS_RunIntentKind_Step,
 } RVS_RunIntentKind;
 
 typedef enum
@@ -227,7 +225,11 @@ typedef struct
 
 typedef struct
 {
+  // Continue preserves a prior step intent; Execute replaces it; Step uses both axes.
   RVS_RunIntentKind  kind;
+  RVS_StepKind       step_kind;
+  RVS_StepUnit       step_unit;
+  RVS_ThreadID       thread;
   RVS_RunIntentState state;
   RVS_MessageID      execution_owner;
 } RVS_RunIntent;
@@ -483,40 +485,46 @@ struct RVS_Scheduler
   RVS_ResumeTransaction      resume_transaction;
 };
 
+typedef enum
+{
+  RVS_SchedulerAdmissionKind_New,
+  RVS_SchedulerAdmissionKind_Joined,
+  RVS_SchedulerAdmissionKind_Terminal,
+} RVS_SchedulerAdmissionKind;
+
 typedef struct
 {
   RVS_ScheduledOperation *operation;
   RVS_Request            *request;
-  B32                     joined;
-  B32                     registered;
-  B32                     is_terminal;
+  RVS_SchedulerAdmissionKind kind;
 } RVS_SchedulerAdmission;
 
 struct RVS_ScheduledOperation
 {
-  RVS_ScheduledOperation    *next;
-  RVS_ScheduledOperation    *prev;
-  RVS_ScheduledOperation    *key_next;
-  RVS_ScheduledOperation    *key_prev;
-  RVS_Scheduler             *scheduler;
-  RVS_Request               *request;
-  RVS_TargetSnapshot        *targets;
-  U64                        targets_count;
-  RVS_TargetSnapshotStorage *target_storage;
-  U32                        ref_count;
-  RVS_ScheduledOperationState state;
-  RVS_OperationInterruption   interruption;
-  B32                        is_dispatched;
-  B32                        is_keyed;
-  B32                        request_completed;
-  U64                        captured_program_state_epoch;
-  RVS_LaunchPhase            launch_phase;
-  RVS_SchedulerPendingCommand pending_command;
-  RVS_PlanID                  root_plan_id;
-  RVS_PlanID                  active_plan_id;
-  U32                        launch_pid;
-  DMN_Handle                 launch_process;
-  RVS_SchedulerKey           key;
+  RVS_ScheduledOperation      *next;
+  RVS_ScheduledOperation      *prev;
+  RVS_ScheduledOperation      *key_next;
+  RVS_ScheduledOperation      *key_prev;
+  RVS_Scheduler               *scheduler;
+  RVS_Request                 *request;
+  RVS_TargetSnapshot          *targets;
+  U64                          targets_count;
+  RVS_TargetSnapshotStorage   *target_storage;
+  U32                          ref_count;
+  RVS_ScheduledOperationState  state;
+  RVS_OperationInterruption    interruption;
+  B32                          is_dispatched;
+  B32                          is_keyed;
+  B32                          request_completed;
+  U64                          captured_program_state_epoch;
+  RVS_RunIntent                run_intent;
+  RVS_LaunchPhase              launch_phase;
+  RVS_SchedulerPendingCommand  pending_command;
+  RVS_PlanID                   root_plan_id;
+  RVS_PlanID                   active_plan_id;
+  U32                          launch_pid;
+  DMN_Handle                   launch_process;
+  RVS_SchedulerKey             key;
 };
 
 struct RVS_RequestControl
@@ -553,7 +561,7 @@ internal RVS_ScheduledOperation *rvs_scheduler_unregister_operation_locked      
 
 internal RVS_RequestControl     *rvs_request_control_alloc                      (RVS_Session *session, RVS_ScheduledOperation *operation, B32 registered);
 
-internal RVS_Result              rvs_scheduler_admit_locked                     (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_SchedulerOp op, RVS_SchedulerKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch, RVS_SchedulerAdmission *admission_out);
+internal RVS_Result              rvs_scheduler_admit_locked                     (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_SchedulerKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch, RVS_SchedulerAdmission *admission_out);
 internal void                    rvs_scheduler_rollback_admission_locked        (RVS_Scheduler *scheduler, RVS_SchedulerAdmission *admission);
 internal void                    rvs_scheduler_apply_locked                     (RVS_Scheduler *scheduler, RVS_SchedulerEvent event, RVS_SchedulerDecision *decision_out);
 internal void                    rvs_scheduler_decision_release                 (RVS_SchedulerDecision *decision);

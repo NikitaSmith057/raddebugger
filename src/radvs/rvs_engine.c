@@ -9,7 +9,7 @@
 
 typedef enum
 {
-  RVS_RunMode_Continue,
+  RVS_RunMode_Normal,
   RVS_RunMode_ToAddress,
 } RVS_RunMode;
 
@@ -25,6 +25,7 @@ typedef struct
       RVS_ProgramID *programs;
       RVS_RunMode     mode;
       U64             address;
+      RVS_RunIntent   intent;
     } run;
     struct {
       U64            programs_count;
@@ -100,9 +101,12 @@ rvs_engine_command_scheduler_op(RVS_EngineCommand command, RVS_SchedulerOp *op_o
     }
 
     if (command.kind == RVS_EngineCommandKind_Run &&
-        ((command.run.mode != RVS_RunMode_Continue && command.run.mode != RVS_RunMode_ToAddress) ||
-         (command.run.mode == RVS_RunMode_Continue && command.run.address != 0) ||
+        ((command.run.mode != RVS_RunMode_Normal && command.run.mode != RVS_RunMode_ToAddress) ||
+         (command.run.mode == RVS_RunMode_Normal && command.run.address != 0) ||
          (command.run.mode == RVS_RunMode_ToAddress && (command.run.address == 0 || programs_count != 1)))) {
+      return 0;
+    }
+    if (command.run.intent.kind != RVS_RunIntentKind_Execute && command.run.intent.kind != RVS_RunIntentKind_Continue) {
       return 0;
     }
 
