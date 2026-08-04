@@ -379,6 +379,7 @@ struct LNX_DMN_State
   pid_t halter_tid;
   U64 halt_code;
   U64 halt_user_data;
+  B32 halt_run_active;
   B32 is_halting;
   
   // rjf: TLS

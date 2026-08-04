@@ -10,6 +10,7 @@ typedef void RVS_QueueItemCopy(Arena *arena, void *dst, void *src);
 struct RVS_QueueNode
 {
   RVS_QueueNode *next;
+  Arena         *copy_arena;
 };
 
 typedef struct

@@ -21,7 +21,7 @@ typedef enum
   RVS_DemonMessage_Pump,
   RVS_DemonMessage_Run,
   RVS_DemonMessage_Resume,
-  RVS_DemonMessage_Halt,
+  RVS_DemonMessage_InterruptExecution,
   RVS_DemonMessage_Terminate,
   RVS_DemonMessage_Shutdown
 } RVS_DemonMessageType;
@@ -41,13 +41,19 @@ typedef struct
     struct {
       DMN_Handle *processes;
       U64         processes_count;
+      DMN_TrapChunkList traps;
     } run;
     struct {
       DMN_Handle     *processes;
       U64             processes_count;
       RVS_MessageID   execution_request_id;
       U64             command_id;
+      DMN_TrapChunkList traps;
     } resume;
+    struct {
+      RVS_MessageID execution_request_id;
+      U64           command_id;
+    } interrupt_execution;
     struct {
       DMN_Handle *process_handles;
       U64         process_count;
@@ -70,6 +76,9 @@ typedef enum
   RVS_DemonReplyKind_LaunchStarted,
   RVS_DemonReplyKind_ActionResult,
   RVS_DemonReplyKind_EventBatch,
+  // Fences prior batches from this interrupt attempt: the active execution lease is no longer executing.
+  // It does not imply that the engine has completed client-visible publication of those batches.
+  RVS_DemonReplyKind_ExecutionStopped,
   RVS_DemonReplyKind_ExecutionFinished,
 } RVS_DemonReplyKind;
 
@@ -90,6 +99,9 @@ typedef struct
       DMN_EventList events;
       U64           command_id;
     } event_batch;
+    struct {
+      U64 command_id;
+    } execution_stopped;
   };
 } RVS_DemonReply;
 
@@ -106,7 +118,6 @@ internal void       rvs_demon_event_copy  (Arena *arena, DMN_Event *dst, DMN_Eve
 internal void       rvs_demon_reply_copy  (Arena *arena, RVS_DemonReply *dst, RVS_DemonReply *src);
 internal RVS_Result rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage message_spec);
 internal RVS_DemonInterruptCapability rvs_demon_interrupt_capability(RVS_Demon *dmn);
-internal RVS_Result rvs_demon_interrupt(RVS_Demon *dmn, RVS_MessageID request_id, DMN_Handle *selected_processes, U64 selected_processes_count);
 
 
 

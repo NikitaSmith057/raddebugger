@@ -302,6 +302,13 @@ struct W32_DMN_Shared
   B32 exception_not_handled;
   
   // rjf: halting info
+  Mutex      halter_mutex;
+  HANDLE     halt_process_handle;
+  DMN_Handle halt_process;
+  U64        halt_injection_address;
+  U64        halt_code;
+  U64        halt_user_data;
+  B32        halt_run_active;
   DMN_Handle halter_process;
   U32 halter_tid;
 };

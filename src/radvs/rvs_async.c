@@ -4,6 +4,15 @@
 #include "rvs_async.h"
 
 internal void
+rvs_queue_node_reset(RVS_Queue *q, RVS_QueueNode *node)
+{
+  Arena *copy_arena = node->copy_arena;
+  MemoryZero(node, q->message_size);
+  node->copy_arena = copy_arena;
+  if (copy_arena) { arena_clear(copy_arena); }
+}
+
+internal void
 rvs_queue_node_list_push(RVS_QueueNodeList *list, RVS_QueueNode *node)
 {
   SLLQueuePush(list->first, list->last, node);
@@ -48,6 +57,12 @@ internal void
 rvs_queue_release(RVS_Queue *q)
 {
   Arena *arena = q->arena;
+  for EachNode(node, RVS_QueueNode, q->messages.first) {
+    if (node->copy_arena) { arena_release(node->copy_arena); }
+  }
+  for EachNode(node, RVS_QueueNode, q->free_list.first) {
+    if (node->copy_arena) { arena_release(node->copy_arena); }
+  }
   cond_var_release(q->available_cv);
   mutex_release(q->mutex);
   arena_release(arena);
@@ -61,7 +76,7 @@ rvs_queue_alloc_item(RVS_Queue *q)
   if ( ! q->is_closed) {
     node = rvs_queue_node_list_pop(&q->free_list);
     if (node) {
-      MemoryZero(node, q->message_size);
+      rvs_queue_node_reset(q, node);
     } else {
       node = arena_push(q->arena, q->message_size, q->message_align, 1);
     }
@@ -102,11 +117,12 @@ rvs_queue_push_copy(RVS_Queue *q, void *spec, RVS_QueueItemCopy *copy)
   if (!q->is_closed) {
     RVS_QueueNode *node = rvs_queue_node_list_pop(&q->free_list);
     if (node) {
-      MemoryZero(node, q->message_size);
+      rvs_queue_node_reset(q, node);
     } else {
       node = arena_push(q->arena, q->message_size, q->message_align, 1);
     }
-    copy(q->arena, node, spec);
+    if (node->copy_arena == 0) { node->copy_arena = arena_alloc(.name = "RVS Queue Item"); }
+    copy(node->copy_arena, node, spec);
     rvs_queue_node_list_push(&q->messages, node);
     cond_var_broadcast(q->available_cv);
     result = RVS_Result_Ok;

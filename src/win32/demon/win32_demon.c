@@ -1300,6 +1300,7 @@ dmn_init(void)
   w32_dmn_shared = push_array(arena, W32_DMN_Shared, 1);
   w32_dmn_shared->arena = arena;
   w32_dmn_shared->access_mutex = mutex_alloc();
+  w32_dmn_shared->halter_mutex = mutex_alloc();
   w32_dmn_shared->detach_arena = arena_alloc();
   w32_dmn_shared->entities_arena = arena_alloc(.reserve_size = GB(8), .commit_size = KB(64));
   w32_dmn_shared->entities_base = w32_dmn_entity_alloc(&w32_dmn_entity_nil, W32_DMN_EntityKind_Root, 0);
@@ -1332,6 +1333,22 @@ dmn_init(void)
         }
       }
     }
+  }
+}
+
+internal void
+dmn_release(void)
+{
+  W32_DMN_Shared *shared = w32_dmn_shared;
+  if(shared != 0)
+  {
+    mutex_release(shared->access_mutex);
+    mutex_release(shared->halter_mutex);
+    arena_release(shared->detach_arena);
+    arena_release(shared->entities_arena);
+    arena_release(shared->arena);
+    w32_dmn_shared = 0;
+    w32_dmn_GetThreadDescription = 0;
   }
 }
 
@@ -1602,6 +1619,35 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
       event_gen_path = W32_DMN_EventGenPath_NotAttached;
     }
   }
+
+  mutex_take(w32_dmn_shared->halter_mutex);
+  AssertAlways(!w32_dmn_shared->halt_run_active && w32_dmn_shared->halt_process_handle == 0);
+  if(event_gen_path == W32_DMN_EventGenPath_Run)
+  {
+    for(W32_DMN_Entity *process = w32_dmn_shared->entities_base->first;
+        process != &w32_dmn_entity_nil;
+        process = process->next)
+    {
+      if(process->kind == W32_DMN_EntityKind_Process)
+      {
+        HANDLE duplicate = 0;
+        if(DuplicateHandle(GetCurrentProcess(), process->handle, GetCurrentProcess(), &duplicate,
+                           0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+          w32_dmn_shared->halt_process_handle = duplicate;
+          w32_dmn_shared->halt_process = w32_dmn_handle_from_entity(process);
+          w32_dmn_shared->halt_injection_address = process->proc.injection_address;
+          w32_dmn_shared->halt_run_active = 1;
+        }
+        else
+        {
+          event_gen_path = W32_DMN_EventGenPath_NotAttached;
+        }
+        break;
+      }
+    }
+  }
+  mutex_drop(w32_dmn_shared->halter_mutex);
   
   //////////////////////////////
   //- rjf: produce debug events
@@ -1613,6 +1659,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
     //
     case W32_DMN_EventGenPath_NotAttached:
     {
+      if(ctrls->run_started) { ctrls->run_started(0, ctrls->run_started_user_data); }
       DMN_Event *e = dmn_event_list_push(arena, &events);
       e->kind       = DMN_EventKind_Error;
       e->error_kind = DMN_ErrorKind_NotAttached;
@@ -1692,10 +1739,14 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
       //////////////////////////
       //- rjf: read all initial memory at trap locations
       //
-      U8 *trap_swap_bytes = push_array(scratch.arena, U8, ctrls->traps.trap_count);
+      U8 *trap_swap_bytes = push_array_no_zero(scratch.arena, U8, ctrls->traps.trap_count);
+      B32 trap_install_failed = 0;
+      U64 installed_traps_count = 0;
       {
         U64 trap_idx = 0;
-        for(DMN_TrapChunkNode *n = ctrls->traps.first; n != 0; n = n->next)
+        for(DMN_TrapChunkNode *n = ctrls->traps.first;
+            n != 0 && !trap_install_failed;
+            n = n->next)
         {
           for(U64 n_idx = 0; n_idx < n->count; n_idx += 1, trap_idx += 1)
           {
@@ -1703,8 +1754,13 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
             if(trap->flags == 0)
             {
               // TODO(rjf): assumes x86
-              trap_swap_bytes[trap_idx] = 0xCC;
-              dmn_process_read(trap->process, r1u64(trap->vaddr, trap->vaddr+1), trap_swap_bytes+trap_idx);
+              if(dmn_process_read(trap->process,
+                                  r1u64(trap->vaddr, trap->vaddr+1),
+                                  trap_swap_bytes+trap_idx) != 1)
+              {
+                trap_install_failed = 1;
+                break;
+              }
             }
           }
         }
@@ -1716,7 +1772,9 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
       ProfScope("write all traps into memory")
       {
         U64 trap_idx = 0;
-        for(DMN_TrapChunkNode *n = ctrls->traps.first; n != 0; n = n->next)
+        for(DMN_TrapChunkNode *n = ctrls->traps.first;
+            n != 0 && !trap_install_failed;
+            n = n->next)
         {
           for(U64 n_idx = 0; n_idx < n->count; n_idx += 1, trap_idx += 1)
           {
@@ -1725,10 +1783,43 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
             {
               // TODO(rjf): assumes x86
               U8 int3 = 0xCC;
-              dmn_process_write(trap->process, r1u64(trap->vaddr, trap->vaddr+1), &int3);
+              if(!dmn_process_write(trap->process,
+                                    r1u64(trap->vaddr, trap->vaddr+1),
+                                    &int3))
+              {
+                trap_install_failed = 1;
+                break;
+              }
+              installed_traps_count = trap_idx + 1;
             }
           }
         }
+      }
+      if(trap_install_failed)
+      {
+        U64 trap_idx = 0;
+        for(DMN_TrapChunkNode *n = ctrls->traps.first;
+            n != 0 && trap_idx < installed_traps_count;
+            n = n->next)
+        {
+          for(U64 n_idx = 0;
+              n_idx < n->count && trap_idx < installed_traps_count;
+              n_idx += 1, trap_idx += 1)
+          {
+            DMN_Trap *trap = n->v+n_idx;
+            if(trap->flags == 0)
+            {
+              dmn_process_write(trap->process,
+                                r1u64(trap->vaddr, trap->vaddr+1),
+                                trap_swap_bytes+trap_idx);
+            }
+          }
+        }
+        DMN_Event *e = dmn_event_list_push(arena, &events);
+        e->kind = DMN_EventKind_Error;
+        e->error_kind = DMN_ErrorKind_UnexpectedFailure;
+        if(ctrls->run_started) { ctrls->run_started(0, ctrls->run_started_user_data); }
+        goto run_cleanup;
       }
       
       //////////////////////////
@@ -1948,7 +2039,10 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
             }
             
             //- rjf: disregard all other rules if this is the halter thread
-            if(w32_dmn_shared->halter_tid == thread->id)
+            mutex_take(w32_dmn_shared->halter_mutex);
+            B32 is_halter_thread = w32_dmn_shared->halter_tid == thread->id;
+            mutex_drop(w32_dmn_shared->halter_mutex);
+            if(is_halter_thread)
             {
               is_frozen = 0;
             }
@@ -1975,6 +2069,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
       U64 begin_time = now_time_us();
       String8List debug_strings = {0};
       DMN_Event *debug_strings_event = 0;
+      if(ctrls->run_started) { ctrls->run_started(1, ctrls->run_started_user_data); }
       for(B32 keep_going = 1; keep_going;)
       {
         keep_going = 0;
@@ -2200,6 +2295,9 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
             case EXIT_PROCESS_DEBUG_EVENT:
             {
               W32_DMN_Entity *process = w32_dmn_entity_from_kind_id(W32_DMN_EntityKind_Process, evt.dwProcessId);
+
+              mutex_take(w32_dmn_shared->halter_mutex);
+              B32 is_halter_process = dmn_handle_match(w32_dmn_handle_from_entity(process), w32_dmn_shared->halter_process);
               
               // rjf: if this was the process we were going to resume, then we will
               // just not resume, and wait for another debug event
@@ -2243,6 +2341,12 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
               }
               
               // rjf: release entity storage
+              if(is_halter_process)
+              {
+                w32_dmn_shared->halter_process = dmn_handle_zero();
+                w32_dmn_shared->halter_tid = 0;
+              }
+              mutex_drop(w32_dmn_shared->halter_mutex);
               w32_dmn_entity_release(process);
               
               // rjf: detach
@@ -2255,6 +2359,14 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
             case CREATE_THREAD_DEBUG_EVENT:
             {
               W32_DMN_Entity *process = w32_dmn_entity_from_kind_id(W32_DMN_EntityKind_Process, evt.dwProcessId);
+
+              // is this a halter event?
+              mutex_take(w32_dmn_shared->halter_mutex);
+              B32 is_halter = dmn_handle_match(w32_dmn_handle_from_entity(process), w32_dmn_shared->halter_process) &&
+                              (evt.dwThreadId == w32_dmn_shared->halter_tid ||
+                               (U64)evt.u.CreateThread.lpStartAddress == w32_dmn_shared->halt_injection_address);
+              if(is_halter) { w32_dmn_shared->halter_tid = evt.dwThreadId; }
+              mutex_drop(w32_dmn_shared->halter_mutex);
               
               // rjf: create thread entity
               W32_DMN_Entity *thread = w32_dmn_entity_alloc(process, W32_DMN_EntityKind_Thread, evt.dwThreadId);
@@ -2264,9 +2376,12 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
                 thread->thread.thread_local_base = (U64)evt.u.CreateThread.lpThreadLocalBase;
               }
               
-              // rjf: suspend thread immediately upon creation, to match with expected suspension state
-              DWORD sus_result = SuspendThread(thread->handle);
-              (void)sus_result;
+              // rjf: suspend ordinary threads immediately upon creation, to match with expected suspension state
+              if(!is_halter)
+              {
+                DWORD sus_result = SuspendThread(thread->handle);
+                (void)sus_result;
+              }
               
               // rjf: unpack thread addresses
               U64 stack_base_vaddr = w32_dmn_thread_stack_base_vaddr_from_tlb_vaddr(process->handle, thread->arch, (U64)evt.u.CreateThread.lpThreadLocalBase);
@@ -2285,9 +2400,6 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
                 }
               }
               
-              // rjf: determine if this is a "halter thread" - the threads we spawn to halt processes
-              B32 is_halter = (evt.dwThreadId == w32_dmn_shared->halter_tid);
-              
               // rjf: generate events for non-halter threads
               if(!is_halter)
               {
@@ -2301,6 +2413,11 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
                 e->stack_pointer  = stack_base_vaddr;
                 e->tls_root_vaddr = tls_root_vaddr;
               }
+              else
+              {
+                // Keep consuming debug events until the halter exits and the backend is stably stopped.
+                keep_going = 1;
+              }
             }break;
             
             //////////////////////
@@ -2312,17 +2429,24 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
               W32_DMN_Entity *process = thread->parent;
               
               // rjf: determine if this is the halter thread
+              mutex_take(w32_dmn_shared->halter_mutex);
               B32 is_halter = (evt.dwThreadId == w32_dmn_shared->halter_tid);
+              U64 halt_code = w32_dmn_shared->halt_code;
+              U64 halt_user_data = w32_dmn_shared->halt_user_data;
               
               // rjf: generate a halt event if this thread is the halter
               if(is_halter)
               {
                 DMN_Event *e = dmn_event_list_push(arena, &events);
                 e->kind = DMN_EventKind_Halt;
+                e->process = w32_dmn_handle_from_entity(process);
+                e->address = halt_code;
+                e->user_data = halt_user_data;
                 w32_dmn_shared->halter_process = dmn_handle_zero();
                 w32_dmn_shared->halter_tid = 0;
                 keep_going = 0;
               }
+              mutex_drop(w32_dmn_shared->halter_mutex);
               
               // rjf: if this thread is *not* the halter, then generate a regular exit-thread event
               if(!is_halter)
@@ -2569,6 +2693,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
                 e->code    = exception->ExceptionCode;
                 e->flags   = exception->ExceptionFlags;
                 e->instruction_pointer = (U64)exception->ExceptionAddress;
+                e->address = e->instruction_pointer;
                 e->user_data = user_trap_id;
                 
                 //- rjf: fill according to exception code
@@ -2927,6 +3052,23 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
         {
           keep_going = 0;
         }
+        mutex_take(w32_dmn_shared->halter_mutex);
+        if(!dmn_handle_match(w32_dmn_shared->halter_process, dmn_handle_zero()))
+        {
+          keep_going = 1;
+        }
+        else if(!keep_going)
+        {
+          w32_dmn_shared->halt_run_active = 0;
+          if(w32_dmn_shared->halt_process_handle)
+          {
+            CloseHandle(w32_dmn_shared->halt_process_handle);
+            w32_dmn_shared->halt_process_handle = 0;
+          }
+          w32_dmn_shared->halt_process = dmn_handle_zero();
+          w32_dmn_shared->halt_injection_address = 0;
+        }
+        mutex_drop(w32_dmn_shared->halter_mutex);
       }
       
       ////////////////////////
@@ -3113,6 +3255,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
         }
       }
       
+      run_cleanup:;
       scratch_end(scratch);
     }break;
     
@@ -3121,6 +3264,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
     //
     case W32_DMN_EventGenPath_DetachProcesses:
     {
+      if(ctrls->run_started) { ctrls->run_started(0, ctrls->run_started_user_data); }
       for(DMN_HandleNode *n = w32_dmn_shared->detach_processes.first; n != 0; n = n->next)
       {
         W32_DMN_Entity *process = w32_dmn_entity_from_handle(n->v);
@@ -3166,6 +3310,18 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
       arena_clear(w32_dmn_shared->detach_arena);
     }break;
   }
+
+  // restore halter state to default
+  mutex_take(w32_dmn_shared->halter_mutex);
+  w32_dmn_shared->halt_run_active = 0;
+  if(w32_dmn_shared->halt_process_handle)
+  {
+    CloseHandle(w32_dmn_shared->halt_process_handle);
+    w32_dmn_shared->halt_process_handle = 0;
+  }
+  w32_dmn_shared->halt_process = dmn_handle_zero();
+  w32_dmn_shared->halt_injection_address = 0;
+  mutex_drop(w32_dmn_shared->halter_mutex);
   
   return events;
 }
@@ -3173,31 +3329,39 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
 ////////////////////////////////
 //~ rjf: @dmn_os_hooks Halting (Implemented Per-OS)
 
-internal void
+internal B32
 dmn_halt(U64 code, U64 user_data)
 {
-  if(dmn_handle_match(dmn_handle_zero(), w32_dmn_shared->halter_process))
+  B32 result = 0;
+  mutex_take(w32_dmn_shared->halter_mutex);
+  if(w32_dmn_shared->halt_run_active && w32_dmn_shared->halt_process_handle != 0 &&
+     dmn_handle_match(dmn_handle_zero(), w32_dmn_shared->halter_process))
   {
-    W32_DMN_Entity *process = &w32_dmn_entity_nil;
-    for(W32_DMN_Entity *entity = w32_dmn_shared->entities_base->first;
-        entity != &w32_dmn_entity_nil;
-        entity = entity->next)
+    w32_dmn_shared->halter_process = w32_dmn_shared->halt_process;
+    w32_dmn_shared->halt_code = code;
+    w32_dmn_shared->halt_user_data = user_data;
+    W32_DMN_InjectedBreak injection = {code, user_data};
+    U64 data_injection_address = w32_dmn_shared->halt_injection_address + W32_DMN_INJECTED_CODE_SIZE;
+    if(w32_dmn_process_write_struct(w32_dmn_shared->halt_process_handle, data_injection_address, &injection))
     {
-      if(entity->kind == W32_DMN_EntityKind_Process)
-      {
-        process = entity;
-        break;
-      }
+      w32_dmn_shared->halter_tid = w32_dmn_inject_thread(w32_dmn_shared->halt_process_handle,
+                                                         w32_dmn_shared->halt_injection_address);
+      result = w32_dmn_shared->halter_tid != 0;
     }
-    if(process != &w32_dmn_entity_nil)
+    if(!result && code == 0 && user_data == 0 && TerminateProcess(w32_dmn_shared->halt_process_handle, 1))
     {
-      w32_dmn_shared->halter_process = w32_dmn_handle_from_entity(process);
-      W32_DMN_InjectedBreak injection = {code, user_data};
-      U64 data_injection_address = process->proc.injection_address + W32_DMN_INJECTED_CODE_SIZE;
-      w32_dmn_process_write_struct(process->handle, data_injection_address, &injection);
-      w32_dmn_shared->halter_tid = w32_dmn_inject_thread(process->handle, process->proc.injection_address);
+      result = 1;
+    }
+    if(!result)
+    {
+      w32_dmn_shared->halter_process = dmn_handle_zero();
+      w32_dmn_shared->halter_tid = 0;
+      w32_dmn_shared->halt_code = 0;
+      w32_dmn_shared->halt_user_data = 0;
     }
   }
+  mutex_drop(w32_dmn_shared->halter_mutex);
+  return result;
 }
 
 ////////////////////////////////

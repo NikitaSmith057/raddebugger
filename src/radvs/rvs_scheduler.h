@@ -9,6 +9,7 @@ typedef struct RVS_EngineControl         RVS_EngineControl;
 typedef struct RVS_RequestPool           RVS_RequestPool;
 typedef struct RVS_ScheduledOperation    RVS_ScheduledOperation;
 typedef struct RVS_TargetSnapshotStorage RVS_TargetSnapshotStorage;
+typedef struct RVS_Plan                  RVS_Plan;
 typedef struct RVS_Scheduler             RVS_Scheduler;
 
 typedef enum
@@ -23,6 +24,8 @@ typedef enum
   RVS_SchedulerEvent_DemonEventBatch,
   RVS_SchedulerEvent_CommandOutcome,
   RVS_SchedulerEvent_PreDispatchCancelled,
+  RVS_SchedulerEvent_RequestControlReleased,
+  RVS_SchedulerEvent_ThreadSelected,
   RVS_SchedulerEvent_Shutdown,
 } RVS_SchedulerEventKind;
 
@@ -36,13 +39,21 @@ typedef enum
 typedef enum
 {
   RVS_SchedulerEmission_Null,
-  RVS_SchedulerEmission_RetireTarget,
   RVS_SchedulerEmission_CompleteRequest,
+  RVS_SchedulerEmission_PublishEvent,
 } RVS_SchedulerEmissionKind;
 
 typedef enum
 {
+  RVS_SchedulerProjection_Null,
+  RVS_SchedulerProjection_TargetPublished,
+  RVS_SchedulerProjection_TargetRetired,
+} RVS_SchedulerProjectionKind;
+
+typedef enum
+{
   RVS_SchedulerCommand_Null,
+  RVS_SchedulerCommand_InterruptExecution,
   RVS_SchedulerCommand_ResumeTargetSubset,
   RVS_SchedulerCommand_PumpLaunch,
   RVS_SchedulerCommand_PublishTarget,
@@ -52,6 +63,7 @@ typedef enum
 {
   RVS_SchedulerCommandOutcome_Null,
   RVS_SchedulerCommandOutcome_Failed,
+  RVS_SchedulerCommandOutcome_InterruptExecutionCompleted,
   RVS_SchedulerCommandOutcome_PublishTargetCompleted,
   RVS_SchedulerCommandOutcome_ResumeTargetSubsetCompleted,
 } RVS_SchedulerCommandOutcomeKind;
@@ -156,6 +168,51 @@ typedef enum
   RVS_StopCause_ProcessExit,
 } RVS_StopCause;
 
+typedef enum
+{
+  RVS_ExecutionOwnerKind_Null,
+  RVS_ExecutionOwnerKind_Operation,
+  RVS_ExecutionOwnerKind_ControlTransaction,
+  RVS_ExecutionOwnerKind_Shutdown,
+} RVS_ExecutionOwnerKind;
+
+typedef struct
+{
+  RVS_ExecutionOwnerKind kind;
+  RVS_MessageID          request_id;
+  U64                    transaction_id;
+} RVS_ExecutionOwner;
+
+typedef enum
+{
+  RVS_ScheduledOperationState_Null,
+  RVS_ScheduledOperationState_Queued,
+  RVS_ScheduledOperationState_Active,
+  RVS_ScheduledOperationState_Suspended,
+  RVS_ScheduledOperationState_Completed,
+  RVS_ScheduledOperationState_Cancelled,
+  RVS_ScheduledOperationState_Failed,
+} RVS_ScheduledOperationState;
+
+typedef enum
+{
+  RVS_ControlTransactionPhase_Null,
+  RVS_ControlTransactionPhase_PreparingInterrupt,
+  RVS_ControlTransactionPhase_WaitingForInterrupt,
+  RVS_ControlTransactionPhase_CollectingBatch,
+  RVS_ControlTransactionPhase_Stable,
+  RVS_ControlTransactionPhase_WaitingForResume,
+  RVS_ControlTransactionPhase_Complete,
+} RVS_ControlTransactionPhase;
+
+typedef struct
+{
+  U64           control_transaction_id;
+  U64           stable_stop_generation;
+  RVS_StopCause cause;
+  B32           requires_reconciliation;
+} RVS_OperationInterruption;
+
 typedef struct RVS_TargetLedgerEntry RVS_TargetLedgerEntry;
 typedef struct RVS_ThreadLedgerEntry RVS_ThreadLedgerEntry;
 struct RVS_TargetLedgerEntry
@@ -182,6 +239,7 @@ typedef struct
   RVS_ProgramID target;
   U64           revision;
   U64           execution_token;
+  U64           stable_stop_generation;
   B32           is_termination_fenced;
   B32           stop_observed;
   B32           exit_observed;
@@ -197,15 +255,106 @@ typedef struct
 
 typedef struct
 {
+  RVS_MessageID request_id;
+  U64           command_id;
+} RVS_SchedulerCommandToken;
+
+typedef U64 RVS_PlanID;
+
+typedef enum
+{
+  RVS_PlanKind_Null,
+  RVS_PlanKind_Run,
+  RVS_PlanKind_RunToAddress,
+#if RVS_ENGINE_TESTING
+  RVS_PlanKind_Test,
+#endif
+} RVS_PlanKind;
+
+typedef struct RVS_PlanHeader
+{
+  RVS_PlanID   id;
+  RVS_PlanID   parent;
+  RVS_PlanKind kind;
+} RVS_PlanHeader;
+
+typedef U64 RVS_StopHandlerID;
+
+typedef enum
+{
+  RVS_StopPolicySource_Null,
+  RVS_StopPolicySource_Plan,
+  RVS_StopPolicySource_Handler,
+  RVS_StopPolicySource_Fallback,
+} RVS_StopPolicySource;
+
+typedef enum
+{
+  RVS_StableStopDisposition_Unhandled,
+  RVS_StableStopDisposition_Continue,
+  // Reserved until concrete plans define and test their operation-settlement semantics.
+  RVS_StableStopDisposition_Suspend,
+  RVS_StableStopDisposition_Complete,
+  RVS_StableStopDisposition_Cancel,
+  RVS_StableStopDisposition_Fail,
+} RVS_StableStopDispositionKind;
+
+typedef struct
+{
+  RVS_StableStopDispositionKind kind;
+  RVS_Result                    result;
+} RVS_StableStopDisposition;
+
+typedef struct
+{
+  // Valid only for the current locked dispatch. Plans retain identities and the generation, not this pointer.
+  U64                       stable_stop_generation;
+  RVS_MessageID             execution_request_id;
+  RVS_SchedulerCommandToken interrupt_token;
+  RVS_TargetSnapshot const *targets;
+  U64                       targets_count;
+  RVS_ProgramID             primary_target;
+  RVS_ThreadID              primary_thread;
+  RVS_StopCause             primary_cause;
+  B32                       execution_lease_fully_exited;
+  B32                       amended_while_resume_pending;
+} RVS_StableStop;
+
+struct RVS_Plan
+{
+  RVS_Plan                 *next;
+  RVS_Plan                 *prev;
+  RVS_PlanHeader            header;
+  RVS_MessageID             operation_request_id;
+  union {
+    struct {
+      RVS_ProgramID target;
+      U64           vaddr;
+    } run_to_address;
+  };
+#if RVS_ENGINE_TESTING
+  RVS_StableStopDisposition test_disposition;
+#endif
+};
+
+typedef struct
+{
   RVS_ScheduledOperation *owner;
+  RVS_ExecutionOwner      previous_owner;
   RVS_MessageID           execution_owner;
+  U64                     transaction_id;
+  RVS_SchedulerCommandToken interrupt_token;
+  RVS_ControlTransactionPhase phase;
   U64                     cycle_epoch;
+  U64                     stable_stop_generation;
   U32                     interrupt_attempt;
   U64                     collected_events_count;
   RVS_StopCause           primary_cause;
   RVS_ProgramID           primary_target;
   B32                     backend_stable;
   B32                     event_published;
+  // Post-fence exits affect settlement only; they never redispatch policy for this generation.
+  B32                     amended_while_resume_pending;
 } RVS_StopTransaction;
 
 typedef struct
@@ -213,14 +362,9 @@ typedef struct
   RVS_ScheduledOperation *owner;
   RVS_MessageID           execution_owner;
   U64                     cycle_epoch;
+  U64                     stable_stop_generation;
   U32                     resume_attempt;
 } RVS_ResumeTransaction;
-
-typedef struct
-{
-  RVS_MessageID request_id;
-  U64           command_id;
-} RVS_SchedulerCommandToken;
 
 typedef struct
 {
@@ -230,6 +374,17 @@ typedef struct
 } RVS_SchedulerPendingCommand;
 
 typedef struct RVS_SchedulerEmission RVS_SchedulerEmission;
+typedef struct RVS_SchedulerProjection RVS_SchedulerProjection;
+struct RVS_SchedulerProjection
+{
+  RVS_SchedulerProjection    *next;
+  RVS_Scheduler              *scheduler;
+  RVS_SchedulerProjectionKind kind;
+  RVS_ProgramID                target;
+  U32                          pid;
+  U32                          exit_code;
+};
+
 struct RVS_SchedulerEmission
 {
   RVS_SchedulerEmission    *next;
@@ -237,9 +392,7 @@ struct RVS_SchedulerEmission
   RVS_SchedulerEmissionKind kind;
   RVS_ScheduledOperation   *operation;
   RVS_EngineReply           reply;
-  U32                       pid;
-  U32                       exit_code;
-  DMN_Handle                process;
+  RVS_Event                 event;
 };
 
 typedef struct
@@ -248,6 +401,10 @@ typedef struct
   RVS_SchedulerCommandToken token;
   RVS_ScheduledOperation   *operation;
   union {
+    struct {
+      // GlobalWithResume interruption covers the complete active execution lease, not only the selected subset.
+      RVS_MessageID execution_request_id;
+    } interrupt_execution;
     struct {
       RVS_ProgramID *targets;
       U64            targets_count;
@@ -269,6 +426,12 @@ struct RVS_TargetSnapshotStorage
 
 typedef struct
 {
+  RVS_SchedulerProjection *first;
+  RVS_SchedulerProjection *last;
+} RVS_SchedulerProjectionList;
+
+typedef struct
+{
   RVS_SchedulerEmission *first;
   RVS_SchedulerEmission *last;
 } RVS_SchedulerEmissionList;
@@ -279,6 +442,7 @@ typedef struct
   RVS_Result                  result;
   // State and pending-command changes are committed before return. Emissions are
   // ordered, best-effort consequences and never cause scheduler rollback.
+  RVS_SchedulerProjectionList projections;
   RVS_SchedulerEmissionList   emissions;
   RVS_SchedulerCommand        command;
 } RVS_SchedulerDecision;
@@ -288,6 +452,7 @@ typedef struct
   RVS_SchedulerEventKind kind;
   union {
     struct { RVS_MessageID     request_id; } request;
+    struct { RVS_MessageID     request_id; RVS_Result result; } failed;
     struct { RVS_EngineReply   reply;      } completed;
     struct { RVS_MessageID     request_id; U32 pid; } launch_started;
     struct {
@@ -307,6 +472,7 @@ typedef struct
       U32                             pid;
     } command_outcome;
     struct { RVS_MessageID request_id; RVS_ProgramID target; U64 execution_token; } observed;
+    struct { RVS_ProgramID target; RVS_ThreadID thread; } thread_selected;
   };
 } RVS_SchedulerEvent;
 
@@ -319,6 +485,10 @@ struct RVS_Scheduler
   RVS_ScheduledOperation    *key_last;
   Mutex                      recycle_mutex;
   RVS_ScheduledOperation    *operation_free_first;
+  RVS_Plan                  *plan_first;
+  RVS_Plan                  *plan_last;
+  RVS_Plan                  *plan_free_first;
+  RVS_SchedulerProjection   *projection_free_first;
   RVS_SchedulerEmission     *emission_free_first;
   RVS_TargetSnapshotStorage *target_storage_free_first;
   RVS_TargetLedgerEntry     *target_first;
@@ -326,6 +496,26 @@ struct RVS_Scheduler
   RVS_ThreadLedgerEntry     *thread_first;
   RVS_ThreadLedgerEntry     *thread_last;
   U64                        next_command_id;
+  U64                        next_control_transaction_id;
+  U64                        next_stable_stop_generation;
+  U64                        next_plan_id;
+  U64                        last_dispatched_stable_stop_generation;
+  RVS_StableStopDispositionKind last_plan_stop_disposition;
+  RVS_StableStopDispositionKind last_handler_stop_disposition;
+  RVS_SchedulerCommandKind      last_stable_stop_command;
+  B32                           last_stable_stop_used_fallback;
+  RVS_StopPolicySource          last_stop_policy_source;
+  RVS_PlanID                    decisive_plan_id;
+  RVS_StopHandlerID             decisive_handler_id;
+#if RVS_ENGINE_TESTING
+  RVS_StableStopDisposition     test_handler_disposition;
+  RVS_StopHandlerID             test_handler_id;
+  U32                           test_plan_dispatch_count;
+  U32                           test_handler_dispatch_count;
+  RVS_PlanID                    test_first_plan_visited;
+  RVS_PlanID                    test_second_plan_visited;
+#endif
+  RVS_ExecutionOwner         execution_owner;
   RVS_SchedulerPhase         phase;
   U64                        run_cycle_epoch;
   RVS_RunIntent              run_intent;
@@ -356,11 +546,16 @@ struct RVS_ScheduledOperation
   U64                        targets_count;
   RVS_TargetSnapshotStorage *target_storage;
   U32                        ref_count;
+  RVS_ScheduledOperationState state;
+  RVS_OperationInterruption   interruption;
   B32                        is_dispatched;
   B32                        is_keyed;
+  B32                        request_completed;
   U64                        captured_program_state_epoch;
   RVS_LaunchPhase            launch_phase;
   RVS_SchedulerPendingCommand pending_command;
+  RVS_PlanID                  root_plan_id;
+  RVS_PlanID                  active_plan_id;
   U32                        launch_pid;
   DMN_Handle                 launch_process;
   RVS_SchedulerKey           key;
@@ -371,7 +566,7 @@ struct RVS_RequestControl
   Arena                  *arena;
   RVS_Session            *session;
   RVS_EngineControl      *control;
-  RVS_ScheduledOperation *operation;
+  RVS_MessageID           request_id;
   B32                     registered;
 };
 
@@ -387,12 +582,14 @@ internal RVS_ThreadLedgerEntry  *rvs_scheduler_thread_from_id_locked            
 internal void                    rvs_scheduler_release_execution_leases_locked  (RVS_Scheduler *scheduler);
 internal B32                     rvs_scheduler_execution_blocks_operation_locked(RVS_Scheduler *scheduler, RVS_SchedulerOp op);
 internal RVS_ScheduledOperation *rvs_scheduler_operation_alloc_locked           (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_MessageID request_id, RVS_SchedulerKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch);
+internal RVS_Plan               *rvs_scheduler_attach_run_to_address_locked      (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation, RVS_ProgramID target, U64 vaddr);
 
 internal void                    rvs_scheduler_operation_addref                 (RVS_ScheduledOperation *operation);
 internal void                    rvs_scheduler_operation_release                (RVS_ScheduledOperation *operation);
 
 internal void                    rvs_scheduler_operation_remove_locked          (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation);
 internal RVS_ScheduledOperation *rvs_scheduler_operation_from_request_id_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal void                    rvs_scheduler_prepare_reply_locked             (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation, RVS_EngineReply *reply);
 internal RVS_Result              rvs_scheduler_register_operation_locked        (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_SchedulerKey key, RVS_ScheduledOperation *operation);
 internal RVS_ScheduledOperation *rvs_scheduler_unregister_operation_locked      (RVS_Scheduler *scheduler, RVS_SchedulerKey key, RVS_ScheduledOperation *expected_operation);
 
@@ -401,5 +598,4 @@ internal RVS_RequestControl     *rvs_request_control_alloc                      
 internal RVS_Result              rvs_scheduler_admit_locked                     (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_SchedulerOp op, RVS_SchedulerKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch, RVS_SchedulerAdmission *admission_out);
 internal void                    rvs_scheduler_rollback_admission_locked        (RVS_Scheduler *scheduler, RVS_SchedulerAdmission *admission);
 internal void                    rvs_scheduler_apply_locked                     (RVS_Scheduler *scheduler, RVS_SchedulerEvent event, RVS_SchedulerDecision *decision_out);
-internal B32                     rvs_scheduler_begin_command_locked             (RVS_Scheduler *scheduler, RVS_SchedulerCommand *command);
 internal void                    rvs_scheduler_decision_release                 (RVS_SchedulerDecision *decision);

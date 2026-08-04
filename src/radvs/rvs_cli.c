@@ -39,6 +39,7 @@
   X(Help,      "HELP")       \
   X(Launch,    "LAUNCH")     \
   X(Run,       "Run")        \
+  X(RunToAddress, "RUN-TO-ADDRESS") \
   X(Stop,      "STOP")       \
   X(Continue,  "CONTINUE")   \
   X(Step,      "STEP")       \
@@ -155,7 +156,7 @@ entry_point(CmdLine *cmdline)
         continue;
       }
 
-      rci_fprintf(stdout, "launch: program %llx (%S) started with pid %u\n", reply.launch.program_id.u64[0], exe_path, reply.launch.pid);
+      rci_fprintf(stdout, "launch: program 0x%llx (%S) started with pid %u\n", reply.launch.program_id.u64[0], exe_path, reply.launch.pid);
     }
 
     else if (str8_match_lit("run", command_string, StringMatchFlag_CaseInsensitive)) {
@@ -174,7 +175,7 @@ entry_point(CmdLine *cmdline)
       RVS_SubmitInfo submit = {0};
       RVS_Result run_result = rvs_session_run(session, program_id, &submit);
       if (run_result != RVS_Result_Ok) {
-        rci_fprintf(stdout, "run: failed to submit program %llu, error code %u\n", program_id.u64[0], run_result);
+        rci_fprintf(stdout, "run: failed to submit program 0x%llx, error code %u\n", program_id.u64[0], run_result);
         continue;
       }
 
@@ -186,7 +187,47 @@ entry_point(CmdLine *cmdline)
         rci_fprintf(stdout, "run: request failed, error code %u\n", reply_result != RVS_Result_Ok ? reply_result : reply.result);
         continue;
       }
-      rci_fprintf(stdout, "run: program %llu resumed\n", program_id.u64[0]);
+      rci_fprintf(stdout, "run: program 0x%llx resumed\n", program_id.u64[0]);
+    }
+
+    else if (str8_match_lit("run-to-address", command_string, StringMatchFlag_CaseInsensitive)) {
+      if (input_split.node_count != 3) {
+        rci_fprintf(stdout, "run-to-address: expected <program-id> <absolute-address>\n");
+        continue;
+      }
+
+      String8 program_string = input_split.first->next->string;
+      String8 address_string = input_split.last->string;
+      U64 program_id_u64 = 0;
+      U64 address = 0;
+      if (!try_u64_from_str8_c_rules(program_string, &program_id_u64)) {
+        rci_fprintf(stdout, "run-to-address: failed to parse program ID string %S\n", program_string);
+        continue;
+      }
+      if (!try_u64_from_str8_c_rules(address_string, &address) || address == 0) {
+        rci_fprintf(stdout, "run-to-address: failed to parse non-zero address string %S\n", address_string);
+        continue;
+      }
+
+      RVS_ProgramID program_id = { .u64 = { program_id_u64 } };
+      RVS_SubmitInfo submit = {0};
+      RVS_Result run_result = rvs_session_run_to_address(session, program_id, address, &submit);
+      if (run_result != RVS_Result_Ok) {
+        rci_fprintf(stdout, "run-to-address: failed to submit program 0x%llx, error code %u\n",
+                    program_id.u64[0], run_result);
+        continue;
+      }
+
+      RVS_EngineReply reply = {0};
+      RVS_Result reply_result = rvs_request_wait(submit.request, max_U64, &reply);
+      rvs_request_release(submit.request);
+      rvs_request_control_release(submit.control);
+      if (reply_result != RVS_Result_Ok || reply.result != RVS_Result_Ok || reply.kind != RVS_EngineReplyKind_Run) {
+        rci_fprintf(stdout, "run-to-address: request failed, error code %u\n",
+                    reply_result != RVS_Result_Ok ? reply_result : reply.result);
+        continue;
+      }
+      rci_fprintf(stdout, "run-to-address: program 0x%llx resumed toward 0x%llx\n", program_id.u64[0], address);
     }
 
     else if (command_string.size != 0) {

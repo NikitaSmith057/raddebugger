@@ -180,6 +180,7 @@ struct DMN_TrapChunkList
 };
 
 typedef struct DMN_RunCtrls DMN_RunCtrls;
+typedef void DMN_RunStartedCallback(B32 success, void *user_data);
 struct DMN_RunCtrls
 {
   DMN_Handle priority_thread;
@@ -187,6 +188,8 @@ struct DMN_RunCtrls
   DMN_Handle *run_entities;
   U64 run_entity_count;
   DMN_TrapChunkList traps;
+  DMN_RunStartedCallback *run_started;
+  void                   *run_started_user_data;
   B8 ignore_previous_exception;
   B8 run_entities_are_unfrozen;
   B8 run_entities_are_processes;
@@ -256,7 +259,7 @@ internal DMN_EventList dmn_ctrl_pump(Arena *arena, DMN_CtrlCtx *ctx);
 ////////////////////////////////
 //~ rjf: @dmn_os_hooks Halting (Implemented Per-OS)
 
-internal void dmn_halt(U64 code, U64 user_data);
+internal B32 dmn_halt(U64 code, U64 user_data);
 
 ////////////////////////////////
 //~ rjf: @dmn_os_hooks Introspection Functions (Implemented Per-OS)

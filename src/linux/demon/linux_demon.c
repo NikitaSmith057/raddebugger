@@ -1241,6 +1241,20 @@ dmn_init(void)
   }
 }
 
+internal void
+dmn_release(void)
+{
+  LNX_DMN_State *shared = lnx_dmn_state;
+  if(shared != 0)
+  {
+    mutex_release(shared->access_mutex);
+    mutex_release(shared->halter_mutex);
+    arena_release(shared->entities_arena);
+    arena_release(shared->arena);
+    lnx_dmn_state = 0;
+  }
+}
+
 ////////////////////////////////
 //~ rjf: @dmn_os_hooks Blocking Control Thread Operations (Implemented Per-OS)
 
@@ -1414,6 +1428,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
   // can correctly interrupt debuggee execution.
   //
   mutex_take(lnx_dmn_state->halter_mutex);
+  lnx_dmn_state->halt_run_active = 1;
   
   //////////////////////////////
   //- rjf: wait for signals from the running threads
@@ -1427,6 +1442,8 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
     //
     U64 bytes_per_trap = arch_info->trap_instruction.size;
     U8 *trap_swap_bytes = push_array(scratch.arena, U8, ctrls->traps.trap_count * bytes_per_trap);
+    B8 *trap_is_installed = push_array(scratch.arena, B8, ctrls->traps.trap_count);
+    B32 trap_install_failed = 0;
     {
       U64 trap_idx = 0;
       for EachNode(n, DMN_TrapChunkNode, ctrls->traps.first)
@@ -1436,7 +1453,13 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
           DMN_Trap *trap = n->v+n_idx;
           if(trap->flags == 0)
           {
-            dmn_process_read(trap->process, r1u64(trap->vaddr, trap->vaddr + bytes_per_trap), trap_swap_bytes + trap_idx*bytes_per_trap);
+            U64 bytes_read = dmn_process_read(trap->process,
+                                              r1u64(trap->vaddr, trap->vaddr + bytes_per_trap),
+                                              trap_swap_bytes + trap_idx*bytes_per_trap);
+            if(bytes_read != bytes_per_trap)
+            {
+              trap_install_failed = 1;
+            }
           }
           trap_idx += 1;
         }
@@ -1446,7 +1469,9 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
     ////////////////////////////
     //- rjf: write all trap instructions
     //
+    if(!trap_install_failed)
     {
+      U64 trap_idx = 0;
       for EachNode(n, DMN_TrapChunkNode, ctrls->traps.first)
       {
         for EachIndex(n_idx, n->count)
@@ -1454,10 +1479,29 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
           DMN_Trap *trap = n->v+n_idx;
           if(trap->flags == 0)
           {
-            dmn_process_write(trap->process, r1u64(trap->vaddr, trap->vaddr + bytes_per_trap), arch_info->trap_instruction.str);
+            if(dmn_process_write(trap->process,
+                                 r1u64(trap->vaddr, trap->vaddr + bytes_per_trap),
+                                 arch_info->trap_instruction.str))
+            {
+              trap_is_installed[trap_idx] = 1;
+            }
+            else
+            {
+              trap_install_failed = 1;
+            }
           }
+          trap_idx += 1;
         }
       }
+    }
+
+    if(trap_install_failed)
+    {
+      DMN_Event *e = dmn_event_list_push(arena, &events);
+      e->kind = DMN_EventKind_Error;
+      e->error_kind = DMN_ErrorKind_UnexpectedFailure;
+      if(ctrls->run_started) { ctrls->run_started(0, ctrls->run_started_user_data); }
+      goto restore_traps;
     }
     
     ////////////////////////////
@@ -1471,6 +1515,8 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
         lnx_dmn_set_single_step_flag(single_step_thread, 1);
       }
     }
+
+    if(ctrls->run_started) { ctrls->run_started(1, ctrls->run_started_user_data); }
     
     ////////////////////////////
     //- rjf: schedule threads to run
@@ -2011,6 +2057,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
                       e->process             = lnx_dmn_handle_from_process(process);
                       e->thread              = lnx_dmn_handle_from_thread(thread);
                       e->instruction_pointer = lnx_dmn_ip_from_thread(thread);
+                      e->address             = e->instruction_pointer;
                       e->user_data           = hit_user_trap ? hit_user_trap->id : 0;
                     }
                   }break;
@@ -3127,6 +3174,9 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
         break;
       }
     }
+
+    // A requested PTRACE_INTERRUPT is complete once every running thread is stopped.
+    if(lnx_dmn_state->is_halting) { is_halt_done = 1; }
     
     ////////////////////////////
     //- rjf: halted -> push halt event, reset halter state
@@ -3141,6 +3191,8 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
       lnx_dmn_state->is_halting     = 0;
     }
     
+    restore_traps:;
+
     ////////////////////////////
     //- rjf: unset all traps - restore original bytes
     //
@@ -3151,7 +3203,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
         for EachIndex(n_idx, n->count)
         {
           DMN_Trap *trap = n->v+n_idx;
-          if(trap->flags == 0)
+          if(trap->flags == 0 && trap_is_installed[trap_idx])
           {
             dmn_process_write(trap->process, r1u64(trap->vaddr, trap->vaddr + bytes_per_trap), trap_swap_bytes + trap_idx*bytes_per_trap);
           }
@@ -3159,6 +3211,10 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
         }
       }
     }
+  }
+  else if(ctrls->run_started)
+  {
+    ctrls->run_started(0, ctrls->run_started_user_data);
   }
   
   //////////////////////////////
@@ -3174,6 +3230,7 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
   //////////////////////////////
   //- rjf: re-allow halts
   //
+  lnx_dmn_state->halt_run_active = 0;
   mutex_drop(lnx_dmn_state->halter_mutex);
   
   scratch_end(scratch);
@@ -3183,23 +3240,49 @@ dmn_ctrl_run(Arena *arena, DMN_CtrlCtx *ctx, DMN_RunCtrls *ctrls)
 ////////////////////////////////
 //~ rjf: @dmn_os_hooks Halting (Implemented Per-OS)
 
-internal void
+internal B32
 dmn_halt(U64 code, U64 user_data)
 {
-  MutexScope(lnx_dmn_state->halter_mutex)
+  B32 result = 0;
+  mutex_take(lnx_dmn_state->halter_mutex);
+  if(lnx_dmn_state->halt_run_active && !lnx_dmn_state->is_halting && lnx_dmn_state->process_count)
   {
-    if(lnx_dmn_state->process_count)
+    lnx_dmn_state->halter_tid     = gettid();
+    lnx_dmn_state->halt_code      = code;
+    lnx_dmn_state->halt_user_data = user_data;
+    lnx_dmn_state->is_halting     = 1;
+    for EachNode(process, LNX_DMN_Process, lnx_dmn_state->first_process)
     {
-      lnx_dmn_state->halter_tid     = gettid();
-      lnx_dmn_state->halt_code      = code;
-      lnx_dmn_state->halt_user_data = user_data;
-      for EachNode(process, LNX_DMN_Process, lnx_dmn_state->first_process)
+      for EachNode(thread, LNX_DMN_Thread, process->first_thread)
       {
-        int kill_result = LNX_RETRY_ON_EINTR(kill(process->pid, SIGSTOP));
-        int x = 0;
+        if(thread->state == LNX_DMN_ThreadState_Running &&
+           LNX_RETRY_ON_EINTR(ptrace(PTRACE_INTERRUPT, thread->tid, 0, 0)) >= 0)
+        {
+          result = 1;
+        }
       }
     }
+    if(!result && code == 0 && user_data == 0)
+    {
+      for EachNode(process, LNX_DMN_Process, lnx_dmn_state->first_process)
+      {
+        if(LNX_RETRY_ON_EINTR(kill(process->pid, SIGKILL)) >= 0)
+        {
+          result = 1;
+          break;
+        }
+      }
+    }
+    if(!result)
+    {
+      lnx_dmn_state->halter_tid = 0;
+      lnx_dmn_state->halt_code = 0;
+      lnx_dmn_state->halt_user_data = 0;
+      lnx_dmn_state->is_halting = 0;
+    }
   }
+  mutex_drop(lnx_dmn_state->halter_mutex);
+  return result;
 }
 
 ////////////////////////////////
