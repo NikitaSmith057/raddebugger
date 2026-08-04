@@ -31,13 +31,6 @@ typedef enum
 
 typedef enum
 {
-  RVS_SchedulerDecisionStatus_Applied,
-  RVS_SchedulerDecisionStatus_Rejected,
-  RVS_SchedulerDecisionStatus_IgnoredStale,
-} RVS_SchedulerDecisionStatus;
-
-typedef enum
-{
   RVS_SchedulerEmission_Null,
   RVS_SchedulerEmission_CompleteRequest,
   RVS_SchedulerEmission_PublishEvent,
@@ -58,15 +51,6 @@ typedef enum
   RVS_SchedulerCommand_PumpLaunch,
   RVS_SchedulerCommand_PublishTarget,
 } RVS_SchedulerCommandKind;
-
-typedef enum
-{
-  RVS_SchedulerCommandOutcome_Null,
-  RVS_SchedulerCommandOutcome_Failed,
-  RVS_SchedulerCommandOutcome_InterruptExecutionCompleted,
-  RVS_SchedulerCommandOutcome_PublishTargetCompleted,
-  RVS_SchedulerCommandOutcome_ResumeTargetSubsetCompleted,
-} RVS_SchedulerCommandOutcomeKind;
 
 typedef enum
 {
@@ -438,7 +422,6 @@ typedef struct
 
 typedef struct
 {
-  RVS_SchedulerDecisionStatus status;
   RVS_Result                  result;
   // State and pending-command changes are committed before return. Emissions are
   // ordered, best-effort consequences and never cause scheduler rollback.
@@ -464,12 +447,11 @@ typedef struct
       U64                            dispositions_count;
     } demon_events;
     struct {
-      RVS_SchedulerCommandOutcomeKind kind;
-      RVS_SchedulerCommandKind        command_kind;
-      RVS_SchedulerCommandToken       command;
-      RVS_Result                      result;
-      RVS_ProgramID                   target;
-      U32                             pid;
+      RVS_SchedulerCommandKind  command_kind;
+      RVS_SchedulerCommandToken command;
+      RVS_Result                result;
+      RVS_ProgramID             target;
+      U32                       pid;
     } command_outcome;
     struct { RVS_MessageID request_id; RVS_ProgramID target; U64 execution_token; } observed;
     struct { RVS_ProgramID target; RVS_ThreadID thread; } thread_selected;

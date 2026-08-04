@@ -70,8 +70,6 @@ struct RVS_EnginePreparedEmission
 
 typedef struct
 {
-  RVS_SchedulerDecisionStatus status;
-  RVS_Result                  result;
   RVS_EnginePreparedEmission *emission_first;
   RVS_EnginePreparedEmission *emission_last;
   RVS_SchedulerCommandKind    command_kind;
@@ -217,8 +215,8 @@ struct RVS_Engine
 ////////////////////////////////
 // Internals
 
-internal void rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOutcome outcome, Arena *scratch,
-                                                   B32 reject_if_shutdown, RVS_EnginePreparedDecision *prepared);
+internal RVS_Result rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOutcome outcome, Arena *scratch,
+                                                          B32 reject_if_shutdown, RVS_EnginePreparedDecision *prepared);
 
 internal RVS_EngineSchedulerOutcome rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecision *prepared);
 
@@ -419,13 +417,11 @@ rvs_engine_request_mark_dispatched_locked(RVS_Engine *engine, RVS_MessageID requ
         .kind = RVS_SchedulerEvent_DispatchStarted,
         .request = { .request_id = request_id },
       }, &decision);
-      result = decision.status == RVS_SchedulerDecisionStatus_Applied &&
+      result = decision.result == RVS_Result_Ok &&
                decision.projections.first == 0 && decision.emissions.first == 0;
       if (result && decision.command.kind != RVS_SchedulerCommand_Null) {
         AssertAlways(command->kind == RVS_EngineCommandKind_Interrupt &&
                      decision.command.kind == RVS_SchedulerCommand_InterruptExecution);
-        prepared->status = decision.status;
-        prepared->result = decision.result;
         prepared->command_prepare_result = RVS_Result_Ok;
         prepared->command_kind = decision.command.kind;
         prepared->command_token = decision.command.token;
@@ -478,7 +474,6 @@ rvs_engine_apply_scheduler_outcome_locked(RVS_Engine *engine, RVS_EngineSchedule
     RVS_SchedulerEvent event = {
       .kind = RVS_SchedulerEvent_CommandOutcome,
       .command_outcome = {
-        .kind = RVS_SchedulerCommandOutcome_PublishTargetCompleted,
         .command_kind = RVS_SchedulerCommand_PublishTarget,
         .command = outcome.command,
         .result = RVS_Result_Ok,
@@ -495,8 +490,6 @@ rvs_engine_prepare_scheduler_decision_locked(RVS_Engine *engine, RVS_SchedulerDe
 {
   MemoryZeroStruct(prepared);
 
-  prepared->status = decision->status;
-  prepared->result = decision->result;
   prepared->command_prepare_result = RVS_Result_Ok;
 
   for EachNode(projection, RVS_SchedulerProjection, decision->projections.first) {
@@ -604,7 +597,6 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
       outcome.event = (RVS_SchedulerEvent){
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
-          .kind = RVS_SchedulerCommandOutcome_Failed,
           .command_kind = prepared->command_kind,
           .command = prepared->command_token,
           .result = result,
@@ -631,7 +623,6 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
       outcome.event = (RVS_SchedulerEvent){
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
-          .kind = RVS_SchedulerCommandOutcome_Failed,
           .command_kind = prepared->command_kind,
           .command = prepared->command_token,
           .result = result,
@@ -649,7 +640,6 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
       outcome.event = (RVS_SchedulerEvent){
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
-          .kind = RVS_SchedulerCommandOutcome_Failed,
           .command_kind = prepared->command_kind,
           .command = prepared->command_token,
           .result = result,
@@ -667,10 +657,11 @@ rvs_engine_execute_prepared_decision(RVS_Engine *engine, RVS_EnginePreparedDecis
   return outcome;
 }
 
-internal void
+internal RVS_Result
 rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOutcome outcome, Arena *scratch,
                                      B32 reject_if_shutdown, RVS_EnginePreparedDecision *prepared)
 {
+  RVS_Result result = RVS_Result_EngineStopped;
   rvs_control_mutex_take(session->control);
   if (session->control->is_shutdown && outcome.kind == RVS_EngineSchedulerOutcomeKind_PublishTarget) {
     outcome = (RVS_EngineSchedulerOutcome){
@@ -678,7 +669,6 @@ rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOu
       .event = {
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
-          .kind = RVS_SchedulerCommandOutcome_Failed,
           .command_kind = RVS_SchedulerCommand_PublishTarget,
           .command = outcome.command,
           .result = RVS_Result_EngineStopped,
@@ -688,17 +678,17 @@ rvs_control_reduce_scheduler_outcome(RVS_Session *session, RVS_EngineSchedulerOu
   }
   if (reject_if_shutdown && (session->control->is_shutdown || session->engine_released || session->engine == 0)) {
     MemoryZeroStruct(prepared);
-    prepared->status = RVS_SchedulerDecisionStatus_Rejected;
-    prepared->result = RVS_Result_EngineStopped;
   } else {
     RVS_SchedulerDecision decision = {0};
     RVS_Engine *engine = session->engine;
     AssertAlways(engine != 0);
     rvs_engine_apply_scheduler_outcome_locked(engine, outcome, &decision);
     rvs_engine_prepare_scheduler_decision_locked(engine, &decision, scratch, prepared);
+    result = decision.result;
     rvs_scheduler_decision_release(&decision);
   }
   rvs_control_mutex_drop(session->control);
+  return result;
 }
 
 internal void
@@ -709,7 +699,7 @@ rvs_engine_drive_scheduler_outcome(RVS_Engine *engine, RVS_EngineSchedulerOutcom
   for (U32 transition_idx = 0;; transition_idx += 1) {
     Temp scratch = scratch_begin(0, 0);
     RVS_EnginePreparedDecision prepared = {0};
-    rvs_control_reduce_scheduler_outcome(engine->session, outcome, scratch.arena, 0, &prepared);
+    (void)rvs_control_reduce_scheduler_outcome(engine->session, outcome, scratch.arena, 0, &prepared);
 
     outcome = rvs_engine_execute_prepared_decision(engine, &prepared);
     scratch_end(scratch);
@@ -982,7 +972,6 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
       rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
         .kind = RVS_SchedulerEvent_CommandOutcome,
         .command_outcome = {
-          .kind = result == RVS_Result_Ok ? RVS_SchedulerCommandOutcome_ResumeTargetSubsetCompleted : RVS_SchedulerCommandOutcome_Failed,
           .command_kind = RVS_SchedulerCommand_ResumeTargetSubset,
           .command = { .request_id = reply->request_id, .command_id = reply->action_result.command_id },
           .result = result,
@@ -1020,7 +1009,6 @@ rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
     rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
       .kind = RVS_SchedulerEvent_CommandOutcome,
       .command_outcome = {
-        .kind = RVS_SchedulerCommandOutcome_InterruptExecutionCompleted,
         .command_kind = RVS_SchedulerCommand_InterruptExecution,
         .command = { .request_id = reply->request_id, .command_id = reply->execution_stopped.command_id },
         .result = RVS_Result_Ok,

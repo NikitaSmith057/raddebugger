@@ -1572,7 +1572,7 @@ rvs_request_control_release(RVS_RequestControl *owner)
   if (owner->registered) {
     Temp scratch = scratch_begin(0, 0);
     RVS_EnginePreparedDecision prepared = {0};
-    rvs_control_reduce_scheduler_outcome(owner->session, (RVS_EngineSchedulerOutcome){
+    (void)rvs_control_reduce_scheduler_outcome(owner->session, (RVS_EngineSchedulerOutcome){
       .kind = RVS_EngineSchedulerOutcomeKind_Event,
       .event = {
         .kind = RVS_SchedulerEvent_RequestControlReleased,
@@ -1593,14 +1593,13 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
   if (owner == 0 || owner->request_id == 0 || owner->session == 0) { return RVS_Result_Error; }
   Temp scratch = scratch_begin(0, 0);
   RVS_EnginePreparedDecision prepared = {0};
-  rvs_control_reduce_scheduler_outcome(owner->session, (RVS_EngineSchedulerOutcome){
+  RVS_Result result = rvs_control_reduce_scheduler_outcome(owner->session, (RVS_EngineSchedulerOutcome){
     .kind = RVS_EngineSchedulerOutcomeKind_Event,
     .event = (RVS_SchedulerEvent){
       .kind = RVS_SchedulerEvent_PreDispatchCancelled,
       .request = { .request_id = owner->request_id },
     },
   }, scratch.arena, 1, &prepared);
-  RVS_Result result = prepared.result;
   if (prepared.emission_first && prepared.emission_first->kind == RVS_SchedulerEmission_CompleteRequest) {
     result = RVS_Result_Ok;
   }
@@ -1616,9 +1615,8 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
 internal void
 rvs_scheduler_decision_ignore_stale(RVS_SchedulerDecision *decision)
 {
-  AssertAlways(decision->status == RVS_SchedulerDecisionStatus_Applied && decision->result == RVS_Result_Ok);
+  AssertAlways(decision->result == RVS_Result_Ok);
   AssertAlways(decision->projections.first == 0 && decision->emissions.first == 0 && decision->command.kind == RVS_SchedulerCommand_Null);
-  decision->status = RVS_SchedulerDecisionStatus_IgnoredStale;
   decision->result = RVS_Result_StaleState;
 }
 
@@ -1626,9 +1624,8 @@ internal void
 rvs_scheduler_decision_reject(RVS_SchedulerDecision *decision, RVS_Result result)
 {
   AssertAlways(result != RVS_Result_Null && result != RVS_Result_Ok && result != RVS_Result_Pending && result != RVS_Result_StaleState);
-  AssertAlways(decision->status == RVS_SchedulerDecisionStatus_Applied && decision->result == RVS_Result_Ok);
+  AssertAlways(decision->result == RVS_Result_Ok);
   AssertAlways(decision->projections.first == 0 && decision->emissions.first == 0 && decision->command.kind == RVS_SchedulerCommand_Null);
-  decision->status = RVS_SchedulerDecisionStatus_Rejected;
   decision->result = result;
 }
 
@@ -1681,7 +1678,7 @@ rvs_scheduler_set_command_locked(RVS_Scheduler            *scheduler,
 {
   rvs_scheduler_assert_reducing(scheduler);
   AssertAlways(kind != RVS_SchedulerCommand_Null && operation != 0);
-  AssertAlways(decision->status == RVS_SchedulerDecisionStatus_Applied && decision->command.kind == RVS_SchedulerCommand_Null);
+  AssertAlways(decision->result == RVS_Result_Ok && decision->command.kind == RVS_SchedulerCommand_Null);
   AssertAlways(operation->pending_command.kind == RVS_SchedulerCommand_Null);
   AssertAlways(scheduler->next_command_id != max_U64);
 
@@ -2184,13 +2181,12 @@ rvs_scheduler_apply_locked(RVS_Scheduler         *scheduler,
       break;
     }
 
-    if (event.command_outcome.kind == RVS_SchedulerCommandOutcome_Failed &&
-        event.command_outcome.result != RVS_Result_Null &&
+    if (event.command_outcome.result != RVS_Result_Null &&
         event.command_outcome.result != RVS_Result_Ok &&
         event.command_outcome.result != RVS_Result_Pending) {
       rvs_scheduler_abort_operation_locked(scheduler, token.request_id, event.command_outcome.result, 0, decision_out);
-    } else if (event.command_outcome.kind == RVS_SchedulerCommandOutcome_PublishTargetCompleted &&
-               command_kind == RVS_SchedulerCommand_PublishTarget &&
+    } else if (command_kind == RVS_SchedulerCommand_PublishTarget &&
+               event.command_outcome.result == RVS_Result_Ok &&
                operation->launch_pid == event.command_outcome.pid &&
                dmn_handle_match(operation->launch_process, event.command_outcome.target) &&
                rvs_scheduler_target_from_id_locked(scheduler, event.command_outcome.target) == 0) {
@@ -2201,12 +2197,10 @@ rvs_scheduler_apply_locked(RVS_Scheduler         *scheduler,
       RVS_SchedulerEmission *emission = rvs_scheduler_complete_operation_locked(scheduler, operation, RVS_Result_Ok, decision_out);
       emission->reply.launch.program_id = event.command_outcome.target;
       emission->reply.launch.pid = event.command_outcome.pid;
-    } else if (event.command_outcome.kind == RVS_SchedulerCommandOutcome_InterruptExecutionCompleted &&
-               command_kind == RVS_SchedulerCommand_InterruptExecution &&
+    } else if (command_kind == RVS_SchedulerCommand_InterruptExecution &&
                event.command_outcome.result == RVS_Result_Ok) {
       rvs_scheduler_establish_stable_stop_locked(scheduler, operation, token, decision_out);
-    } else if (event.command_outcome.kind == RVS_SchedulerCommandOutcome_ResumeTargetSubsetCompleted &&
-               command_kind == RVS_SchedulerCommand_ResumeTargetSubset &&
+    } else if (command_kind == RVS_SchedulerCommand_ResumeTargetSubset &&
                event.command_outcome.result == RVS_Result_Ok) {
       RVS_Result result = rvs_scheduler_finish_resume_transaction_locked(scheduler, token.request_id);
       if (result == RVS_Result_Error) {
@@ -2270,14 +2264,9 @@ rvs_scheduler_apply_locked(RVS_Scheduler         *scheduler,
   default: { InvalidPath; } break;
   }
   finalize:;
-  if (decision_out->status == RVS_SchedulerDecisionStatus_Applied) {
-    AssertAlways(decision_out->result == RVS_Result_Ok);
-  } else {
+  if (decision_out->result != RVS_Result_Ok) {
     AssertAlways(decision_out->projections.first == 0 && decision_out->emissions.first == 0 && decision_out->command.kind == RVS_SchedulerCommand_Null);
-    AssertAlways((decision_out->status == RVS_SchedulerDecisionStatus_Rejected &&
-                  decision_out->result != RVS_Result_Ok && decision_out->result != RVS_Result_StaleState) ||
-                  (decision_out->status == RVS_SchedulerDecisionStatus_IgnoredStale &&
-                   decision_out->result == RVS_Result_StaleState));
+    AssertAlways(decision_out->result != RVS_Result_Pending && decision_out->result != RVS_Result_Null);
   }
   rvs_scheduler_assert_execution_owner_locked(scheduler);
   rvs_scheduler_reducer_active = 0;
