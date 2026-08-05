@@ -41,10 +41,7 @@
 #include "rdi/rdi_local.c"
 #include "arch/arch_inc.c"
 #include "demon/demon_inc.c"
-
-#include "radvs/rvs_async.c"
-#include "radvs/rvs_demon.c"
-#include "radvs/rvs_engine.c"
+#include "radvs/rvs_inc.c"
 
 ////////////////////////////////
 
@@ -118,15 +115,7 @@ entry_point(CmdLine *cmdline)
   RVS_Result  engine_init_result = rvs_engine_init(&engine);
   if (engine_init_result != RVS_Result_Ok) {
     rci_fprintf(stderr, "ERROR: failed to initialize the debug engine; error code %u\n", engine_init_result);
-    goto engine_exit;
-  }
-
-  // TODO: allocate engine session (currently only one session is allowed per engine, for final version hide it behind rvs_engine_* api)
-  RVS_Session *session = 0;
-  RVS_Result   session_create_result = rvs_engine_create_session(engine, &session);
-  if (session_create_result != RVS_Result_Ok) {
-    rci_fprintf(stderr, "ERROR: failed to create a session; error code %u\n", session_create_result);
-    goto session_exit;
+    goto exit;
   }
 
   g_rci.engine       = engine;
@@ -161,7 +150,7 @@ entry_point(CmdLine *cmdline)
 
       RVS_SubmitInfo submit;
       String8        exe_path       = str8_skip_chop_whitespace(cmd_raw.first->next->string);
-      RVS_Result     launch_result  = rvs_session_launch(session, exe_path, str8_zero(), &submit);
+      RVS_Result     launch_result  = rvs_engine_launch(engine, exe_path, str8_zero(), &submit);
 
       if (launch_result != RVS_Result_Ok) {
         rci_printf("Launch: failed to launch program %S, error code %u\n", exe_path, launch_result);
@@ -202,7 +191,7 @@ entry_point(CmdLine *cmdline)
       }
 
       RVS_SubmitInfo submit;
-      RVS_Result     run_result = rvs_session_run(session, program_id, &submit);
+      RVS_Result     run_result = rvs_engine_run(engine, program_id, &submit);
       if (run_result != RVS_Result_Ok) {
         rci_printf("Run: failed to submit program 0x%llx, error code %u\n", program_id.value, run_result);
         continue;
@@ -240,7 +229,7 @@ entry_point(CmdLine *cmdline)
 
       RVS_ProgramID program_id = { .value = program_id_u64 };
       RVS_SubmitInfo submit;
-      RVS_Result run_result = rvs_session_run_to_address(session, program_id, address, &submit);
+      RVS_Result run_result = rvs_engine_run_to_address(engine, program_id, address, &submit);
       if (run_result != RVS_Result_Ok) {
         rci_printf("RunAddr: failed to submit program 0x%llx, error code %u\n",
                     program_id.value, run_result);
@@ -266,7 +255,7 @@ entry_point(CmdLine *cmdline)
     case RCI_CmdKind_LsProg: {
       RVS_ProgramSnapshot *programs       = 0;
       U64                  programs_count = 0;
-      RVS_Result           result         = rvs_session_copy_programs(temp.arena, session, &programs, &programs_count);
+      RVS_Result           result         = rvs_engine_copy_programs(temp.arena, engine, &programs, &programs_count);
       if (result == RVS_Result_Ok) {
         rci_printf("--- Programs -------------------------------------------------------------------\n");
         rci_printf("  %-3s %-10s %-8s %-8s %s\n", "No.", "PROGRAM-ID", "PID", "STATUS", "PATH");
@@ -297,10 +286,8 @@ entry_point(CmdLine *cmdline)
   }
   scratch_end(scratch);
 
-  session_exit:;
+  exit:;
   // shutdown the debug engine
-  rvs_session_release(session);
-  engine_exit:;
   RVS_Result shutdown_result = rvs_engine_shutdown(engine);
   rci_printf("debug engine exited with code %u%s\n", shutdown_result, shutdown_result == RVS_Result_Ok ? " (Ok)" : "");
 

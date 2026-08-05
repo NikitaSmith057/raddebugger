@@ -73,9 +73,9 @@ rvs_entity_program_from_node_locked(RVS_Entity *node)
 internal void
 rvs_entity_store_init(RVS_EntityStore *store, Arena *arena, Mutex mutex)
 {
-  store->arena = arena;
-  store->mutex = mutex;
-  store->cv = cond_var_alloc();
+  store->arena     = arena;
+  store->mutex     = mutex;
+  store->cv        = cond_var_alloc();
   store->root.kind = RVS_EntityKind_Root;
 }
 

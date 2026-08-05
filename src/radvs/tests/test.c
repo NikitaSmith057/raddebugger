@@ -364,7 +364,7 @@ entry_point(CmdLine *cmdline)
   AssertAlways(rvs_string_from_command_kind(RVS_EngineCommandKind_Null).size == 0);
 
   RVS_SubmitInfo launch_submit = {0};
-  AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &launch_submit) == RVS_Result_Ok);
+  AssertAlways(rvs_engine_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &launch_submit) == RVS_Result_Ok);
   AssertAlways(launch_submit.request != 0 && launch_submit.control != 0);
   RVS_Request *request = launch_submit.request;
 
@@ -388,7 +388,7 @@ entry_point(CmdLine *cmdline)
   rvs_request_control_release(launch_submit.control);
 
   RVS_SubmitInfo second_launch_submit = {0};
-  AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &second_launch_submit) == RVS_Result_Ok);
+  AssertAlways(rvs_engine_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &second_launch_submit) == RVS_Result_Ok);
   RVS_EngineReply second_launch_reply = {0};
   AssertAlways(rvs_request_wait(second_launch_submit.request, max_U64, &second_launch_reply) == RVS_Result_Ok);
   AssertAlways(second_launch_reply.result == RVS_Result_Ok);
@@ -396,7 +396,7 @@ entry_point(CmdLine *cmdline)
   rvs_request_control_release(second_launch_submit.control);
 
   RVS_SubmitInfo third_launch_submit = {0};
-  AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &third_launch_submit) == RVS_Result_Ok);
+  AssertAlways(rvs_engine_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &third_launch_submit) == RVS_Result_Ok);
   RVS_EngineReply third_launch_reply = {0};
   AssertAlways(rvs_request_wait(third_launch_submit.request, max_U64, &third_launch_reply) == RVS_Result_Ok);
   AssertAlways(third_launch_reply.result == RVS_Result_Ok);
@@ -925,7 +925,7 @@ entry_point(CmdLine *cmdline)
   RVS_ProgramID other_program_id = { .u64 = { max_U64 - 1 } };
   AssertAlways(rvs_session_run(session, other_program_id, &blocked_run_submit) == RVS_Result_AlreadyPending);
   RVS_SubmitInfo blocked_launch_submit = {0};
-  AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &blocked_launch_submit) == RVS_Result_AlreadyPending);
+  AssertAlways(rvs_engine_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &blocked_launch_submit) == RVS_Result_AlreadyPending);
   mutex_take(session->control->mutex);
   AssertAlways( ! rvs_scheduler_execution_blocks_operation_locked(&session->scheduler, RVS_SchedulerOp_ReadOnly));
   mutex_drop(session->control->mutex);
@@ -2031,7 +2031,7 @@ entry_point(CmdLine *cmdline)
   AssertAlways( ! MemoryIsZeroStruct(&shutdown_thread));
   rvs_test_wait_until_shutdown(session);
   RVS_SubmitInfo stopped_submit = {0};
-  AssertAlways(rvs_session_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &stopped_submit) == RVS_Result_EngineStopped);
+  AssertAlways(rvs_engine_launch(session, str8_lit("C:\\Windows\\System32\\where.exe"), str8_zero(), &stopped_submit) == RVS_Result_EngineStopped);
   AssertAlways(stopped_submit.request == 0 && stopped_submit.control == 0);
   thread_join(shutdown_thread, max_U64);
   thread_join(event_thread, max_U64);

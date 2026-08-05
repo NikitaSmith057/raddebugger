@@ -515,9 +515,8 @@ internal void                    rvs_scheduler_prepare_decision_locked          
 internal RVS_Result              rvs_scheduler_register_operation_locked        (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_SchedulerKey key, RVS_ScheduledOperation *operation);
 internal RVS_ScheduledOperation *rvs_scheduler_unregister_operation_locked      (RVS_Scheduler *scheduler, RVS_SchedulerKey key, RVS_ScheduledOperation *expected_operation);
 
-internal RVS_RequestControl     *rvs_request_control_alloc                      (RVS_Session *session, RVS_ScheduledOperation *operation, B32 registered);
-
 internal RVS_Result              rvs_scheduler_admit_locked                     (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_SchedulerKey key, RVS_ProgramID *targets, U64 targets_count, U64 captured_program_state_epoch, RVS_SchedulerAdmission *admission_out);
 internal void                    rvs_scheduler_rollback_admission_locked        (RVS_Scheduler *scheduler, RVS_SchedulerAdmission *admission);
 internal void                    rvs_scheduler_apply_locked                     (RVS_Scheduler *scheduler, RVS_SchedulerEvent event, RVS_SchedulerDecision *decision_out);
 internal void                    rvs_scheduler_decision_release                 (RVS_SchedulerDecision *decision);
+

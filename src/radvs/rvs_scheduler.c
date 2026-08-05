@@ -1,6 +1,10 @@
 // This file is included only by rvs_engine.c after private engine/session types.
 
+// TODO: a null output in rvs_control_reduce_scheduler_event should not allocatea decision and must assert
+// the invariant where reduce event without out param must not generate decisions
+
 #include "radvs/rvs_request.h"
+#include "radvs/rvs_scheduler.h"
 
 internal RVS_SchedulerEmission *rvs_scheduler_emit_locked(RVS_Scheduler *scheduler, RVS_SchedulerDecision *decision, RVS_SchedulerEmissionKind kind, RVS_ScheduledOperation *operation);
 internal RVS_SchedulerCommand  *rvs_scheduler_set_command_locked(RVS_Scheduler *scheduler, RVS_SchedulerDecision *decision, RVS_SchedulerCommandKind kind, RVS_ScheduledOperation *operation);
@@ -18,6 +22,17 @@ internal RVS_Plan *rvs_scheduler_plan_alloc_locked(RVS_Scheduler *scheduler, RVS
 internal RVS_Plan *rvs_scheduler_plan_from_id_locked(RVS_Scheduler *scheduler, RVS_PlanID plan_id);
 
 thread_static RVS_Scheduler *rvs_scheduler_reducer_active;
+
+internal B32
+rvs_scheduler_operation_key_resolves_locked(RVS_Scheduler *scheduler, RVS_SchedulerKey key)
+{
+  if (key.op != RVS_SchedulerOp_ReadOnly && key.op != RVS_SchedulerOp_TargetConfiguration) {
+    return 1;
+  }
+
+  RVS_TargetControl *program = rvs_scheduler_target_from_id_locked(scheduler, key.target);
+  return program != 0 && program->state != RVS_TargetState_Removed;
+}
 
 internal void
 rvs_scheduler_assert_reducing(RVS_Scheduler *scheduler)
@@ -1610,61 +1625,6 @@ rvs_scheduler_rollback_admission_locked(RVS_Scheduler *scheduler, RVS_SchedulerA
   if (registered_operation) { rvs_scheduler_operation_release(registered_operation); }
   rvs_scheduler_operation_release(operation); // drop active registration ownership
   MemoryZeroStruct(admission);
-}
-
-internal RVS_RequestControl *
-rvs_request_control_alloc(RVS_Session *session, RVS_ScheduledOperation *operation, B32 registered)
-{
-  Arena *arena = arena_alloc(.name = "Engine Operation Owner");
-  RVS_RequestControl *owner = push_array(arena, RVS_RequestControl, 1);
-  owner->arena = arena;
-  owner->session = session;
-  owner->control = session->control;
-  owner->request_id = operation->request->request_id;
-  owner->registered = registered;
-  rvs_session_addref(session);
-  rvs_engine_control_addref(owner->control);
-  return owner;
-}
-
-void
-rvs_request_control_release(RVS_RequestControl *owner)
-{
-  if (owner == 0) { return; }
-  if (owner->registered) {
-    Temp scratch = scratch_begin(0, 0);
-    RVS_SchedulerDecision decision = {0};
-    (void)rvs_control_reduce_scheduler_event(owner->session, (RVS_SchedulerEvent){
-      .kind = RVS_SchedulerEvent_RequestControlReleased,
-      .request = { .request_id = owner->request_id },
-    }, scratch.arena, 1, &decision);
-    AssertAlways(decision.emissions.first == 0 && decision.command.kind == RVS_SchedulerCommand_Null);
-    rvs_scheduler_decision_release(&decision);
-    scratch_end(scratch);
-  }
-  rvs_engine_control_release(owner->control);
-  rvs_session_release(owner->session);
-  arena_release(owner->arena);
-}
-
-RVS_Result
-rvs_request_control_cancel(RVS_RequestControl *owner)
-{
-  if (owner == 0 || owner->request_id == 0 || owner->session == 0) { return RVS_Result_Error; }
-  Temp scratch = scratch_begin(0, 0);
-  RVS_SchedulerDecision decision = {0};
-  RVS_Result result = rvs_control_reduce_scheduler_event(owner->session, (RVS_SchedulerEvent){
-    .kind = RVS_SchedulerEvent_PreDispatchCancelled,
-    .request = { .request_id = owner->request_id },
-  }, scratch.arena, 1, &decision);
-  if (decision.emissions.first && decision.emissions.first->kind == RVS_SchedulerEmission_CompleteRequest) {
-    result = RVS_Result_Ok;
-  }
-  RVS_SchedulerEvent event = rvs_engine_execute_scheduler_decision(owner->session->engine, &decision);
-  rvs_scheduler_decision_release(&decision);
-  AssertAlways(event.kind == RVS_SchedulerEvent_Null);
-  scratch_end(scratch);
-  return result;
 }
 
 ////////////////////////////////
