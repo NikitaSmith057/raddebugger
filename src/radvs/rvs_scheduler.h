@@ -315,6 +315,16 @@ typedef struct
   RVS_RunIntentState state;
 } RVS_RunIntent;
 
+typedef struct
+{
+  RVS_SchedulerOp op;
+  RVS_ProgramID  *targets;
+  U64             targets_count;
+  RVS_RunIntent   run_intent;
+  RVS_RunMode     run_mode;
+  U64             run_address;
+} RVS_SchedulerSubmit;
+
 typedef enum
 {
   RVS_SchedulerEvent_Null,
@@ -337,6 +347,7 @@ typedef struct
   RVS_SchedulerEventKind kind;
   union {
     struct { RVS_MessageID     request_id; } request;
+    struct { RVS_MessageID request_id; RVS_SchedulerOp op; ProcessLaunchParams launch_params; } dispatch_started;
     struct { RVS_MessageID     request_id; RVS_Result result; } failed;
     struct { RVS_EngineReply   reply;      } completed;
     struct { RVS_MessageID     request_id; U32 pid; } launch_started;
@@ -437,23 +448,25 @@ struct RVS_ScheduledOperation
 };
 
 // The following scheduler mutation APIs require the owning session's control mutex.
+internal void                    rvs_scheduler_init                            (RVS_Scheduler *scheduler, Arena *arena, RVS_EntityStore *entities);
+internal void                    rvs_scheduler_release                         (RVS_Scheduler *scheduler);
+internal void                    rvs_scheduler_assert_quiescent_locked        (RVS_Scheduler *scheduler);
+internal B32                     rvs_scheduler_selected_thread_locked         (RVS_Scheduler *scheduler, RVS_ProgramID *target_out, RVS_ThreadID *thread_out);
 internal B32                     rvs_scheduler_has_conflicting_operation_locked (RVS_Scheduler *scheduler, RVS_SchedulerOp op, RVS_ProgramID *targets, U64 targets_count);
 internal void                    rvs_scheduler_target_add_locked                 (RVS_Scheduler *scheduler, RVS_ProgramID id);
 internal RVS_TargetControl      *rvs_scheduler_target_from_id_locked            (RVS_Scheduler *scheduler, RVS_ProgramID id);
 internal RVS_TargetControl      *rvs_scheduler_target_from_process_locked       (RVS_Scheduler *scheduler, RVS_ProcessID process);
 internal void                    rvs_scheduler_release_execution_leases_locked  (RVS_Scheduler *scheduler);
-internal B32                     rvs_scheduler_execution_blocks_operation_locked(RVS_Scheduler *scheduler, RVS_SchedulerOp op);
 internal RVS_ScheduledOperation *rvs_scheduler_operation_alloc_locked           (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, RVS_MessageID request_id, RVS_SchedulerOp op, RVS_ProgramID *targets, U64 targets_count);
-internal RVS_Plan               *rvs_scheduler_attach_run_to_address_locked      (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation, RVS_ProgramID target, U64 vaddr);
 
 internal void                    rvs_scheduler_operation_addref                 (RVS_ScheduledOperation *operation);
 internal void                    rvs_scheduler_operation_release                (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation);
 
 internal void                    rvs_scheduler_operation_remove_locked          (RVS_Scheduler *scheduler, RVS_ScheduledOperation *operation);
 internal RVS_ScheduledOperation *rvs_scheduler_operation_from_request_id_locked(RVS_Scheduler *scheduler, RVS_MessageID request_id);
-internal void                    rvs_scheduler_prepare_decision_locked          (RVS_Scheduler *scheduler, RVS_SchedulerDecision *decision,
-                                                                                   RVS_ProcessSnapshot *processes, U64 processes_count, Arena *arena);
-internal RVS_Result              rvs_scheduler_admit_locked                     (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id, RVS_SchedulerOp op, RVS_ProgramID *targets, U64 targets_count, RVS_SchedulerAdmission *admission_out);
-internal void                    rvs_scheduler_rollback_admission_locked        (RVS_Scheduler *scheduler, RVS_SchedulerAdmission *admission);
-internal void                    rvs_scheduler_apply_locked                     (RVS_Scheduler *scheduler, RVS_SchedulerEvent event, RVS_SchedulerDecision *decision_out);
+internal RVS_Result              rvs_scheduler_submit_locked                    (RVS_Scheduler *scheduler, RVS_RequestPool *expected_pool, U64 *next_request_id,
+                                                                                    RVS_SchedulerSubmit submit, RVS_Request **request_out, RVS_MessageID *request_id_out);
+internal void                    rvs_scheduler_retract_submission_locked        (RVS_Scheduler *scheduler, RVS_MessageID request_id);
+internal void                    rvs_scheduler_consider_event_locked            (RVS_Scheduler *scheduler, RVS_SchedulerEvent event, Arena *effect_arena,
+                                                                                    RVS_SchedulerDecision *decision_out);
 internal void                    rvs_scheduler_decision_release                 (RVS_Scheduler *scheduler, RVS_SchedulerDecision *decision);

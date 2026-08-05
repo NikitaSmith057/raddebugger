@@ -107,7 +107,7 @@ typedef struct
 ////////////////////////////////
 // Request Control
 
-internal RVS_RequestControl * rvs_request_control_alloc(RVS_SessionControlParams params, RVS_ScheduledOperation *operation);
+internal RVS_RequestControl * rvs_request_control_alloc(RVS_SessionControlParams params, RVS_MessageID request_id);
 internal void                 rvs_request_control_release(RVS_RequestControl *owner);
 internal RVS_Result           rvs_request_control_cancel(RVS_RequestControl *owner);
 
@@ -117,13 +117,14 @@ internal RVS_Result           rvs_request_control_cancel(RVS_RequestControl *own
 #define rvs_session_params_from_engine(e) (RVS_SessionControlParams){ .control = (e)->control, .session = (e)->session }
 #define rvs_engine_params_from_engine(e)  (RVS_EngineSessionParams){ .engine = (e), .control = (e)->control, .session = (e)->session }
 
-internal RVS_Result rvs_control_reduce_scheduler_event(RVS_SessionControlParams params, RVS_SchedulerEvent event, Arena *scratch, B32 reject_if_shutdown, RVS_SchedulerDecision *decision_out);
+internal RVS_Result rvs_engine_consider_scheduler_event(RVS_SessionControlParams params, RVS_SchedulerEvent event, Arena *effect_arena,
+                                                         B32 reject_if_shutdown, RVS_SchedulerDecision *decision_out);
 
 internal RVS_Result rvs_session_push_event                 (RVS_Session *session, RVS_Event *event);
 internal void       rvs_session_execute_scheduler_emissions(RVS_Session *session, RVS_SchedulerDecision *decision);
 
-internal RVS_SchedulerEvent rvs_engine_execute_scheduler_decision  (RVS_Engine *engine, RVS_SchedulerDecision *decision);
-internal void               rvs_engine_drive_scheduler_event       (RVS_Engine *engine, RVS_SchedulerEvent event);
+internal RVS_SchedulerEvent rvs_engine_execute_scheduler_decision_unlocked(RVS_Engine *engine, RVS_SchedulerDecision *decision);
+internal RVS_Result         rvs_engine_drive_scheduler_event       (RVS_Engine *engine, RVS_SchedulerEvent event);
 internal RVS_Result         rvs_engine_send_demon_message          (RVS_Engine *engine, RVS_DemonMessage message);
 
 ////////////////////////////////
@@ -241,13 +242,13 @@ rvs_engine_control_release(RVS_EngineControl *control)
 // Request Control
 
 internal RVS_RequestControl *
-rvs_request_control_alloc(RVS_SessionControlParams params, RVS_ScheduledOperation *operation)
+rvs_request_control_alloc(RVS_SessionControlParams params, RVS_MessageID request_id)
 {
   Arena              *arena   = arena_alloc(.name = "Engine Request Control");
   RVS_RequestControl *control = push_array(arena, RVS_RequestControl, 1);
   control->arena      = arena;
   control->params     = params;
-  control->request_id = operation->request->request_id;
+  control->request_id = request_id;
 
   rvs_session_addref(params.session);
   rvs_engine_control_addref(params.control);
@@ -273,7 +274,7 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
     .request = { .request_id = owner->request_id },
   };
   RVS_SchedulerDecision decision = {0};
-  RVS_Result result = rvs_control_reduce_scheduler_event(owner->params, event, scratch.arena, 1, &decision);
+  RVS_Result result = rvs_engine_consider_scheduler_event(owner->params, event, scratch.arena, 1, &decision);
 
   if (result == RVS_Result_Ok) {
     if (decision.emissions.first && decision.emissions.first->kind == RVS_SchedulerEmission_CompleteRequest) {
@@ -293,7 +294,7 @@ rvs_request_control_cancel(RVS_RequestControl *owner)
 // Scheduler Driver
 
 internal RVS_SchedulerEvent
-rvs_engine_execute_scheduler_decision(RVS_Engine *engine, RVS_SchedulerDecision *decision)
+rvs_engine_execute_scheduler_decision_unlocked(RVS_Engine *engine, RVS_SchedulerDecision *decision)
 {
   rvs_control_assert_unlocked();
   rvs_session_execute_scheduler_emissions(engine->session, decision);
@@ -407,11 +408,8 @@ rvs_session_execute_scheduler_emissions(RVS_Session *session, RVS_SchedulerDecis
 }
 
 internal RVS_Result
-rvs_control_reduce_scheduler_event(RVS_SessionControlParams  params,
-                                   RVS_SchedulerEvent        event,
-                                   Arena                    *scratch,
-                                   B32                       reject_if_shutdown,
-                                   RVS_SchedulerDecision    *decision_out)
+rvs_engine_consider_scheduler_event(RVS_SessionControlParams params, RVS_SchedulerEvent event, Arena *effect_arena,
+                                    B32 reject_if_shutdown, RVS_SchedulerDecision *decision_out)
 {
   AssertAlways(params.control != 0 && params.session != 0);
   RVS_Result result = RVS_Result_EngineStopped;
@@ -423,11 +421,7 @@ rvs_control_reduce_scheduler_event(RVS_SessionControlParams  params,
   }
   if (reject_if_shutdown && params.control->is_shutdown) {
   } else {
-    rvs_scheduler_apply_locked(&params.session->scheduler, event, decision_out);
-    RVS_ProcessSnapshot *processes = 0;
-    U64 processes_count = 0;
-    rvs_entity_copy_live_processes_locked(&params.session->entities, scratch, &processes, &processes_count);
-    rvs_scheduler_prepare_decision_locked(&params.session->scheduler, decision_out, processes, processes_count, scratch);
+    rvs_scheduler_consider_event_locked(&params.session->scheduler, event, effect_arena, decision_out);
     result = decision_out->result;
   }
   rvs_control_mutex_drop(params.control);
@@ -439,24 +433,26 @@ rvs_control_reduce_scheduler_event_expect_empty(RVS_SessionControlParams params,
 {
   Temp scratch = scratch_begin(0, 0);
   RVS_SchedulerDecision decision = {0};
-  RVS_Result result = rvs_control_reduce_scheduler_event(params, event, scratch.arena, reject_if_shutdown, &decision);
+  RVS_Result result = rvs_engine_consider_scheduler_event(params, event, scratch.arena, reject_if_shutdown, &decision);
   AssertAlways(decision.emissions.first == 0);
   AssertAlways(decision.command.kind == RVS_SchedulerCommand_Null);
   rvs_scheduler_decision_release(&params.session->scheduler, &decision);
   return result;
 }
 
-internal void
+internal RVS_Result
 rvs_engine_drive_scheduler_event(RVS_Engine *engine, RVS_SchedulerEvent event)
 {
   enum { immediate_transition_limit = 64 };
+  RVS_Result initial_result = RVS_Result_EngineStopped;
 
   for (U32 transition_idx = 0;; transition_idx += 1) {
     Temp scratch = scratch_begin(0, 0);
     RVS_SchedulerDecision decision = {0};
-    (void)rvs_control_reduce_scheduler_event(rvs_session_params_from_engine(engine), event, scratch.arena, 0, &decision);
+    RVS_Result result = rvs_engine_consider_scheduler_event(rvs_session_params_from_engine(engine), event, scratch.arena, 0, &decision);
+    if (transition_idx == 0) { initial_result = result; }
 
-    event = rvs_engine_execute_scheduler_decision(engine, &decision);
+    event = rvs_engine_execute_scheduler_decision_unlocked(engine, &decision);
     rvs_scheduler_decision_release(&engine->session->scheduler, &decision);
     scratch_end(scratch);
     if (event.kind == RVS_SchedulerEvent_Null) { break; }
@@ -470,6 +466,7 @@ rvs_engine_drive_scheduler_event(RVS_Engine *engine, RVS_SchedulerEvent event)
       break;
     }
   }
+  return initial_result;
 }
 
 internal void
@@ -520,49 +517,17 @@ internal void
 rvs_engine_execute_root_dispatch(RVS_Engine *engine, RVS_MessageID request_id, RVS_EngineCommand *command)
 {
   ProfBeginFunction();
-  Temp scratch = scratch_begin(0, 0);
-
-  RVS_SchedulerDecision decision          = {0};
-  B32                   dispatch_started  = 0;
-  rvs_control_mutex_take(engine->control);
-  {
-    if (!engine->control->is_shutdown) {
-      RVS_ScheduledOperation *operation = rvs_scheduler_operation_from_request_id_locked(&engine->session->scheduler, request_id);
-      AssertAlways(operation->op == command->op); // TODO: this used to be an if-check, that was turned into an assert to see if it ever fires
-
-      RVS_SchedulerEvent event = {
-        .kind    = RVS_SchedulerEvent_DispatchStarted,
-        .request = { .request_id = request_id }
-      };
-      rvs_scheduler_apply_locked(&engine->session->scheduler, event, &decision);
-
-      dispatch_started = decision.result == RVS_Result_Ok && decision.emissions.first == 0;
-      if (dispatch_started && command->op == RVS_SchedulerOp_Launch) {
-        AssertAlways(decision.command.kind == RVS_SchedulerCommand_LaunchExecution);
-        decision.command.launch_execution.params = command->launch.params;
-      }
-
-      if (dispatch_started) {
-        RVS_ProcessSnapshot *processes       = 0;
-        U64                  processes_count = 0;
-        rvs_entity_copy_live_processes_locked(&engine->session->entities, scratch.arena, &processes, &processes_count);
-        rvs_scheduler_prepare_decision_locked(&engine->session->scheduler, &decision, processes, processes_count, scratch.arena);
-      }
-    }
-  }
-  rvs_control_mutex_drop(engine->control);
-
-  if (dispatch_started) {
-    RVS_SchedulerEvent event = rvs_engine_execute_scheduler_decision(engine, &decision);
-    rvs_scheduler_decision_release(&engine->session->scheduler, &decision);
-    if (event.kind != RVS_SchedulerEvent_Null) {
-      rvs_engine_drive_scheduler_event(engine, event);
-    }
-  } else {
+  RVS_Result result = rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
+    .kind = RVS_SchedulerEvent_DispatchStarted,
+    .dispatch_started = {
+      .request_id = request_id,
+      .op = command->op,
+      .launch_params = command->op == RVS_SchedulerOp_Launch ? command->launch.params : (ProcessLaunchParams){0},
+    },
+  });
+  if (result != RVS_Result_Ok) {
     rvs_engine_submit_scheduler_failure(engine, request_id, RVS_Result_StaleState);
   }
-
-  scratch_end(scratch);
   ProfEnd();
 }
 
@@ -739,13 +704,11 @@ rvs_session_alloc(RVS_SessionControlParams params)
 {
   Arena *arena = arena_alloc(.name = "Debug Engine Session");
   RVS_Session *session = push_array(arena, RVS_Session, 1);
-  session->arena                   = arena;
-  session->scheduler.arena         = arena;
-  session->scheduler.entities      = &session->entities;
-  session->scheduler.recycle_mutex = mutex_alloc();
-  session->ref_count               = 0;
-  session->event_queue             = rvs_queue_alloc(sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
+  session->arena = arena;
+  session->ref_count = 0;
+  session->event_queue = rvs_queue_alloc(sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
   rvs_entity_store_init(&session->entities, arena, params.control->mutex);
+  rvs_scheduler_init(&session->scheduler, arena, &session->entities);
 
   rvs_session_addref(session); // engine
   rvs_session_addref(session); // returned handle
@@ -758,7 +721,7 @@ rvs_session_release_ref(RVS_Session *session)
   if (ins_atomic_u32_dec_eval(&session->ref_count) == 0) { // is this the last ref?
     rvs_queue_release(session->event_queue);
     rvs_entity_store_release(&session->entities);
-    mutex_release(session->scheduler.recycle_mutex);
+    rvs_scheduler_release(&session->scheduler);
     arena_release(session->arena);
   }
 }
@@ -767,10 +730,7 @@ internal void
 rvs_session_release_engine(RVS_Session *session)
 {
   // the engine holds control->mutex while releasing session ownership
-  AssertAlways(session->scheduler.stop_transaction.owner == 0);
-  for EachNode(program, RVS_TargetControl, session->scheduler.target_first) {
-    AssertAlways(program->state == RVS_TargetState_Stopped || program->state == RVS_TargetState_Removed);
-  }
+  rvs_scheduler_assert_quiescent_locked(&session->scheduler);
 
   rvs_session_release_ref(session); // drop engine ownership
 }
@@ -793,56 +753,38 @@ rvs_session_submit(RVS_EngineSessionParams params, RVS_EngineCommand command, RV
     goto exit_control_mutex;
   }
 
-  if (rvs_scheduler_execution_blocks_operation_locked(&session->scheduler, command.op)) {
-    result = RVS_Result_AlreadyPending;
-    goto exit_control_mutex;
+  RVS_SchedulerSubmit submit = {
+    .op = command.op,
+    .targets = command.op == RVS_SchedulerOp_Run || command.op == RVS_SchedulerOp_Interrupt ? command.programs : 0,
+    .targets_count = command.op == RVS_SchedulerOp_Run || command.op == RVS_SchedulerOp_Interrupt ? command.programs_count : 0,
+  };
+  if (command.op == RVS_SchedulerOp_Run) {
+    submit.run_intent = command.run.intent;
+    submit.run_mode = command.run.mode;
+    submit.run_address = command.run.address;
   }
 
-  if (command.op == RVS_SchedulerOp_Run || command.op == RVS_SchedulerOp_Interrupt) {
-    for EachIndex(program_idx, command.programs_count) {
-      RVS_TargetControl *program = rvs_scheduler_target_from_id_locked(&session->scheduler, command.programs[program_idx]);
-      if (program == 0) {
-        goto exit_control_mutex;
-      }
-      if (program->state == RVS_TargetState_Removed) {
-        result = RVS_Result_StaleState;
-        goto exit_control_mutex;
-      }
-    }
-  }
-  RVS_ProgramID *targets       = 0;
-  U64            targets_count = 0;
-  if (command.op == RVS_SchedulerOp_Run || command.op == RVS_SchedulerOp_Interrupt) {
-    targets       = command.programs;
-    targets_count = command.programs_count;
-  }
-  RVS_SchedulerAdmission admission = {0};
-  result = rvs_scheduler_admit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id,
-                                       command.op, targets, targets_count, &admission);
+  RVS_Request *request = 0;
+  RVS_MessageID request_id = 0;
+  result = rvs_scheduler_submit_locked(&session->scheduler, engine->request_pool, &engine->next_request_id,
+                                        submit, &request, &request_id);
   if (result != RVS_Result_Ok) {
     goto exit_control_mutex;
-  }
-  RVS_ScheduledOperation *operation = admission.operation;
-  if (command.op == RVS_SchedulerOp_Run) {
-    operation->run_intent = command.run.intent;
-    if (command.run.mode == RVS_RunMode_ToAddress) {
-      rvs_scheduler_attach_run_to_address_locked(&session->scheduler, operation, command.programs[0], command.run.address);
-    }
   }
 
   RVS_EngineMessage message = {
     .type    = RVS_EngineMessageType_DispatchRequest,
     .command = command,
   };
-  message.request_id = operation->request->request_id;
+  message.request_id = request_id;
 
   result = rvs_engine_send_message_locked(engine, &message);
 
   if (result == RVS_Result_Ok) {
-    submit_out->request = operation->request;
-    submit_out->control = rvs_request_control_alloc((RVS_SessionControlParams){ .control = params.control, .session = params.session, }, operation);
+    submit_out->request = request;
+    submit_out->control = rvs_request_control_alloc((RVS_SessionControlParams){ .control = params.control, .session = params.session, }, request_id);
   } else {
-    rvs_scheduler_rollback_admission_locked(&session->scheduler, &admission);
+    rvs_scheduler_retract_submission_locked(&session->scheduler, request_id);
   }
   exit_control_mutex:;
   rvs_control_mutex_drop(params.control);
@@ -1005,10 +947,13 @@ rvs_session_selected_thread(RVS_EngineSessionParams params, RVS_ProgramID *progr
 
   rvs_control_mutex_take(params.control);
   RVS_Result  result = RVS_Result_StaleState;
-  RVS_Thread *thread = rvs_entity_thread_from_id_locked(&params.session->entities, params.session->scheduler.selected_thread);
+  RVS_ProgramID selected_target = rvs_program_id_zero();
+  RVS_ThreadID selected_thread = rvs_thread_id_zero();
+  B32 selected = rvs_scheduler_selected_thread_locked(&params.session->scheduler, &selected_target, &selected_thread);
+  RVS_Thread *thread = selected ? rvs_entity_thread_from_id_locked(&params.session->entities, selected_thread) : 0;
   if (thread &&
       !thread->snapshot.is_retired &&
-      MemoryMatchStruct(&thread->snapshot.program, &params.session->scheduler.selected_target)) {
+      rvs_program_id_match(thread->snapshot.program, selected_target)) {
     if (program_id_out) { *program_id_out = thread->snapshot.program; }
     if (thread_id_out)  { *thread_id_out  = thread->snapshot.thread; }
     result = RVS_Result_Ok;
