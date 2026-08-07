@@ -4,7 +4,7 @@
 //- GENERATED CODE
 
 C_LINKAGE_BEGIN
-String8 dmn_event_kind_string_table[22] =
+String8 dmn_event_kind_string_table[23] =
 {
 str8_lit_comp("Null"),
 str8_lit_comp("Error"),
@@ -28,6 +28,7 @@ str8_lit_comp("SetThreadColor"),
 str8_lit_comp("SetBreakpoint"),
 str8_lit_comp("UnsetBreakpoint"),
 str8_lit_comp("SetVAddrRangeNote"),
+str8_lit_comp("UserLo"),
 };
 
 String8 dmn_exception_kind_string_table[5] =

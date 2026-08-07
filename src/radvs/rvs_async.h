@@ -1,12 +1,16 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-#pragma once
+////////////////////////////////
 
-#include "radvs/rvs.h"
+#pragma once
+#include "radvs/rvs_core.h"
+
+////////////////////////////////
+
+typedef void RVS_QueueItemCopy(Arena *arena, void *dst, void *src);
 
 typedef struct RVS_QueueNode RVS_QueueNode;
-typedef void RVS_QueueItemCopy(Arena *arena, void *dst, void *src);
 struct RVS_QueueNode
 {
   RVS_QueueNode *next;
@@ -52,3 +56,4 @@ internal RVS_QueueNode *rvs_queue_pop(RVS_Queue *q, U64 wait_us);
 
 #define rvs_queue_alloc_struct(q, T) ((T *)rvs_queue_alloc_item(q))
 #define rvs_queue_pop_struct(q, T, wait_us) ((T *)rvs_queue_pop(q, wait_us))
+

@@ -43,6 +43,9 @@ struct Arena
   char *allocation_site_file;
   int allocation_site_line;
   char *name;
+#if ARENA_NODE
+  ArenaNode *node;
+#endif
 #if ARENA_FREE_LIST
   Arena *free_last;
 #endif
@@ -63,6 +66,7 @@ typedef struct ArenaNode ArenaNode;
 struct ArenaNode
 {
   ArenaNode *next;
+  ArenaNode *prev;
   Arena *v;
 };
 

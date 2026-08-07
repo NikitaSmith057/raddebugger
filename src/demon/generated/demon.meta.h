@@ -30,6 +30,7 @@ DMN_EventKind_SetThreadColor,
 DMN_EventKind_SetBreakpoint,
 DMN_EventKind_UnsetBreakpoint,
 DMN_EventKind_SetVAddrRangeNote,
+DMN_EventKind_UserLo,
 DMN_EventKind_COUNT,
 } DMN_EventKind;
 
@@ -63,7 +64,7 @@ DMN_ExceptionKind_COUNT,
 } DMN_ExceptionKind;
 
 C_LINKAGE_BEGIN
-extern String8 dmn_event_kind_string_table[22];
+extern String8 dmn_event_kind_string_table[23];
 extern String8 dmn_exception_kind_string_table[5];
 
 C_LINKAGE_END

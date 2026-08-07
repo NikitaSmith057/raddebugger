@@ -29,6 +29,7 @@ DMN_EventKindTable:
   {SetBreakpoint}
   {UnsetBreakpoint}
   {SetVAddrRangeNote}
+  {UserLo}
 }
 
 @table(name)

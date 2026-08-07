@@ -1,9 +1,52 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-#pragma once
+////////////////////////////////
 
-#include "radvs/rvs_engine.h"
+#pragma once
+#include "radvs/rvs_core.h"
+
+////////////////////////////////
+
+// Entity snapshots are pointer-free values. They are the only entity data
+// returned to callers outside the engine's locked model reduction.
+typedef struct
+{
+  RVS_ProgramID id;
+  U32           pid;
+  U32           exit_code;
+  B32           is_retired;
+} RVS_ProgramSnapshot;
+
+typedef struct
+{
+  RVS_ProgramID program;
+  RVS_ProcessID process;
+  RVS_ProcessID parent_process;
+  U32           pid;
+  U32           exit_code;
+  B32           is_retired;
+} RVS_ProcessSnapshot;
+
+typedef struct
+{
+  RVS_ProgramID program;
+  RVS_ProcessID process;
+  RVS_ThreadID  thread;
+  U32           tid;
+  B32           is_retired;
+} RVS_ThreadSnapshot;
+
+// Module behavior is intentionally scaffolding-only, but modules retain the
+// same pointer-free model shape as other process children.
+typedef struct
+{
+  RVS_ProcessID process;
+  U64           base;
+  U64           size;
+} RVS_ModuleSnapshot;
+
+////////////////////////////////
 
 typedef enum
 {
@@ -47,15 +90,6 @@ struct RVS_Thread
   RVS_ThreadSnapshot snapshot;
 };
 
-// Module behavior is intentionally scaffolding-only, but modules retain the
-// same pointer-free model shape as other process children.
-typedef struct
-{
-  RVS_ProcessID process;
-  U64           base;
-  U64           size;
-} RVS_ModuleSnapshot;
-
 struct RVS_Module
 {
   RVS_Entity         entity;
@@ -77,11 +111,14 @@ typedef struct
   B32           program_retired;
 } RVS_EntityProcessExit;
 
+////////////////////////////////
+
 internal void rvs_entity_store_init(RVS_EntityStore *store, Arena *arena, Mutex mutex);
 internal void rvs_entity_store_close(RVS_EntityStore *store);
 internal void rvs_entity_store_release(RVS_EntityStore *store);
 
 // These helpers expose pointers only while the session control mutex is held.
+internal RVS_Program *rvs_entity_program_from_pid_locked(RVS_EntityStore *store, U32 pid);
 internal RVS_Program *rvs_entity_program_from_id_locked(RVS_EntityStore *store, RVS_ProgramID id);
 internal RVS_Process *rvs_entity_process_from_id_locked(RVS_EntityStore *store, RVS_ProcessID id);
 internal RVS_Thread  *rvs_entity_thread_from_id_locked (RVS_EntityStore *store, RVS_ThreadID id);

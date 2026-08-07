@@ -1,10 +1,14 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-#pragma once
+////////////////////////////////
 
-#include "radvs/rvs.h"
+#pragma once
+#include "radvs/rvs_core.h"
+#include "radvs/rvs_request.h"
 #include "radvs/rvs_async.h"
+
+////////////////////////////////
 
 typedef struct RVS_Demon RVS_Demon;
 
@@ -76,6 +80,7 @@ typedef enum
   RVS_DemonReplyKind_LaunchStarted,
   RVS_DemonReplyKind_ActionResult,
   RVS_DemonReplyKind_EventBatch,
+
   // Fences prior batches from this interrupt attempt: the active execution lease is no longer executing.
   // It does not imply that the engine has completed client-visible publication of those batches.
   RVS_DemonReplyKind_ExecutionStopped,
@@ -84,8 +89,8 @@ typedef enum
 
 typedef struct
 {
+  RVS_MessageID      request_id; // id of the request that generated this reply
   RVS_DemonReplyKind kind;
-  RVS_MessageID      request_id;
   union {
     struct {
       U32 pid;
@@ -97,7 +102,7 @@ typedef struct
     } action_result;
     struct {
       DMN_EventList events;
-      U64           command_id;
+      U64           command_id; // TODO: remove
     } event_batch;
     struct {
       U64 command_id;

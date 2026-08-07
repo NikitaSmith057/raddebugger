@@ -48,6 +48,7 @@
 #define RCI_CMD_XLIST                                                                         \
   X(Launch,       "{EXE-PATH}",             "Create a process from an input file (EXE, ELF)") \
   X(Run,          "{PROGRAM-ID}",           "Runs the specified program")                     \
+  X(Pause,        "{PROGRAM-ID}",           "Pause a running program")                        \
   X(RunAddr,      "{PROGRAM-ID} {ADDRESS}", "Run program to the specified address")           \
   X(Teardown,     "{PROGRAM-ID}",           "Kick off program shutdown sequence ")            \
   X(LsProg,       "",                       "List programs under the debug engine")           \
@@ -157,8 +158,8 @@ entry_point(CmdLine *cmdline)
         continue;
       }
 
-      RVS_EngineReply reply;
-      RVS_Result      reply_result = rvs_request_wait(submit.request, max_U64, &reply);
+      RVS_CommandReply reply;
+      RVS_Result       reply_result = rvs_request_wait(submit.request, max_U64, &reply);
       rvs_request_release(submit.request);
       rvs_request_control_release(submit.control);
 
@@ -170,12 +171,12 @@ entry_point(CmdLine *cmdline)
         rci_printf("Launch: request failed, error code %u\n", reply.result);
         continue;
       }
-      if (reply.kind != RVS_EngineReplyKind_Launch) {
+      if (reply.kind != RVS_CommandReplyKind_LaunchAck) {
         rci_printf("Launch: received an invalid completion\n");
         continue;
       }
 
-      rci_printf("Launch: program 0x%llx (%S) started with pid %u\n", reply.launch.program_id.value, exe_path, reply.launch.pid);
+      rci_printf("Launch: program 0x%llx (%S) started with pid %u\n", reply.launch_ack.program_id.value, exe_path, reply.launch_ack.pid);
     } break;
 
     case RCI_CmdKind_Run: {
@@ -191,21 +192,27 @@ entry_point(CmdLine *cmdline)
       }
 
       RVS_SubmitInfo submit;
-      RVS_Result     run_result = rvs_engine_run(engine, program_id, &submit);
+      RVS_Result     run_result = rvs_engine_run(engine, &program_id, 1, &submit);
       if (run_result != RVS_Result_Ok) {
         rci_printf("Run: failed to submit program 0x%llx, error code %u\n", program_id.value, run_result);
         continue;
       }
 
-      RVS_EngineReply reply;
-      RVS_Result      reply_result = rvs_request_wait(submit.request, max_U64, &reply);
+      RVS_CommandReply reply;
+      RVS_Result       wait_result = rvs_request_wait(submit.request, max_U64, &reply);
+
+      if (wait_result == RVS_Result_Ok) {
+        if (reply.result == RVS_Result_Ok) {
+          rci_printf("Run: program 0x%llx resumed\n", program_id.value);
+        } else {
+          rci_printf("Run: request failed, error code %u\n", reply.result);
+        }
+      } else {
+        rci_printf("Run: wait for request failed\n");
+      }
+
       rvs_request_release(submit.request);
       rvs_request_control_release(submit.control);
-      if (reply_result != RVS_Result_Ok || reply.result != RVS_Result_Ok || reply.kind != RVS_EngineReplyKind_Run) {
-        rci_printf("Run: request failed, error code %u\n", reply_result != RVS_Result_Ok ? reply_result : reply.result);
-        continue;
-      }
-      rci_printf("Run: program 0x%llx resumed\n", program_id.value);
     } break;
 
     case RCI_CmdKind_RunAddr: {
@@ -236,16 +243,21 @@ entry_point(CmdLine *cmdline)
         continue;
       }
 
-      RVS_EngineReply reply;
-      RVS_Result      reply_result = rvs_request_wait(submit.request, max_U64, &reply);
+      RVS_CommandReply reply;
+      RVS_Result       wait_result = rvs_request_wait(submit.request, max_U64, &reply);
+
+      if (wait_result == RVS_Result_Ok) {
+        if (reply.result == RVS_Result_Ok) {
+          rci_printf("RunAddr: program 0x%llx resumed toward 0x%llx\n", program_id.value, address);
+        } else {
+          rci_printf("RunAddr: command failed with error code %u\n", reply.result);
+        }
+      } else {
+        rci_printf("RunAddr: wait failed with error code %u\n", wait_result);
+      }
+
       rvs_request_release(submit.request);
       rvs_request_control_release(submit.control);
-      if (reply_result != RVS_Result_Ok || reply.result != RVS_Result_Ok || reply.kind != RVS_EngineReplyKind_Run) {
-        rci_printf("RunAddr: request failed, error code %u\n",
-                    reply_result != RVS_Result_Ok ? reply_result : reply.result);
-        continue;
-      }
-      rci_printf("RunAddr: program 0x%llx resumed toward 0x%llx\n", program_id.value, address);
     } break;
 
     case RCI_CmdKind_Teardown: {
