@@ -135,7 +135,7 @@ entry_point(CmdLine *cmdline)
     }
 
     // parse command and options
-    String8     input       = str8_cstring_capped(line_buffer, line_buffer + line_buffer_size);
+    String8     input       = str8_skip_chop_whitespace(str8_cstring_capped(line_buffer, line_buffer + line_buffer_size));
     String8List cmd_raw     = str8_split_by_string_chars(scratch.arena, input, str8_lit(" "), 0);
     String8     cmd_string  = str8_skip_chop_whitespace(str8_list_first(&cmd_raw));
     RCI_CmdKind cmd_kind    = rci_cmd_kind_from_string(cmd_string);

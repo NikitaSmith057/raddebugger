@@ -50,6 +50,10 @@ rvs_request_pool_request_alloc(RVS_RequestPool *pool)
     request->cv = cond_var_alloc();
   }
   request->pool = pool;
+  request->id = ++pool->next_request_id;
+  AssertAlways(request->id != 0);
+  request->ref_count = 1;
+  request->reply.result = RVS_Result_Pending;
 
   // self register the request
   hash_table_push_u64_raw(pool->arena, pool->request_by_id, request->id, request);

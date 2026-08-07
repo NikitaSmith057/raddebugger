@@ -26,11 +26,14 @@ rvs_emit_effect_complete_command(Arena *arena, RVS_CommandReply command_reply)
 }
 
 internal RVS_SchedulerEffect *
-rvs_emit_effect_make_program(Arena *arena, U32 pid)
+rvs_emit_effect_create_program(Arena *arena, RVS_ProgramID program, DMN_Event event)
 {
   RVS_SchedulerEffect *effect = push_array(arena, RVS_SchedulerEffect, 1);
-  effect->kind             = RVS_SchedulerEffectKind_MakeProgram;
-  effect->make_program.pid = pid;
+  effect->kind = RVS_SchedulerEffectKind_CreateProgram;
+  effect->create_program.program        = program;
+  effect->create_program.process        = (RVS_ProcessID){ .handle = event.process };
+  effect->create_program.parent_process = (RVS_ProcessID){ .handle = event.parent_process };
+  effect->create_program.pid            = event.system_process_id;
   return effect;
 }
 
@@ -83,6 +86,18 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
   // 2. wait for the backend to reply with process PID
   //
   case RVS_LaunchState_AwaitLaunchAck: {
+    if (input->kind == RVS_InputSourceKind_BackendSendResult &&
+        input->backend_send_result.v != RVS_Result_Ok) {
+      result = (RVS_PlanResult){
+        .status = RVS_PlanStatus_Handled,
+        .next_state = RVS_PlanState_End,
+        .effect = rvs_emit_effect_complete_command(arena, (RVS_CommandReply){
+          .request_id = operation->request_id,
+          .result = input->backend_send_result.v,
+          .kind = RVS_CommandReplyKind_LaunchAck,
+        }),
+      };
+    }
     if (input->kind == RVS_InputSourceKind_BackendReply) {
       RVS_DemonReply *reply = &input->backend_reply.v;
       if (reply->kind == RVS_DemonReplyKind_LaunchStarted) {
@@ -92,6 +107,21 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
         result = (RVS_PlanResult){
           .status      = RVS_PlanStatus_AwaitEvent,
           .next_state  = RVS_LaunchState_AwaitCreateProcess,
+          .effect = rvs_emit_effect_send_backend_message(arena, (RVS_DemonMessage){
+            .type = RVS_DemonMessage_Pump,
+            .request_id = operation->request_id,
+          }),
+        };
+      } else if (reply->kind == RVS_DemonReplyKind_ActionResult &&
+                 reply->action_result.action == RVS_DemonAction_Launch) {
+        result = (RVS_PlanResult){
+          .status = RVS_PlanStatus_Handled,
+          .next_state = RVS_PlanState_End,
+          .effect = rvs_emit_effect_complete_command(arena, (RVS_CommandReply){
+            .request_id = operation->request_id,
+            .result = reply->action_result.result,
+            .kind = RVS_CommandReplyKind_LaunchAck,
+          }),
         };
       }
     }
@@ -101,18 +131,30 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
   // 3. wait for the "create process" event
   //
   case RVS_LaunchState_AwaitCreateProcess: {
+    if (input->kind == RVS_InputSourceKind_BackendSendResult &&
+        input->backend_send_result.v != RVS_Result_Ok) {
+      result = (RVS_PlanResult){
+        .status = RVS_PlanStatus_Handled,
+        .next_state = RVS_PlanState_End,
+        .effect = rvs_emit_effect_complete_command(arena, (RVS_CommandReply){
+          .request_id = operation->request_id,
+          .result = input->backend_send_result.v,
+          .kind = RVS_CommandReplyKind_LaunchAck,
+        }),
+      };
+    }
     if (input->kind == RVS_InputSourceKind_BackendEvent) {
       RVS_LaunchSuspendedState *launch_state = plan->ud;
       DMN_Event *event = &input->backend_event.event;
 
       if (event->system_process_id == launch_state->pid) {
         //
-        // 3a. create process event found -> make program entity
+        // 3a. create process event found -> create program entity
         //
         if (event->kind == DMN_EventKind_CreateProcess) {
           result = (RVS_PlanResult){
             .status     = RVS_PlanStatus_Handled,
-            .effect     = rvs_emit_effect_make_program(arena, launch_state->pid),
+            .effect     = rvs_emit_effect_create_program(arena, (RVS_ProgramID){ .value = operation->request_id }, *event),
             .next_state = RVS_LaunchState_PendingProgram,
           };
         }
@@ -127,6 +169,7 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
             .result                = RVS_Result_Error,
             .kind                  = RVS_CommandReplyKind_LaunchAck,
             .launch_ack.program_id = 0,
+            .launch_ack.pid        = launch_state->pid,
           };
           result = (RVS_PlanResult){
             .status = RVS_PlanStatus_Handled,
@@ -153,7 +196,8 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
         .request_id            = operation->request_id,
         .result                = RVS_Result_Ok,
         .kind                  = RVS_CommandReplyKind_LaunchAck,
-        .launch_ack.program_id = input->new_program,
+        .launch_ack.program_id = input->new_program.program,
+        .launch_ack.pid        = ((RVS_LaunchSuspendedState *)plan->ud)->pid,
       };
       return (RVS_PlanResult){
         .status = RVS_PlanStatus_Handled,
@@ -165,7 +209,7 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
   default: break;
   }
 
-  return (RVS_PlanResult){ .status = RVS_PlanStatus_Unhandled };
+  return result;
 }
 
 ////////////////////////////////
@@ -183,7 +227,12 @@ internal void
 rvs_scheduler_release(RVS_Scheduler *sch)
 {
   for (ArenaNode *curr = sch->op_arena_first, *next = 0;
-      curr != 0; curr = next) {
+       curr != 0; curr = next) {
+    next = curr->next;
+    arena_release(curr->v);
+  }
+  for (ArenaNode *curr = sch->op_arena_free_list, *next = 0;
+       curr != 0; curr = next) {
     next = curr->next;
     arena_release(curr->v);
   }
@@ -193,10 +242,12 @@ internal ArenaNode *
 rvs_scheduler_arena_alloc(RVS_Scheduler *sch)
 {
   ArenaNode *n = sch->op_arena_free_list;
-  if (n) { SLLStackPop(sch->op_arena_free_list); }
-  else       {
+  if (n) {
+    SLLStackPop(sch->op_arena_free_list);
+    DLLPushBack(sch->op_arena_first, sch->op_arena_last, n);
+  } else {
     Arena *arena = arena_alloc(.name = "Operation Arena");
-    n    = push_array(arena, ArenaNode, 1);
+    n    = push_array(sch->arena, ArenaNode, 1);
     n->v = arena;
     DLLPushBack(sch->op_arena_first, sch->op_arena_last, n);
   }
@@ -228,6 +279,52 @@ rvs_operation_release(RVS_Scheduler *sch, RVS_Operation *op)
   rvs_scheduler_arena_recycle(sch, op->arena_node);
 }
 
+internal void
+rvs_scheduler_queue_effect(RVS_Scheduler *sch, RVS_Operation *operation, RVS_SchedulerEffect *effect)
+{
+  AssertAlways(effect != 0 && effect->kind != RVS_SchedulerEffectKind_Null);
+  AssertAlways(sch->next_effect_id != max_U64);
+  effect->id = ++sch->next_effect_id;
+  AssertAlways(effect->id != 0);
+  effect->operation = operation;
+  effect->next = 0;
+  SLLQueuePush(sch->effect_first, sch->effect_last, effect);
+}
+
+internal RVS_Result
+rvs_scheduler_apply_active_plan(RVS_Scheduler *sch, RVS_SchedulerInput input)
+{
+  RVS_Operation *operation = sch->active_operation;
+  if (operation == 0 || operation->active_plan == 0) {
+    return RVS_Result_StaleState;
+  }
+  if (input.kind == RVS_InputSourceKind_BackendReply &&
+      input.backend_reply.v.request_id != operation->request_id) {
+    return RVS_Result_StaleState;
+  }
+  if (input.kind == RVS_InputSourceKind_BackendSendResult &&
+      input.backend_send_result.request_id != operation->request_id) {
+    return RVS_Result_StaleState;
+  }
+  if (input.kind == RVS_InputSourceKind_NewProgram &&
+      input.new_program.request_id != operation->request_id) {
+    return RVS_Result_StaleState;
+  }
+
+  RVS_Plan *plan = operation->active_plan;
+  RVS_PlanResult result = plan->sig(operation->arena, operation, plan, &input);
+  if (result.status == RVS_PlanStatus_Unhandled) {
+    return RVS_Result_StaleState;
+  }
+  if (result.next_state != RVS_PlanState_Null) {
+    plan->state = result.next_state;
+  }
+  if (result.effect) {
+    rvs_scheduler_queue_effect(sch, operation, result.effect);
+  }
+  return RVS_Result_Ok;
+}
+
 internal RVS_Result
 rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
 {
@@ -239,13 +336,13 @@ rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
   case RVS_InputSourceKind_Command: {
     // TODO: need to be more lenient on admission of operations
     if (sch->active_operation) {
-      result = RVS_Result_Busy;
+      result = RVS_Result_AlreadyPending;
       break;
     }
 
     // init operation for the command
     RVS_Operation *op = rvs_operation_alloc(sch);
-    op->request_id  = rvs_request_pool_request_alloc(sch->request_pool)->id; // TODO: return RVS_MessageID
+    op->request_id  = input.command.request_id;
     op->apply_epoch = sch->stop_state.epoch;
     rvs_command_copy(op->arena, &op->command, &input.command.v); // sync command lifetime with the allocated operation
 
@@ -275,12 +372,18 @@ rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
     // set root and active plans
     op->root_plan   = plan;
     op->active_plan = op->root_plan;
+
+    // schedule new operation
+    sch->active_operation = op;
+    result = rvs_scheduler_apply_active_plan(sch, input);
   } break;
 
-  case RVS_InputSourceKind_BackendSendResult: { NotImplemented; } break;
-  case RVS_InputSourceKind_BackendReply:      { NotImplemented; } break;
-  case RVS_InputSourceKind_BackendEvent:      { NotImplemented; } break;
-  case RVS_InputSourceKind_NewProgram:        { NotImplemented; } break;
+  case RVS_InputSourceKind_BackendSendResult:
+  case RVS_InputSourceKind_BackendReply:
+  case RVS_InputSourceKind_BackendEvent:
+  case RVS_InputSourceKind_NewProgram: {
+    result = rvs_scheduler_apply_active_plan(sch, input);
+  } break;
 
   default: InvalidPath;
   }
@@ -291,6 +394,22 @@ rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
 internal RVS_SchedulerEffect *
 rvs_scheduler_pump(Arena *arena, RVS_Scheduler *sch)
 {
-  return 0;
+  RVS_SchedulerEffect *result = push_array(arena, RVS_SchedulerEffect, 1);
+  RVS_SchedulerEffect *effect = sch->effect_first;
+  if (effect) {
+    sch->effect_first = effect->next;
+    if (sch->effect_last == effect) {
+      sch->effect_last = 0;
+    }
+
+    *result = *effect;
+    result->next = 0;
+    if (result->kind == RVS_SchedulerEffectKind_CompleteCommand &&
+        sch->active_operation == result->operation) {
+      sch->active_operation = 0;
+      rvs_operation_release(sch, result->operation);
+    }
+  }
+  return result;
 }
 

@@ -246,8 +246,8 @@ rvs_session_submit(RVS_EngineSessionParams params, RVS_Command command, RVS_Subm
 
   rvs_control_mutex_take(params.control);
 
-  if (!params.control->is_shutdown &&                                // reject submits to uninited engine
-      ins_atomic_u32_eval(&engine->state) && RVS_WorkerState_Live) { // thread worker mus be live -- also engine should sleep here if the worker is still being created
+  if (!params.control->is_shutdown &&
+      ins_atomic_u32_eval(&engine->state) == RVS_WorkerState_Live) {
     // allocate a new request for the submitted command
     RVS_Request *request = rvs_request_pool_request_alloc(engine->request_pool);
 
@@ -257,14 +257,14 @@ rvs_session_submit(RVS_EngineSessionParams params, RVS_Command command, RVS_Subm
       .command    = command,
       .request_id = request->id,
     };
-    RVS_Result result = rvs_engine_send_message_locked(engine, &message);
+    result = rvs_engine_send_message_locked(engine, &message);
 
     if (result == RVS_Result_Ok) {
       submit_out->request = request;
       submit_out->control = rvs_request_control_alloc((RVS_SessionControlParams){ .control = params.control, .session = params.session }, request->id);
     } else {
       // failed to send command
-      rvs_request_pool_release_request(engine->request_pool, request);
+      rvs_request_release(request);
       result = RVS_Result_Error; // TODO: better error here?
     }
   } else {
@@ -1213,9 +1213,34 @@ rvs_engine_scheduler_step(RVS_Engine *engine, RVS_SchedulerInput root)
       // feed back send result into the scheduler
       RVS_SchedulerInput input = {
         .kind                  = RVS_InputSourceKind_BackendSendResult,
-        .backend_send_result.v = send_result
+        .backend_send_result = {
+          .v = send_result,
+          .request_id = effect->backend_message.request_id,
+        },
       };
       rvs_scheduler_apply(engine->session->scheduler, input);
+    } break;
+
+    case RVS_SchedulerEffectKind_CompleteCommand: {
+      RVS_Request *request = rvs_request_from_id(engine->request_pool, effect->command_reply.request_id);
+      if (request) {
+        rvs_request_complete(request, effect->command_reply);
+      }
+    } break;
+
+    case RVS_SchedulerEffectKind_CreateProgram: {
+      rvs_control_mutex_take(engine->control);
+      rvs_entity_program_create_locked(&engine->session->entities, effect->create_program.program, effect->create_program.pid);
+      rvs_entity_process_create_locked(&engine->session->entities, effect->create_program.program, effect->create_program.process, effect->create_program.parent_process, effect->create_program.pid);
+      rvs_control_mutex_drop(engine->control);
+
+      rvs_scheduler_apply(engine->session->scheduler, (RVS_SchedulerInput){
+        .kind = RVS_InputSourceKind_NewProgram,
+        .new_program = {
+          .request_id = effect->operation->request_id,
+          .program    = effect->create_program.program,
+        },
+      });
     } break;
 
     case RVS_SchedulerEffectKind_Null: { keep_running = 0; } break;
@@ -1234,6 +1259,10 @@ rvs_engine_drive_scheduler(RVS_Engine *engine, RVS_SchedulerInput root)
   if (root.kind == RVS_InputSourceKind_BackendReply &&
       root.backend_reply.v.kind == RVS_DemonReplyKind_EventBatch) {
     for EachNode(n, DMN_EventNode, root.backend_reply.v.event_batch.events.first) {
+      rvs_engine_scheduler_step(engine, (RVS_SchedulerInput){
+        .kind = RVS_InputSourceKind_BackendEvent,
+        .backend_event = { .event = n->v },
+      });
     }
   } else {
     rvs_engine_scheduler_step(engine, root);

@@ -34,6 +34,7 @@ struct RVS_RequestPool
   Mutex                mutex;
   HashTable           *request_by_id;
   RVS_RequestPoolNode *free_list;
+  RVS_MessageID        next_request_id;
   U64                  live_requests_count;
   B32                  engine_released;
 };

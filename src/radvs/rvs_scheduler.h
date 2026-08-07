@@ -43,7 +43,10 @@ typedef struct
     struct {
       RVS_DemonReply v;
     } backend_reply;
-    RVS_ProgramID new_program;
+    struct {
+      RVS_MessageID request_id;
+      RVS_ProgramID program;
+    } new_program;
   };
 } RVS_SchedulerInput;
 
@@ -74,27 +77,33 @@ typedef enum
   RVS_SchedulerEffectKind_Null,
   RVS_SchedulerEffectKind_SendBackendMessage,
   RVS_SchedulerEffectKind_CompleteCommand,
-  RVS_SchedulerEffectKind_MakeProgram
+  RVS_SchedulerEffectKind_CreateProgram
 } RVS_SchedulerEffectKind;
 
 typedef U64 RVS_SchedulerEffectID;
 
+typedef struct RVS_Operation RVS_Operation;
 typedef struct RVS_SchedulerEffect RVS_SchedulerEffect;
 struct RVS_SchedulerEffect
 {
   RVS_SchedulerEffect     *next;
   RVS_SchedulerEffectID    id;
   RVS_SchedulerEffectKind  kind;
+  RVS_Operation            *operation;
   union {
     RVS_DemonMessage backend_message;
     RVS_CommandReply command_reply;
-    struct { U32 pid; } make_program;
+    struct {
+      RVS_ProgramID program;
+      RVS_ProcessID process;
+      RVS_ProcessID parent_process;
+      U32           pid;
+    } create_program;
   };
 };
 
 ////////////////////////////////
 
-typedef struct RVS_Operation RVS_Operation;
 typedef struct RVS_Plan      RVS_Plan;
 typedef struct RVS_Scheduler RVS_Scheduler;
 
@@ -122,7 +131,7 @@ typedef struct
   RVS_SchedulerEffect *effect;
 } RVS_PlanResult;
 
-#define RVS_PLAN_FUNC(name) RVS_PlanResult name(Arena *arena, RVS_EntityStore *entity_store, RVS_Operation *operation, RVS_Plan *plan, RVS_SchedulerInput *input)
+#define RVS_PLAN_FUNC(name) RVS_PlanResult name(Arena *arena, RVS_Operation *operation, RVS_Plan *plan, RVS_SchedulerInput *input)
 typedef RVS_PLAN_FUNC(RVS_PlanSig);
 
 struct RVS_Plan
@@ -192,12 +201,15 @@ struct RVS_Scheduler
   
   // request pool
   RVS_RequestPool *request_pool; // TODO: rename to the request store
+  RVS_EntityStore *entities;
 
   // execution state
   RVS_StopState          stop_state;
   RVS_Operation         *active_operation;
   RVS_Operation         *operation_first;
   RVS_Operation         *operation_last;
+  RVS_SchedulerEffect   *effect_first;
+  RVS_SchedulerEffect   *effect_last;
   RVS_SchedulerEffectID  next_effect_id;
 
   // backend state
@@ -224,6 +236,6 @@ struct RVS_Scheduler
 internal RVS_Scheduler * rvs_scheduler_init(Arena *arena, RVS_RequestPool *request_pool);
 internal void            rvs_scheduler_release(RVS_Scheduler *scheduler);
 
-internal RVS_Result            rvs_scheduler_push(RVS_Scheduler *scheduler, RVS_SchedulerInput input);
-internal RVS_SchedulerEffect * rvs_scheduler_pop(Arena *arena, RVS_Scheduler *scheduler);
+internal RVS_Result            rvs_scheduler_apply(RVS_Scheduler *scheduler, RVS_SchedulerInput input);
+internal RVS_SchedulerEffect * rvs_scheduler_pump (Arena *arena, RVS_Scheduler *scheduler);
 
