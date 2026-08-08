@@ -4,8 +4,8 @@
 ////////////////////////////////
 
 #include "radvs/rvs_engine.h"
-#include "radvs/rvs_scheduler.h"
-#include "radvs/rvs_scheduler.c"
+#include "radvs/rvs_plan.h"
+#include "radvs/rvs_plan.c"
 
 ////////////////////////////////
 
@@ -862,370 +862,49 @@ rvs_engine_fetch_thread(RVS_Engine *engine, RVS_ThreadID id, U64 wait_us, RVS_Th
 ////////////////////////////////
 // Engine Worker
 
-#if 0
-internal RVS_SchedulerEvent
-rvs_engine_execute_scheduler_decision_unlocked(RVS_Engine *engine, RVS_SchedulerDecision *decision)
-{
-  rvs_control_assert_unlocked();
-  rvs_session_execute_scheduler_emissions(engine->session, decision);
-
-  RVS_SchedulerCommand *command         = &decision->command;
-  RVS_SchedulerEvent    immediate_event = {0};
-
-  RVS_Result result = RVS_Result_Ok;
-
-  switch (command->kind) {
-  case RVS_SchedulerCommand_LaunchExecution: {
-    result = rvs_engine_send_demon_message(engine, (RVS_DemonMessage){
-      .type       = RVS_DemonMessage_Launch,
-      .request_id = command->token.request_id,
-      .launch     = { .params = command->launch_execution.params },
-    });
-  } break;
-  case RVS_SchedulerCommand_RunExecution: {
-    result = command->run_execution.prepare_result;
-    if (result == RVS_Result_Ok) {
-      result = rvs_engine_send_demon_message(engine,
-                                             (RVS_DemonMessage){
-                                               .type       = RVS_DemonMessage_Run,
-                                               .request_id = command->token.request_id,
-                                               .run = {
-                                                 .processes       = command->run_execution.processes,
-                                                 .processes_count = command->run_execution.processes_count,
-                                                 .traps           = command->run_execution.traps
-                                             }});
-    } else {
-      InvalidPath;
-    }
-  } break;
-  case RVS_SchedulerCommand_InterruptExecution: {
-    result = rvs_engine_send_demon_message(engine,
-                                           (RVS_DemonMessage){
-                                             .type       = RVS_DemonMessage_InterruptExecution,
-                                             .request_id = command->token.request_id,
-                                             .interrupt_execution = {
-                                               .execution_request_id = command->interrupt_execution.execution_request_id,
-                                               .command_id           = command->token.command_id
-                                           }});
-  } break;
-  case RVS_SchedulerCommand_ResumeTargetSubset: {
-    result = command->resume_target_subset.execution.prepare_result;
-    if (result == RVS_Result_Ok) {
-      result = rvs_engine_send_demon_message(engine,
-                                             (RVS_DemonMessage){
-                                               .type       = RVS_DemonMessage_Resume,
-                                               .request_id = command->token.request_id,
-                                               .resume = {
-                                                 .processes            = command->resume_target_subset.execution.processes,
-                                                 .processes_count      = command->resume_target_subset.execution.processes_count,
-                                                 .execution_request_id = command->resume_target_subset.execution_request_id,
-                                                 .command_id           = command->token.command_id,
-                                                 .traps                = command->resume_target_subset.execution.traps
-                                            }});
-    }
-  } break;
-  case RVS_SchedulerCommand_PumpLaunch: {
-    result = rvs_engine_send_demon_message(engine,
-                                           (RVS_DemonMessage){
-                                             .type = RVS_DemonMessage_Pump,
-                                             .request_id = command->token.request_id,
-                                             .pump = { .command_id = command->token.command_id
-                                           }});
-  } break;
-  case RVS_SchedulerCommand_PublishTarget: {
-    immediate_event = (RVS_SchedulerEvent){
-      .kind = RVS_SchedulerEvent_CommandOutcome,
-      .command_outcome = {
-        .command_kind = command->kind,
-        .command      = command->token,
-        .result       = RVS_Result_Ok,
-        .process      = rvs_process_id_from_handle(command->publish_target.process),
-        .pid          = command->publish_target.pid
-      }
-    };
-  } break;
-  default: { InvalidPath; }
-  }
-
-  if (immediate_event.kind == RVS_SchedulerEvent_Null &&
-      command->kind != RVS_SchedulerCommand_Null &&
-      result != RVS_Result_Ok) {
-    immediate_event = (RVS_SchedulerEvent){
-      .kind            = RVS_SchedulerEvent_CommandOutcome,
-      .command_outcome = {
-        .command_kind = command->kind,
-        .command = command->token,
-        .result = result
-      }
-    };
-  }
-
-  return immediate_event;
-}
-
 internal void
-rvs_session_execute_scheduler_emissions(RVS_Session *session, RVS_SchedulerDecision *decision)
-{
-  rvs_control_assert_unlocked();
-  for EachNode(emission, RVS_SchedulerEmission, decision->emissions.first) {
-    if (emission->kind == RVS_SchedulerEmission_CompleteRequest) {
-      rvs_request_complete(emission->operation->request, emission->reply);
-    } else if (emission->kind == RVS_SchedulerEmission_PublishEvent) {
-      RVS_Result result = rvs_session_push_event(session, &emission->event);
-      AssertAlways(result == RVS_Result_Ok || result == RVS_Result_EngineStopped);
-    }
-  }
-}
-
-internal RVS_Result
-rvs_engine_consider_scheduler_event(Arena                    *arena,
-                                    RVS_SessionControlParams  params,
-                                    RVS_SchedulerEvent        event,
-                                    B32                       reject_if_shutdown,
-                                    RVS_SchedulerDecision    *decision_out)
-{
-  AssertAlways(params.control != 0 && params.session != 0);
-  RVS_Result result = RVS_Result_EngineStopped;
-  MemoryZeroStruct(decision_out);
-  rvs_control_mutex_take(params.control);
-  if (params.control->is_shutdown && event.kind == RVS_SchedulerEvent_CommandOutcome &&
-      event.command_outcome.command_kind == RVS_SchedulerCommand_PublishTarget) {
-    event.command_outcome.result = RVS_Result_EngineStopped;
-  }
-  if (reject_if_shutdown && params.control->is_shutdown) {
-  } else {
-    rvs_scheduler_consider_event_locked(&params.session->scheduler, event, effect_arena, decision_out);
-    result = decision_out->result;
-  }
-  rvs_control_mutex_drop(params.control);
-  return result;
-}
-
-internal RVS_Result
-rvs_control_reduce_scheduler_event_expect_empty(RVS_SessionControlParams params, RVS_SchedulerEvent event, B32 reject_if_shutdown)
-{
-  Temp scratch = scratch_begin(0, 0);
-  RVS_SchedulerDecision decision = {0};
-  RVS_Result result = rvs_engine_consider_scheduler_event(scratch.arena, params, event, reject_if_shutdown, &decision);
-  AssertAlways(decision.emissions.first == 0);
-  AssertAlways(decision.command.kind == RVS_SchedulerCommand_Null);
-  rvs_scheduler_decision_release(&params.session->scheduler, &decision);
-  return result;
-}
-
-internal RVS_Result
-rvs_engine_drive_scheduler_event(RVS_Engine *engine, RVS_SchedulerEvent event)
-{
-  enum { immediate_transition_limit = 64 };
-  RVS_Result initial_result = RVS_Result_EngineStopped;
-
-  for (U32 transition_idx = 0;; transition_idx += 1) {
-    Temp scratch = scratch_begin(0, 0);
-
-    RVS_SchedulerDecision decision = {0};
-    RVS_Result result = rvs_engine_consider_scheduler_event(scratch.arena, rvs_session_params_from_engine(engine), event, 0, &decision);
-    if (transition_idx == 0) { initial_result = result; }
-
-    event = rvs_engine_execute_scheduler_decision_unlocked(engine, &decision);
-    rvs_scheduler_decision_release(&engine->session->scheduler, &decision);
-
-    scratch_end(scratch);
-
-    if (event.kind == RVS_SchedulerEvent_Null) { break; }
-    if (transition_idx + 1 >= immediate_transition_limit) {
-      AssertAlways(event.kind == RVS_SchedulerEvent_CommandOutcome);
-      RVS_Result enqueue_result = rvs_engine_send_message(engine, &(RVS_EngineMessage){
-        .type            = RVS_EngineMessageKind_SchedulerEvent,
-        .scheduler_event = event,
-      });
-      AssertAlways(enqueue_result == RVS_Result_Ok || enqueue_result == RVS_Result_EngineStopped);
-      break;
-    }
-  }
-  return initial_result;
-}
-internal void
-rvs_engine_submit_scheduler_failure(RVS_Engine *engine, RVS_MessageID request_id, RVS_Result result)
-{
-  rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
-    .kind = RVS_SchedulerEvent_OperationFailed,
-    .failed = { .request_id = request_id, .result = result },
-  });
-}
-internal void
-rvs_engine_process_command(RVS_Engine *engine, RVS_MessageID request_id, RVS_Command *command)
-{
-  RVS_Scheduler *scheduler = &engine->session->scheduler;
-  rvs_scheduler_process_command(scheduler, command);
-}
-
-internal void
-rvs_engine_complete_reply(RVS_Engine *engine, RVS_CommandReply reply)
-{
-  rvs_engine_drive_scheduler_event(engine,
-    (RVS_SchedulerEvent){
-      .kind = RVS_SchedulerEvent_BackendCompleted,
-      .completed = { .reply = reply },
-    }
-  );
-}
-
-internal void
-rvs_engine_process_demon_reply(RVS_Engine *engine, RVS_DemonReply *reply)
-{
-#if 0
-  switch (reply->kind) {
-  case RVS_DemonReplyKind_LaunchStarted: {
-    ProfBegin("DEMON Reply: LaunchStarted");
-
-    RVS_SchedulerEvent event = {
-      .kind           = RVS_SchedulerEvent_LaunchStarted,
-      .launch_started = {
-        .request_id = reply->request_id,
-        .pid        = reply->launch_started.pid,
-      },
-    };
-    rvs_engine_drive_scheduler_event(engine, event);
-
-    ProfEnd();
-  } break;
-
-  case RVS_DemonReplyKind_ActionResult: {
-    RVS_DemonAction action = reply->action_result.action;
-    RVS_Result result = reply->action_result.result;
-    if (action == RVS_DemonAction_Launch) {
-      if (result != RVS_Result_Ok) {
-        rvs_engine_complete_reply(engine, (RVS_EngineReply){
-          .request_id = reply->request_id,
-          .result = result,
-          .kind = RVS_EngineReplyKind_Launch,
-        });
-      }
-    } else if (action == RVS_DemonAction_Run) {
-      rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
-        .kind = result == RVS_Result_Ok ? RVS_SchedulerEvent_DispatchAccepted : RVS_SchedulerEvent_OperationFailed,
-        .failed = { .request_id = reply->request_id, .result = result },
-      });
-      if (result == RVS_Result_Ok) {
-        rvs_engine_complete_reply(engine, (RVS_EngineReply){
-          .request_id = reply->request_id,
-          .result = result,
-          .kind = RVS_EngineReplyKind_Run,
-        });
-      }
-    } else if (action == RVS_DemonAction_Resume) {
-      rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
-        .kind = RVS_SchedulerEvent_CommandOutcome,
-        .command_outcome = {
-          .command_kind = RVS_SchedulerCommand_ResumeTargetSubset,
-          .command = { .request_id = reply->request_id, .command_id = reply->action_result.command_id },
-          .result = result,
-        },
-      });
-    } else if (action == RVS_DemonAction_Terminate) {
-      // Termination has no scheduler vertical slice yet.
-    } else {
-      InvalidPath;
-    }
-  } break;
-
-  case RVS_DemonReplyKind_EventBatch: {
-    U64 raw_events_count = 0;
-    for EachNode(n, DMN_EventNode, reply->event_batch.events.first) {
-      raw_events_count += 1;
-    }
-    Temp scratch = scratch_begin(0, 0);
-    RVS_SchedulerEventDisposition *dispositions = push_array(scratch.arena, RVS_SchedulerEventDisposition, raw_events_count);
-    rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
-      .kind = RVS_SchedulerEvent_DemonEventBatch,
-      .demon_events = {
-        .source = reply->event_batch.command_id == 0 ? RVS_SchedulerEventBatchSource_Execution : RVS_SchedulerEventBatchSource_PumpLaunch,
-        .command = { .request_id = reply->request_id, .command_id = reply->event_batch.command_id },
-        .request_id = reply->request_id,
-        .events = reply->event_batch.events,
-        .dispositions = dispositions,
-        .dispositions_count = raw_events_count,
-      },
-    });
-    scratch_end(scratch);
-  } break;
-
-  case RVS_DemonReplyKind_ExecutionStopped: {
-    rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
-      .kind = RVS_SchedulerEvent_CommandOutcome,
-      .command_outcome = {
-        .command_kind = RVS_SchedulerCommand_InterruptExecution,
-        .command = { .request_id = reply->request_id, .command_id = reply->execution_stopped.command_id },
-        .result = RVS_Result_Ok,
-      },
-    });
-  } break;
-
-  case RVS_DemonReplyKind_ExecutionFinished: {
-    rvs_engine_drive_scheduler_event(engine, (RVS_SchedulerEvent){
-      .kind = RVS_SchedulerEvent_RunFinished,
-      .request = { .request_id = reply->request_id },
-    });
-  } break;
-
-  default: { InvalidPath; } break;
-  }
-#endif
-}
-#endif
-
-internal RVS_Result
-rvs_engine_send_demon_message(RVS_Engine *engine, RVS_DemonMessage message)
-{
-  rvs_control_assert_unlocked();
-  if (ins_atomic_u32_eval(&engine->state) != RVS_WorkerState_Live) { return RVS_Result_EngineStopped; }
-#if RVS_ENGINE_TESTING
-  if (ins_atomic_u32_eval_cond_assign(&engine->test_fail_demon_message_type,
-                                      RVS_DemonMessage_Null,
-                                      (U32)message.type) == (U32)message.type) {
-    return RVS_Result_Error;
-  }
-#endif
-  RVS_Result result = rvs_demon_send_message(engine->demon, message);
-  if (result != RVS_Result_Ok && ins_atomic_u32_eval(&engine->state) != RVS_WorkerState_Live) {
-    result = RVS_Result_EngineStopped;
-  }
-  return result;
-}
-
-internal void
-rvs_engine_scheduler_step(RVS_Engine *engine, RVS_SchedulerInput root)
+rvs_engine_scheduler_advance(RVS_Engine *engine, RVS_SchedulerMessage root)
 {
   Temp scratch = scratch_begin(0, 0);
 
+  // feed new message to the scheduler
   rvs_scheduler_apply(engine->session->scheduler, root);
 
   for (B32 keep_running = 1; keep_running;) {
     Temp temp = temp_begin(scratch.arena);
 
-    RVS_SchedulerEffect *effect = rvs_scheduler_pump(temp.arena, engine->session->scheduler);
+    RVS_SchedulerEffect *effect = rvs_scheduler_take_next_effect(temp.arena, engine->session->scheduler);
 
     switch (effect->kind) {
     case RVS_SchedulerEffectKind_SendBackendMessage: {
-      // send message to the backend worker
-      RVS_Result send_result = rvs_engine_send_demon_message(engine, effect->backend_message);
+      // send message to the backend
+      RVS_Result send_result = rvs_demon_send_message(engine->demon, effect->backend_message);
 
-      // feed back send result into the scheduler
-      RVS_SchedulerInput input = {
-        .kind                  = RVS_InputSourceKind_BackendSendResult,
+      // feed back the send result into the scheduler
+      RVS_SchedulerMessage message = {
+        .kind                = RVS_SchedulerMessageKind_BackendSendResult,
         .backend_send_result = {
-          .v = send_result,
-          .request_id = effect->backend_message.request_id,
+          .send_result = send_result,
+          .request_id  = effect->backend_message.request_id,
         },
       };
-      rvs_scheduler_apply(engine->session->scheduler, input);
+      rvs_scheduler_apply(engine->session->scheduler, message);
     } break;
 
     case RVS_SchedulerEffectKind_CompleteCommand: {
-      RVS_Request *request = rvs_request_from_id(engine->request_pool, effect->command_reply.request_id);
-      if (request) {
-        rvs_request_complete(request, effect->command_reply);
-      }
+      // complete the command request
+      RVS_Request *request        = rvs_request_from_id(engine->request_pool, effect->command_reply.request_id);
+      B32          is_complete_ok = rvs_request_complete(request, effect->command_reply);
+
+      // notify scheduler with the completion status
+      RVS_SchedulerMessage message = {
+        .kind                    = RVS_SchedulerMessageKind_CommandCompleteResult,
+        .command_complete_result = {
+          .is_complete_ok = is_complete_ok,
+          .effect         = effect,
+        }
+      };
+      rvs_scheduler_apply(engine->session->scheduler, message);
     } break;
 
     case RVS_SchedulerEffectKind_CreateProgram: {
@@ -1234,13 +913,14 @@ rvs_engine_scheduler_step(RVS_Engine *engine, RVS_SchedulerInput root)
       rvs_entity_process_create_locked(&engine->session->entities, effect->create_program.program, effect->create_program.process, effect->create_program.parent_process, effect->create_program.pid);
       rvs_control_mutex_drop(engine->control);
 
-      rvs_scheduler_apply(engine->session->scheduler, (RVS_SchedulerInput){
-        .kind = RVS_InputSourceKind_NewProgram,
+      RVS_SchedulerMessage new_program_message = {
+        .kind        = RVS_SchedulerMessageKind_NewProgram,
         .new_program = {
           .request_id = effect->operation->request_id,
           .program    = effect->create_program.program,
         },
-      });
+      };
+      rvs_scheduler_apply(engine->session->scheduler, new_program_message);
     } break;
 
     case RVS_SchedulerEffectKind_Null: { keep_running = 0; } break;
@@ -1254,57 +934,43 @@ rvs_engine_scheduler_step(RVS_Engine *engine, RVS_SchedulerInput root)
 }
 
 internal void
-rvs_engine_drive_scheduler(RVS_Engine *engine, RVS_SchedulerInput root)
-{
-  if (root.kind == RVS_InputSourceKind_BackendReply &&
-      root.backend_reply.v.kind == RVS_DemonReplyKind_EventBatch) {
-    for EachNode(n, DMN_EventNode, root.backend_reply.v.event_batch.events.first) {
-      rvs_engine_scheduler_step(engine, (RVS_SchedulerInput){
-        .kind = RVS_InputSourceKind_BackendEvent,
-        .backend_event = { .event = n->v },
-      });
-    }
-  } else {
-    rvs_engine_scheduler_step(engine, root);
-  }
-}
-
-internal void
 rvs_engine_worker(void *user_data)
 {
   RVS_Engine *engine = user_data;
 
   for (B32 keep_going = 1; keep_going;) {
     // wait for an engine message
-    RVS_EngineMessage *message = rvs_queue_pop_struct(engine->inbox_queue, RVS_EngineMessage, max_U64);
-    if (message == 0) { continue; }
+    RVS_EngineMessage *engine_message = rvs_queue_pop_struct(engine->inbox_queue, RVS_EngineMessage, max_U64);
+    if (engine_message == 0) { continue; }
 
     // funnel message to the appropriate handler
-    RVS_SchedulerInput input;
-    switch (message->kind) {
+    switch (engine_message->kind) {
     case RVS_EngineMessageKind_DispatchCommand: {
-      input = (RVS_SchedulerInput){
-        .kind    = RVS_InputSourceKind_Command,
+      RVS_SchedulerMessage scheduler_message = {
+        .kind    = RVS_SchedulerMessageKind_Command,
         .command = {
-          .request_id = message->request_id,
-          .v          = message->command
+          .request_id = engine_message->request_id,
+          .v          = engine_message->command
         }
       };
-      rvs_engine_drive_scheduler(engine, input);
+      rvs_engine_scheduler_advance(engine, scheduler_message);
     } break;
+      
     case RVS_EngineMessageKind_DemonReply: {
-      input = (RVS_SchedulerInput){
-        .kind          = RVS_InputSourceKind_BackendReply,
-        .backend_reply.v = message->demon_reply,
+      // feed reply back to the scheduler
+      RVS_SchedulerMessage scheduler_message = {
+        .kind          = RVS_SchedulerMessageKind_BackendReply,
+        .backend_reply = engine_message->demon_reply,
       };
-      rvs_engine_drive_scheduler(engine, input);
+      rvs_engine_scheduler_advance(engine, scheduler_message);
     } break;
+
     case RVS_EngineMessageKind_Shutdown: { keep_going = 0; } break;
     default: { InvalidPath; } break;
     }
 
     // dispose of the message
-    rvs_queue_recycle(engine->inbox_queue, &message->base);
+    rvs_queue_recycle(engine->inbox_queue, &engine_message->base);
   }
 
   ins_atomic_u32_eval_assign(&engine->state, RVS_WorkerState_Exited);

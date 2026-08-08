@@ -3,7 +3,7 @@
 
 ////////////////////////////////
 
-#include "rvs_scheduler.h"
+#include "rvs_plan.h"
 
 ////////////////////////////////
 
@@ -37,12 +37,21 @@ rvs_emit_effect_create_program(Arena *arena, RVS_ProgramID program, DMN_Event ev
   return effect;
 }
 
+internal RVS_SchedulerEffect *
+rvs_emit_effect_complete_operation(Arena *arena)
+{
+  RVS_SchedulerEffect *effect = push_array(arena, RVS_SchedulerEffect, 1);
+  effect->kind = RVS_SchedulerEffectKind_OperationCompleted;
+  return effect;
+}
+
 ////////////////////////////////
 
 RVS_PLAN_FUNC(rvs_launch_suspended_plan)
 {
   enum {
     RVS_LaunchState_LaunchAck = RVS_PlanState_UserLo,
+    RVS_LaunchState_PendingSendAck,
     RVS_LaunchState_AwaitLaunchAck,
     RVS_LaunchState_AwaitCreateProcess,
     RVS_LaunchState_PendingProgram,
@@ -54,103 +63,91 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
 
   RVS_PlanResult result = { .status = RVS_PlanStatus_Unhandled };
 
-  switch (plan->state) {
+  switch (state) {
   //
   // 1. initialize program launch
   //
   case RVS_PlanState_Begin: {
-    AssertAlways(input->kind == RVS_InputSourceKind_Command);
+    AssertAlways(message->kind == RVS_SchedulerMessageKind_Command);
     AssertAlways(operation->command.kind == RVS_CommandKind_Launch);
 
-    //
     // 1a. allocate temp state for the PID
-    //
     plan->ud = push_array(arena, RVS_LaunchSuspendedState, 1);
 
-    //
-    // 1b. send backend request for launch + parameters
-    //
+    // 1b. request backend to launch the process
     RVS_DemonMessage message = {
       .type          = RVS_DemonMessage_Launch,
       .request_id    = operation->request_id,
       .launch.params = operation->command.launch_params,
     };
     result = (RVS_PlanResult){
-      .status     = RVS_PlanStatus_AwaitBackendReply,
-      .next_state = RVS_LaunchState_AwaitLaunchAck,
+      .status     = RVS_PlanStatus_Handled,
       .effect     = rvs_emit_effect_send_backend_message(arena, message),
+      .next_state = RVS_LaunchState_PendingSendAck,
+      .next_wait  = { RVS_PlanWaitKind_BackendReply },
     };
   } break;
 
   //
-  // 2. wait for the backend to reply with process PID
+  // 2. was backend message sent?
   //
-  case RVS_LaunchState_AwaitLaunchAck: {
-    if (input->kind == RVS_InputSourceKind_BackendSendResult &&
-        input->backend_send_result.v != RVS_Result_Ok) {
-      result = (RVS_PlanResult){
-        .status = RVS_PlanStatus_Handled,
-        .next_state = RVS_PlanState_End,
-        .effect = rvs_emit_effect_complete_command(arena, (RVS_CommandReply){
-          .request_id = operation->request_id,
-          .result = input->backend_send_result.v,
-          .kind = RVS_CommandReplyKind_LaunchAck,
-        }),
-      };
-    }
-    if (input->kind == RVS_InputSourceKind_BackendReply) {
-      RVS_DemonReply *reply = &input->backend_reply.v;
-      if (reply->kind == RVS_DemonReplyKind_LaunchStarted) {
-        RVS_LaunchSuspendedState *ud = plan->ud;
-        ud->pid = reply->launch_started.pid;
-
+  case RVS_LaunchState_PendingSendAck: {
+    if (message->kind == RVS_SchedulerMessageKind_BackendSendResult) {
+      // launch message was sent to the backend -- now wait for events
+      if (message->backend_send_result.send_result == RVS_Result_Ok) {
         result = (RVS_PlanResult){
-          .status      = RVS_PlanStatus_AwaitEvent,
-          .next_state  = RVS_LaunchState_AwaitCreateProcess,
-          .effect = rvs_emit_effect_send_backend_message(arena, (RVS_DemonMessage){
-            .type = RVS_DemonMessage_Pump,
-            .request_id = operation->request_id,
-          }),
+          .status     = RVS_PlanStatus_Handled,
+          .next_state = RVS_LaunchState_AwaitLaunchAck,
+          .next_wait  = { RVS_PlanWaitKind_Event },
         };
-      } else if (reply->kind == RVS_DemonReplyKind_ActionResult &&
-                 reply->action_result.action == RVS_DemonAction_Launch) {
+      }
+      // backend didn't receive the launch message sent by the plan; complete the command with the send error code
+      else {
+        RVS_CommandReply command_reply = {
+          .request_id = operation->request_id,
+          .result     = message->backend_send_result.send_result,
+          .kind       = RVS_CommandReplyKind_LaunchAck,
+        };
         result = (RVS_PlanResult){
-          .status = RVS_PlanStatus_Handled,
+          .status     = RVS_PlanStatus_Handled,
           .next_state = RVS_PlanState_End,
-          .effect = rvs_emit_effect_complete_command(arena, (RVS_CommandReply){
-            .request_id = operation->request_id,
-            .result = reply->action_result.result,
-            .kind = RVS_CommandReplyKind_LaunchAck,
-          }),
+          .effect     = rvs_emit_effect_complete_command(arena, command_reply),
         };
       }
     }
   } break;
 
   //
-  // 3. wait for the "create process" event
+  // 3. wait for the backend to reply with process PID
+  //
+  case RVS_LaunchState_AwaitLaunchAck: {
+    if (message->kind == RVS_SchedulerMessageKind_BackendReply) {
+      RVS_DemonReply *reply = &message->backend_reply;
+      if (reply->kind == RVS_DemonReplyKind_LaunchStarted) {
+        // 3a. backend launched the process successfully -- stash the PID
+        RVS_LaunchSuspendedState *ud = plan->ud;
+        ud->pid = reply->launch_started.pid;
+
+        // 3b. wait for the create process
+        result = (RVS_PlanResult){
+          .status     = RVS_PlanStatus_Handled,
+          .next_state = RVS_LaunchState_AwaitCreateProcess,
+          .next_wait  = { RVS_PlanWaitKind_Event },
+        };
+      }
+    }
+  } break;
+
+  //
+  // 4. wait for the "create process" event
   //
   case RVS_LaunchState_AwaitCreateProcess: {
-    if (input->kind == RVS_InputSourceKind_BackendSendResult &&
-        input->backend_send_result.v != RVS_Result_Ok) {
-      result = (RVS_PlanResult){
-        .status = RVS_PlanStatus_Handled,
-        .next_state = RVS_PlanState_End,
-        .effect = rvs_emit_effect_complete_command(arena, (RVS_CommandReply){
-          .request_id = operation->request_id,
-          .result = input->backend_send_result.v,
-          .kind = RVS_CommandReplyKind_LaunchAck,
-        }),
-      };
-    }
-    if (input->kind == RVS_InputSourceKind_BackendEvent) {
+    if (message->kind == RVS_SchedulerMessageKind_BackendEvent) {
       RVS_LaunchSuspendedState *launch_state = plan->ud;
-      DMN_Event *event = &input->backend_event.event;
+      DMN_Event *event = &message->backend_event;
 
       if (event->system_process_id == launch_state->pid) {
-        //
-        // 3a. create process event found -> create program entity
-        //
+        // 4a. create process event found -> create program entity
         if (event->kind == DMN_EventKind_CreateProcess) {
           result = (RVS_PlanResult){
             .status     = RVS_PlanStatus_Handled,
@@ -158,12 +155,8 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
             .next_state = RVS_LaunchState_PendingProgram,
           };
         }
-        //
-        // 3b. exit process found -> stop debugging
-        //
+        // 4b. exit-process found before create-process -> stop debugging
         else if (event->kind == DMN_EventKind_ExitProcess) {
-          // if process exits before the create process event was seen
-          // fail launch handshake
           RVS_CommandReply command_reply = {
             .request_id            = operation->request_id,
             .result                = RVS_Result_Error,
@@ -176,30 +169,30 @@ RVS_PLAN_FUNC(rvs_launch_suspended_plan)
             .effect = rvs_emit_effect_complete_command(arena, command_reply),
           };
         }
-        //
-        // 3c. no event found -> wait for more events
-        //
+        // 4c. no event found -> wait for more events
         else {
-          // ask scheduler to retry again with a new event
-          result = (RVS_PlanResult){ .status = RVS_PlanStatus_AwaitEvent };
+          result = (RVS_PlanResult){
+            .status    = RVS_PlanStatus_Handled,
+            .next_wait = { RVS_PlanWaitKind_Event },
+          };
         }
       }
     }
   } break;
 
   //
-  // 4. wait for program entity to be created and reply with the PID and ProgramID
+  // 5. wait for program entity to be created and reply with the PID and ProgramID
   //
   case RVS_LaunchState_PendingProgram: {
-    if (input->kind == RVS_InputSourceKind_NewProgram) {
+    if (message->kind == RVS_SchedulerMessageKind_NewProgram) {
       RVS_CommandReply command_reply = {
         .request_id            = operation->request_id,
         .result                = RVS_Result_Ok,
         .kind                  = RVS_CommandReplyKind_LaunchAck,
-        .launch_ack.program_id = input->new_program.program,
+        .launch_ack.program_id = message->new_program.program,
         .launch_ack.pid        = ((RVS_LaunchSuspendedState *)plan->ud)->pid,
       };
-      return (RVS_PlanResult){
+      result = (RVS_PlanResult){
         .status = RVS_PlanStatus_Handled,
         .effect = rvs_emit_effect_complete_command(arena, command_reply),
       };
@@ -280,60 +273,54 @@ rvs_operation_release(RVS_Scheduler *sch, RVS_Operation *op)
 }
 
 internal void
-rvs_scheduler_queue_effect(RVS_Scheduler *sch, RVS_Operation *operation, RVS_SchedulerEffect *effect)
+rvs_scheduler_queue_effect(RVS_Scheduler       *sch,
+                           RVS_Operation       *operation,
+                           RVS_SchedulerEffect *effect)
 {
-  AssertAlways(effect != 0 && effect->kind != RVS_SchedulerEffectKind_Null);
+  AssertAlways(effect && effect->kind != RVS_SchedulerEffectKind_Null);
   AssertAlways(sch->next_effect_id != max_U64);
-  effect->id = ++sch->next_effect_id;
-  AssertAlways(effect->id != 0);
+  effect->id        = ++sch->next_effect_id;
   effect->operation = operation;
-  effect->next = 0;
+  effect->next      = 0;
   SLLQueuePush(sch->effect_first, sch->effect_last, effect);
 }
 
-internal RVS_Result
-rvs_scheduler_apply_active_plan(RVS_Scheduler *sch, RVS_SchedulerInput input)
+internal void
+rvs_scheduler_complete_operation(RVS_Scheduler *sch, RVS_Operation *operation)
 {
-  RVS_Operation *operation = sch->active_operation;
-  if (operation == 0 || operation->active_plan == 0) {
-    return RVS_Result_StaleState;
-  }
-  if (input.kind == RVS_InputSourceKind_BackendReply &&
-      input.backend_reply.v.request_id != operation->request_id) {
-    return RVS_Result_StaleState;
-  }
-  if (input.kind == RVS_InputSourceKind_BackendSendResult &&
-      input.backend_send_result.request_id != operation->request_id) {
-    return RVS_Result_StaleState;
-  }
-  if (input.kind == RVS_InputSourceKind_NewProgram &&
-      input.new_program.request_id != operation->request_id) {
-    return RVS_Result_StaleState;
-  }
+  rvs_operation_release(sch, operation);
+}
 
-  RVS_Plan *plan = operation->active_plan;
-  RVS_PlanResult result = plan->sig(operation->arena, operation, plan, &input);
-  if (result.status == RVS_PlanStatus_Unhandled) {
-    return RVS_Result_StaleState;
-  }
-  if (result.next_state != RVS_PlanState_Null) {
-    plan->state = result.next_state;
-  }
+internal RVS_Result
+rvs_scheduler_advance_plan(RVS_Scheduler *sch, RVS_SchedulerMessage message)
+{
+  // propagate down message to the active plan
+  RVS_Operation  *operation = sch->active_operation;
+  RVS_Plan       *plan      = operation->active_plan;
+  RVS_PlanResult  result    = plan->sig(operation->arena, operation, plan, &message, plan->state);
+
+  // advance the plan to next state
+  plan->state = result.next_state;
+  plan->wait  = result.next_wait;
+
+  // queue plan effect
   if (result.effect) {
     rvs_scheduler_queue_effect(sch, operation, result.effect);
   }
+
+  //return result;
   return RVS_Result_Ok;
 }
 
 internal RVS_Result
-rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
+rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerMessage message)
 {
   RVS_Result result = RVS_Result_Error;
 
-  switch (input.kind) {
-  case RVS_InputSourceKind_Null: {} break;
+  switch (message.kind) {
+  case RVS_SchedulerMessageKind_Null: {} break;
 
-  case RVS_InputSourceKind_Command: {
+  case RVS_SchedulerMessageKind_Command: {
     // TODO: need to be more lenient on admission of operations
     if (sch->active_operation) {
       result = RVS_Result_AlreadyPending;
@@ -342,16 +329,16 @@ rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
 
     // init operation for the command
     RVS_Operation *op = rvs_operation_alloc(sch);
-    op->request_id  = input.command.request_id;
+    op->request_id  = message.command.request_id;
     op->apply_epoch = sch->stop_state.epoch;
-    rvs_command_copy(op->arena, &op->command, &input.command.v); // sync command lifetime with the allocated operation
+    rvs_command_copy(op->arena, &op->command, &message.command.v); // sync command lifetime with the allocated operation
 
     // init root plan
     RVS_Plan *plan;
     {
       // find plan that matches command
       RVS_PlanSig *plan_sig = 0;
-      switch (input.command.v.kind) {
+      switch (message.command.v.kind) {
       case RVS_CommandKind_Launch:       { plan_sig = rvs_launch_suspended_plan; } break;
       case RVS_CommandKind_Run:          { NotImplemented; } break;
       case RVS_CommandKind_Pause:        { NotImplemented; } break;
@@ -375,14 +362,38 @@ rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
 
     // schedule new operation
     sch->active_operation = op;
-    result = rvs_scheduler_apply_active_plan(sch, input);
+
+    result = rvs_scheduler_advance_plan(sch, message);
   } break;
 
-  case RVS_InputSourceKind_BackendSendResult:
-  case RVS_InputSourceKind_BackendReply:
-  case RVS_InputSourceKind_BackendEvent:
-  case RVS_InputSourceKind_NewProgram: {
-    result = rvs_scheduler_apply_active_plan(sch, input);
+  case RVS_SchedulerMessageKind_BackendSendResult:
+  case RVS_SchedulerMessageKind_NewProgram: {
+    result = rvs_scheduler_advance_plan(sch, message);
+  } break;
+
+  case RVS_SchedulerMessageKind_BackendReply: {
+    if (message.backend_reply.kind == RVS_DemonReplyKind_EventBatch) {
+      for EachNode(n, DMN_EventNode, message.backend_reply.event_batch.events.first) {
+        RVS_SchedulerMessage event_message = {
+          .kind          = RVS_SchedulerMessageKind_BackendEvent,
+          .backend_event = n->v
+        };
+        result = rvs_scheduler_advance_plan(sch, event_message);
+      }
+    } else {
+      result = rvs_scheduler_advance_plan(sch, message);
+    }
+  } break;
+
+  case RVS_SchedulerMessageKind_CommandCompleteResult: {
+    // TODO: scheduler is not doing anything with the completion status
+
+    RVS_SchedulerEffect *effect    = message.command_complete_result.effect;
+    RVS_Operation       *operation = effect->operation;
+    if (operation == sch->active_operation) {
+      sch->active_operation = 0;
+    }
+    rvs_operation_release(sch, effect->operation);
   } break;
 
   default: InvalidPath;
@@ -392,24 +403,36 @@ rvs_scheduler_apply(RVS_Scheduler *sch, RVS_SchedulerInput input)
 }
 
 internal RVS_SchedulerEffect *
-rvs_scheduler_pump(Arena *arena, RVS_Scheduler *sch)
+rvs_scheduler_take_next_effect(Arena *arena, RVS_Scheduler *sch)
 {
-  RVS_SchedulerEffect *result = push_array(arena, RVS_SchedulerEffect, 1);
   RVS_SchedulerEffect *effect = sch->effect_first;
-  if (effect) {
+
+  if (effect) { 
+    // pop the first effect in queue
     sch->effect_first = effect->next;
     if (sch->effect_last == effect) {
       sch->effect_last = 0;
     }
 
-    *result = *effect;
-    result->next = 0;
-    if (result->kind == RVS_SchedulerEffectKind_CompleteCommand &&
-        sch->active_operation == result->operation) {
-      sch->active_operation = 0;
-      rvs_operation_release(sch, result->operation);
+    RVS_Operation *operation = effect->operation;
+    RVS_Plan      *plan      = operation->active_plan;
+    if (plan->wait.kind == RVS_PlanWaitKind_Event &&
+        sch->backend_state_kind == RVS_BackendState_Idle) {
+      RVS_DemonMessage pump_message = {
+        .type       = RVS_DemonMessage_Pump,
+        .request_id = operation->request_id,
+      };
+      RVS_SchedulerEffect *pump_effect = rvs_emit_effect_send_backend_message(operation->arena, pump_message);
+      rvs_scheduler_queue_effect(sch, operation, pump_effect);
+    }
+
+    // when a command is completed, emit effect that will release the command owner operation
+    if (effect->kind == RVS_SchedulerEffectKind_CompleteCommand && sch->active_operation == effect->operation) {
+      RVS_SchedulerEffect *complete_operation = rvs_emit_effect_complete_operation(effect->operation->arena);
+      rvs_scheduler_queue_effect(sch, effect->operation, complete_operation);
     }
   }
-  return result;
+
+  return effect;
 }
 

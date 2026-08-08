@@ -114,13 +114,14 @@ entry_point(CmdLine *cmdline)
   // init debug engine
   RVS_Engine *engine = 0;
   RVS_Result  engine_init_result = rvs_engine_init(&engine);
+
+  g_rci.engine       = engine;
+  g_rci.output_mutex = mutex_alloc();
+
   if (engine_init_result != RVS_Result_Ok) {
     rci_fprintf(stderr, "ERROR: failed to initialize the debug engine; error code %u\n", engine_init_result);
     goto exit;
   }
-
-  g_rci.engine       = engine;
-  g_rci.output_mutex = mutex_alloc();
 
   Temp scratch = scratch_begin(0,0);
   U64   line_buffer_size = KB(1);
@@ -129,7 +130,7 @@ entry_point(CmdLine *cmdline)
     Temp temp = temp_begin(scratch.arena);
 
     // read and parse a command for the debugger
-    rci_printf("DBG <: ");
+    rci_printf("(DBG) ");
     if (fgets(line_buffer, line_buffer_size, stdin) == 0) {
       break;
     }
