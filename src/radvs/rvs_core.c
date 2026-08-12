@@ -1,14 +1,34 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
+////////////////////////////////
+
 #include "radvs/rvs_core.h"
+
+////////////////////////////////
+
+internal RVS_EventNode *
+rvs_event_list_push(Arena *arena, RVS_EventList *list, RVS_Event v)
+{
+  RVS_EventNode *n = push_array(arena, RVS_EventNode, 1);
+  n->v = v;
+  SLLQueuePush(list->first, list->last, n);
+  list->count += 1;
+  return n;
+}
 
 internal void
 rvs_run_copy(Arena *arena, RVS_RunInfo *dst, RVS_RunInfo *src)
 {
-  dst->programs       = push_array(arena, RVS_ProgramID, src->programs_count);
-  dst->programs_count = src->programs_count;
-  MemoryCopyTyped(dst->programs, src->programs, src->programs_count);
+  switch (src->target_kind) {
+  case RVS_RunTargetKind_All: break;
+  case RVS_RunTargetKind_Programs: {
+    dst->programs.v     = push_array(arena, RVS_ProgramID, src->programs.count);
+    dst->programs.count = src->programs.count;
+    MemoryCopyTyped(dst->programs.v, src->programs.v, src->programs.count);
+  } break;
+  default: InvalidPath;
+  }
 }
 
 internal void
@@ -44,6 +64,7 @@ rvs_help_from_command_kind(RVS_CommandKind v)
 #define X(id, help, ...) case RVS_CommandKind_##id: return str8_lit(help);
   RVS_COMMAND_XLIST
 #undef X
+  default: break;
   }
   return str8_zero();
 }

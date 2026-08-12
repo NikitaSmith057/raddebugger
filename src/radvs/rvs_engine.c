@@ -3,6 +3,11 @@
 
 ////////////////////////////////
 
+#include "base/base_core.h"
+#include "base/base_arena.h"
+#include "base/base_strings.h"
+#include "base/base_processes.h"
+
 #include "radvs/rvs_engine.h"
 #include "radvs/rvs_plan.h"
 #include "radvs/rvs_plan.c"
@@ -14,7 +19,7 @@ struct RVS_Session
   Arena           *arena;
   U32              ref_count;
   RVS_Queue       *event_queue;
-  RVS_EntityStore  entities;
+  RVS_EntityStore *entities;
   RVS_Scheduler   *scheduler;
 };
 
@@ -192,13 +197,6 @@ rvs_session_push_event(RVS_Session *session, RVS_Event *event)
   return rvs_queue_push_copy(session->event_queue, &(RVS_SessionEventMessage){ .event = *event }, rvs_session_event_message_copy);
 }
 
-internal void
-rvs_session_close_events(RVS_Session *session)
-{
-  rvs_queue_close(session->event_queue);
-  rvs_entity_store_close(&session->entities);
-}
-
 internal RVS_Session *
 rvs_session_alloc(RVS_SessionControlParams params, RVS_RequestPool *request_pool)
 {
@@ -207,7 +205,7 @@ rvs_session_alloc(RVS_SessionControlParams params, RVS_RequestPool *request_pool
   session->arena       = arena;
   session->ref_count   = 0;
   session->event_queue = rvs_queue_alloc(sizeof(RVS_SessionEventMessage), AlignOf(RVS_SessionEventMessage));
-  rvs_entity_store_init(&session->entities, arena, params.control->mutex);
+  session->entities    = rvs_entity_store_alloc();
   session->scheduler   = rvs_scheduler_init(arena, request_pool);
 
   rvs_session_addref(session); // engine
@@ -221,7 +219,7 @@ rvs_session_release_ref(RVS_Session *session)
 {
   if (ins_atomic_u32_dec_eval(&session->ref_count) == 0) { // is this the last ref?
     rvs_queue_release(session->event_queue);
-    rvs_entity_store_release(&session->entities);
+    rvs_entity_store_release(session->entities);
     rvs_scheduler_release(session->scheduler);
     arena_release(session->arena);
   }
@@ -386,15 +384,15 @@ rvs_session_run_many(RVS_EngineSessionParams params, RVS_ProgramID *programs, U6
   RVS_Command cmd = {
     .kind = RVS_CommandKind_Run,
     .run  = {
-      .programs_count = programs_count,
-      .programs       = programs,
-      .mode           = RVS_RunMode_Normal,
+      .programs.count = programs_count,
+      .programs.v     = programs,
       .intent         = { .kind = RVS_RunIntentKind_Execute },
     },
   };
   return rvs_session_submit(params, cmd, submit_out);
 }
 
+#if 0
 RVS_Result
 rvs_session_run_to_address(RVS_EngineSessionParams params, RVS_ProgramID program_id, U64 vaddr, RVS_SubmitInfo *submit_out)
 {
@@ -407,8 +405,8 @@ rvs_session_run_to_address(RVS_EngineSessionParams params, RVS_ProgramID program
   RVS_Command cmd = {
     .kind = RVS_CommandKind_Run,
     .run  = {
-      .programs_count = 1,
-      .programs       = &program_id,
+      .programs.count = 1,
+      .programs.v     = &program_id,
       .mode           = RVS_RunMode_ToAddress,
       .address        = vaddr,
       .intent         = { .kind = RVS_RunIntentKind_Execute },
@@ -416,6 +414,7 @@ rvs_session_run_to_address(RVS_EngineSessionParams params, RVS_ProgramID program
   };
   return rvs_session_submit(params, cmd, submit_out);
 }
+#endif
 
 RVS_Result
 rvs_session_pause_many(RVS_EngineSessionParams params, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out)
@@ -439,8 +438,8 @@ rvs_session_pause_many(RVS_EngineSessionParams params, RVS_ProgramID *programs, 
   RVS_Command cmd = {
     .kind  = RVS_CommandKind_Pause,
     .pause = {
-      .programs       = programs,
-      .programs_count = programs_count
+      .programs.v     = programs,
+      .programs.count = programs_count
     }
   };
   return rvs_session_submit(params, cmd, submit_out);
@@ -459,6 +458,63 @@ rvs_session_select_thread(RVS_EngineSessionParams params, RVS_ThreadID thread_id
     .select_thread = thread_id,
   };
   return rvs_session_submit(params, cmd, submit_out);
+}
+
+RVS_Result
+rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out)
+{
+  // @API_ARG_CHECK
+  if (event_out) { MemoryZeroStruct(event_out); }
+  if (session == 0) { return RVS_Result_InvalidArgument; }
+
+  rvs_session_addref(session);
+
+  RVS_Result               result  = RVS_Result_Timeout;
+  RVS_QueuePopResult       pop     = rvs_queue_pop_result(session->event_queue, wait_us);
+  RVS_SessionEventMessage *message = (RVS_SessionEventMessage *)pop.node;
+
+  if (message) {
+    if (pop.is_closed) {
+      result = RVS_Result_EngineStopped;
+    } else {
+      *event_out = message->event;
+      result = RVS_Result_Ok;
+    }
+    rvs_queue_recycle(session->event_queue, &message->base);
+  }
+
+  rvs_session_release(session);
+
+  return result;
+}
+
+RVS_Result
+rvs_session_copy_programs(Arena *arena, RVS_EngineSessionParams params, RVS_Program **programs_out, U64 *programs_count_out)
+{
+  // @API_ARG_CHECK
+  MemoryZeroStruct(programs_out);
+  MemoryZeroStruct(programs_count_out);
+  if (params.session == 0) { return RVS_Result_InvalidArgument; }
+
+  RVS_Result result = RVS_Result_Ok;
+
+  rvs_control_mutex_take(params.control);
+  {
+    RVS_Session     *session  = params.session;
+    RVS_EntityStore *entities = session->entities;
+
+    RVS_Program *programs    = push_array(arena, RVS_Program, entities->programs.count);
+    U64          program_idx = 0;
+    for EachNode(n, RVS_ProgramPtrNode, entities->programs.first) {
+      programs[program_idx++] = *n->v;
+    }
+
+    *programs_out       = programs;
+    *programs_count_out = entities->programs.count;
+  }
+  rvs_control_mutex_drop(params.control);
+
+  return result;
 }
 
 RVS_Result
@@ -505,10 +561,9 @@ rvs_session_continue(RVS_EngineSessionParams params, RVS_ProgramID program_id, R
   RVS_Command cmd = {
     .kind = RVS_CommandKind_Run,
     .run  = {
-      .mode           = RVS_RunMode_Normal,
       .intent         = { .kind = RVS_RunIntentKind_Continue },
-      .programs_count = 1,
-      .programs       = &program_id,
+      .programs.count = 1,
+      .programs.v     = &program_id,
     },
   };
   return rvs_session_submit(params, cmd, submit_out);
@@ -560,101 +615,6 @@ rvs_session_ack_event(RVS_EngineSessionParams params, U64 sequence)
   RVS_Result result = rvs_control_reduce_scheduler_event_expect_empty(session_params, event, 1);
   return result == RVS_Result_StaleState ? RVS_Result_Ok : result;
 #endif
-}
-
-RVS_Result
-rvs_session_fetch_program(RVS_Session *session, RVS_ProgramID id, U64 wait_us, RVS_ProgramSnapshot *snapshot_out)
-{
-  // @API_ARG_CHECK
-  if (snapshot_out) { MemoryZeroStruct(snapshot_out); }
-  if (session == 0 || snapshot_out == 0 || MemoryIsZeroStruct(&id)) {
-    return RVS_Result_InvalidArgument;
-  }
-
-  rvs_session_addref(session);
-  RVS_Result result = rvs_entity_fetch_program(&session->entities, id, wait_us, snapshot_out);
-  rvs_session_release(session);
-
-  return result;
-}
-
-RVS_Result
-rvs_session_fetch_process(RVS_Session *session, RVS_ProcessID id, U64 wait_us, RVS_ProcessSnapshot *snapshot_out)
-{
-  // @API_ARG_CHECK
-  if (snapshot_out) { MemoryZeroStruct(snapshot_out); }
-  if (session == 0 || snapshot_out == 0 || MemoryIsZeroStruct(&id)) {
-    return RVS_Result_InvalidArgument;
-  }
-
-  rvs_session_addref(session);
-  RVS_Result result = rvs_entity_fetch_process(&session->entities, id, wait_us, snapshot_out);
-  rvs_session_release(session);
-
-  return result;
-}
-
-RVS_Result
-rvs_session_fetch_thread(RVS_Session *session, RVS_ThreadID id, U64 wait_us, RVS_ThreadSnapshot *snapshot_out)
-{
-  // @API_ARG_CHECK
-  if (snapshot_out) { MemoryZeroStruct(snapshot_out); }
-  if (session == 0 || snapshot_out == 0 || MemoryIsZeroStruct(&id)) {
-    return RVS_Result_InvalidArgument;
-  }
-
-  rvs_session_addref(session);
-  RVS_Result result = rvs_entity_fetch_thread(&session->entities, id, wait_us, snapshot_out);
-  rvs_session_release(session);
-
-  return result;
-}
-
-RVS_Result
-rvs_session_wait_for_event(Arena *arena, RVS_Session *session, U64 wait_us, RVS_Event *event_out)
-{
-  // @API_ARG_CHECK
-  if (event_out) { MemoryZeroStruct(event_out); }
-  if (session == 0) {
-    return RVS_Result_InvalidArgument;
-  }
-
-  rvs_session_addref(session);
-
-  RVS_Result               result  = RVS_Result_Timeout;
-  RVS_QueuePopResult       pop     = rvs_queue_pop_result(session->event_queue, wait_us);
-  RVS_SessionEventMessage *message = (RVS_SessionEventMessage *)pop.node;
-
-  if (message) {
-    if (pop.is_closed) {
-      result = RVS_Result_EngineStopped;
-    } else {
-      *event_out = message->event;
-      result = RVS_Result_Ok;
-    }
-    rvs_queue_recycle(session->event_queue, &message->base);
-  }
-
-  rvs_session_release(session);
-
-  return result;
-}
-
-RVS_Result
-rvs_session_copy_programs(Arena *arena, RVS_Session *session, RVS_ProgramSnapshot **snapshots_out, U64 *snapshots_count_out)
-{
-  // @API_ARG_CHECK
-  if (snapshots_out)       { MemoryZeroStruct(snapshots_out);       }
-  if (snapshots_count_out) { MemoryZeroStruct(snapshots_count_out); }
-  if (arena == 0 || session == 0 || snapshots_out == 0 || snapshots_count_out == 0) {
-    return RVS_Result_InvalidArgument;
-  }
-
-  rvs_session_addref(session);
-  RVS_Result result = rvs_entity_copy_programs(&session->entities, arena, snapshots_out, snapshots_count_out);
-  rvs_session_release(session);
-
-  return result;
 }
 
 internal void
@@ -727,7 +687,7 @@ rvs_engine_shutdown(RVS_Engine *engine)
   if (engine == 0) {
     return RVS_Result_InvalidArgument;
   }
-  if (ins_atomic_u32_eval_cond_assign(&engine->state, RVS_WorkerState_Terminating, RVS_WorkerState_Live) != RVS_WorkerState_Live) {
+  if (ins_atomic_u32_eval_cond_assign(&engine->state, RVS_WorkerState_Exiting, RVS_WorkerState_Live) != RVS_WorkerState_Live) {
     return RVS_Result_EngineStopped;
   }
 
@@ -760,7 +720,6 @@ rvs_engine_shutdown(RVS_Engine *engine)
       // release session
       if (engine->session) {
         rvs_control_mutex_take(engine->control);
-        rvs_session_close_events(engine->session); 
         rvs_session_release_engine(engine->session);
         engine->session = 0;
         rvs_control_mutex_drop(engine->control);
@@ -787,11 +746,13 @@ rvs_engine_run(RVS_Engine *engine, RVS_ProgramID *programs, U64 programs_count, 
   return rvs_session_run_many(rvs_engine_params_from_engine(engine), programs, programs_count, submit_out);
 }
 
+#if 0
 RVS_Result
 rvs_engine_run_to_address(RVS_Engine *engine, RVS_ProgramID program_id, U64 vaddr, RVS_SubmitInfo *submit_out)
 {
   return rvs_session_run_to_address(rvs_engine_params_from_engine(engine), program_id, vaddr, submit_out);
 }
+#endif
 
 RVS_Result
 rvs_engine_interrupt(RVS_Engine *engine, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out)
@@ -830,71 +791,56 @@ rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Eve
 }
 
 RVS_Result
+rvs_engine_copy_programs(Arena *arena, RVS_Engine *engine, RVS_Program **program_out, U64 *program_count_out)
+{
+  return rvs_session_copy_programs(arena, rvs_engine_params_from_engine(engine), program_out, program_count_out);
+}
+
+RVS_Result
 rvs_engine_ack_event(RVS_Engine *engine, U64 sequence)
 {
   return rvs_session_ack_event(rvs_engine_params_from_engine(engine), sequence);
 }
 
-RVS_Result
-rvs_engine_copy_programs(Arena *arena, RVS_Engine *engine, RVS_ProgramSnapshot **snapshots_out, U64 *snapshots_count_out)
-{
-  return rvs_session_copy_programs(arena, engine->session, snapshots_out, snapshots_count_out);
-}
-
-RVS_Result
-rvs_engine_fetch_program(RVS_Engine *engine, RVS_ProgramID id, U64 wait_us, RVS_ProgramSnapshot *snapshot_out)
-{
-  return rvs_session_fetch_program(engine->session, id, wait_us, snapshot_out);
-}
-
-RVS_Result
-rvs_engine_fetch_process(RVS_Engine *engine, RVS_ProcessID id, U64 wait_us, RVS_ProcessSnapshot *snapshot_out)
-{
-  return rvs_session_fetch_process(engine->session, id, wait_us, snapshot_out);
-}
-
-RVS_Result
-rvs_engine_fetch_thread(RVS_Engine *engine, RVS_ThreadID id, U64 wait_us, RVS_ThreadSnapshot *snapshot_out)
-{
-  return rvs_session_fetch_thread(engine->session, id, wait_us, snapshot_out);
-}
-
 ////////////////////////////////
-// Engine Worker
+//
+// Engine Worker waits on messages from outside, unwraps and executes requested debugger command then replies back to
+// the sender with the result of the operation.
+//
 
 internal void
-rvs_engine_scheduler_advance(RVS_Engine *engine, RVS_SchedulerMessage root)
+rvs_engine_scheduler_advance(RVS_Engine *engine, RVS_SchedulerMessage input)
 {
   Temp scratch = scratch_begin(0, 0);
 
   // feed new message to the scheduler
-  rvs_scheduler_apply(engine->session->scheduler, root);
+  rvs_scheduler_apply(engine->session->scheduler, engine->session->entities, input);
 
   for (B32 keep_running = 1; keep_running;) {
     Temp temp = temp_begin(scratch.arena);
 
-    RVS_SchedulerEffect *effect = rvs_scheduler_take_next_effect(temp.arena, engine->session->scheduler);
+    RVS_Effect *effect = rvs_scheduler_pump_effect(temp.arena, engine->session->scheduler);
 
     switch (effect->kind) {
-    case RVS_SchedulerEffectKind_SendBackendMessage: {
+    case RVS_EffectKind_SendBackendMessage: {
       // send message to the backend
-      RVS_Result send_result = rvs_demon_send_message(engine->demon, effect->backend_message);
+      RVS_Result send_result = rvs_demon_send_message(engine->demon, effect->v.backend_message);
 
-      // feed back the send result into the scheduler
+      // apply backend message send result
       RVS_SchedulerMessage message = {
         .kind                = RVS_SchedulerMessageKind_BackendSendResult,
         .backend_send_result = {
           .send_result = send_result,
-          .request_id  = effect->backend_message.request_id,
+          .request_id  = effect->v.backend_message.base.id,
         },
       };
-      rvs_scheduler_apply(engine->session->scheduler, message);
+      rvs_scheduler_apply(engine->session->scheduler, engine->session->entities, message);
     } break;
 
-    case RVS_SchedulerEffectKind_CompleteCommand: {
+    case RVS_EffectKind_CompleteCommand: {
       // complete the command request
-      RVS_Request *request        = rvs_request_from_id(engine->request_pool, effect->command_reply.request_id);
-      B32          is_complete_ok = rvs_request_complete(request, effect->command_reply);
+      RVS_Request *request        = rvs_request_from_id(engine->request_pool, effect->v.command_reply.request_id);
+      B32          is_complete_ok = rvs_request_complete(request, effect->v.command_reply);
 
       // notify scheduler with the completion status
       RVS_SchedulerMessage message = {
@@ -904,26 +850,14 @@ rvs_engine_scheduler_advance(RVS_Engine *engine, RVS_SchedulerMessage root)
           .effect         = effect,
         }
       };
-      rvs_scheduler_apply(engine->session->scheduler, message);
+      rvs_scheduler_apply(engine->session->scheduler, engine->session->entities, message);
     } break;
 
-    case RVS_SchedulerEffectKind_CreateProgram: {
-      rvs_control_mutex_take(engine->control);
-      rvs_entity_program_create_locked(&engine->session->entities, effect->create_program.program, effect->create_program.pid);
-      rvs_entity_process_create_locked(&engine->session->entities, effect->create_program.program, effect->create_program.process, effect->create_program.parent_process, effect->create_program.pid);
-      rvs_control_mutex_drop(engine->control);
-
-      RVS_SchedulerMessage new_program_message = {
-        .kind        = RVS_SchedulerMessageKind_NewProgram,
-        .new_program = {
-          .request_id = effect->operation->request_id,
-          .program    = effect->create_program.program,
-        },
-      };
-      rvs_scheduler_apply(engine->session->scheduler, new_program_message);
+    case RVS_EffectKind_BackendRun: {
+      NotImplemented;
     } break;
 
-    case RVS_SchedulerEffectKind_Null: { keep_running = 0; } break;
+    case RVS_EffectKind_Null: { keep_running = 0; } break;
     default: InvalidPath;
     }
 

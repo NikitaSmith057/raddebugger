@@ -7,7 +7,7 @@
 #include "demon/demon_core.h"
 #include "radvs/rvs_core.h"
 #include "radvs/rvs_request.h"
-#include "radvs/rvs_async.h"
+#include "radvs/rvs_queue.h"
 #include "radvs/rvs_demon.h"
 #include "radvs/rvs_entity.h"
 
@@ -19,39 +19,6 @@ typedef struct RVS_RequestControl RVS_RequestControl;
 typedef struct RVS_EngineControl  RVS_EngineControl;
 
 ////////////////////////////////
-
-typedef enum
-{
-  RVS_EventKind_First = DMN_EventKind_UserLo,
-  RVS_EventKind_Error,
-  RVS_EventKind_Stopped,
-  RVS_EventKind_ProgramDestroyed,
-} RVS_EventKind;
-
-typedef struct
-{
-  U64           sequence;
-  RVS_EventKind kind;
-  RVS_ProgramID program;
-  RVS_ProcessID process;
-  RVS_ThreadID  thread;
-  U32           pid;
-  U32           tid;
-  DMN_Event     raw_event; // backend event
-  union {
-    struct { U32 exit_code;      } process_exited;
-    struct { DMN_ErrorKind kind; } error;
-    struct {
-      RVS_ProgramID primary_program;
-      RVS_ProcessID primary_process;
-      RVS_ThreadID  selected_thread;
-      U32           pid;
-      U32           tid;
-      RVS_StopCause primary_cause;
-      U64           stable_stop_generation;
-    } stopped;
-  };
-} RVS_Event;
 
 typedef struct
 {
@@ -84,17 +51,14 @@ RVS_Result rvs_engine_launch         (RVS_Engine *engine, String8 cmdl, String8 
 RVS_Result rvs_engine_run            (RVS_Engine *engine, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_engine_interrupt      (RVS_Engine *engine, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_engine_continue       (RVS_Engine *engine, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
-RVS_Result rvs_engine_wait_for_event (Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);
 RVS_Result rvs_engine_step           (RVS_Engine *engine, RVS_StepKind kind, RVS_StepUnit unit, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_engine_select_thread  (RVS_Engine *engine, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out);
 
-RVS_Result rvs_engine_run_to_address (RVS_Engine *engine, RVS_ProgramID program_id, U64 vaddr, RVS_SubmitInfo *submit_out);
+RVS_Result rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);
+RVS_Result rvs_engine_copy_programs (Arena *arena, RVS_Engine *engine, RVS_Program **program_out, U64 *program_count_out);
+
 RVS_Result rvs_engine_selected_thread(RVS_Engine *engine, RVS_ProgramID *program_id_out, RVS_ThreadID *thread_id_out);
 RVS_Result rvs_engine_ack_event      (RVS_Engine *engine, U64 sequence);
-RVS_Result rvs_engine_fetch_program  (RVS_Engine *engine, RVS_ProgramID id, U64 wait_us, RVS_ProgramSnapshot *snapshot_out);
-RVS_Result rvs_engine_fetch_process  (RVS_Engine *engine, RVS_ProcessID id, U64 wait_us, RVS_ProcessSnapshot *snapshot_out);
-RVS_Result rvs_engine_fetch_thread   (RVS_Engine *engine, RVS_ThreadID id, U64 wait_us, RVS_ThreadSnapshot *snapshot_out);
-RVS_Result rvs_engine_copy_programs  (Arena *arena, RVS_Engine *engine, RVS_ProgramSnapshot **snapshots_out, U64 *snapshots_count_out);
 
 ////////////////////////////////
 // Request API

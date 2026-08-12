@@ -123,9 +123,10 @@ entry_point(CmdLine *cmdline)
     goto exit;
   }
 
-  Temp scratch = scratch_begin(0,0);
+  Temp  scratch          = scratch_begin(0,0);
   U64   line_buffer_size = KB(1);
   char *line_buffer      = push_array(scratch.arena, char, line_buffer_size);
+
   for (B32 keep_running = 1; keep_running;) {
     Temp temp = temp_begin(scratch.arena);
 
@@ -216,6 +217,54 @@ entry_point(CmdLine *cmdline)
       rvs_request_control_release(submit.control);
     } break;
 
+    case RCI_CmdKind_Teardown: {
+      NotImplemented;
+    } break;
+
+    case RCI_CmdKind_LsProg: {
+      RVS_Program  *programs       = 0;
+      U64           programs_count = 0;
+      RVS_Result    result         = rvs_engine_copy_programs(temp.arena, engine, &programs, &programs_count);
+      if (result == RVS_Result_Ok) {
+        rci_printf("--- Programs -------------------------------------------------------------------\n");
+        rci_printf("  %-3s %-10s %-8s %-8s %s\n", "No.", "PROGRAM-ID", "PID", "STATUS", "PATH");
+        for EachIndex(program_idx, programs_count) {
+          RVS_Program *program = &programs[program_idx];
+          String8 lifecycle = program->is_retired ? str8_lit("Retired") : str8_lit("Live");
+          rci_printf("  %-3llu %-10llx %-8u %-8S\n", program_idx, program->id.value, program->pid, lifecycle);
+        }
+      } else {
+        rci_printf("LsProg: failed to read programs; error code %u\n", result);
+      }
+    } break;
+
+    case RCI_CmdKind_Help: {
+      rci_print_help();
+    } break;
+
+    case RCI_CmdKind_Exit: {
+      keep_running = 0;
+    } break;
+
+    default: {
+      rci_printf("unknown command: %S; use \"help\" to see the commands\n", cmd_string);
+    } break;
+    }
+
+    temp_end(temp);
+  }
+
+  scratch_end(scratch);
+
+  exit:;
+  // shutdown the debug engine
+  RVS_Result shutdown_result = rvs_engine_shutdown(engine);
+  rci_printf("debug engine exited with code %u%s\n", shutdown_result, shutdown_result == RVS_Result_Ok ? " (Ok)" : "");
+
+  mutex_release(g_rci.output_mutex);
+}
+
+#if 0
     case RCI_CmdKind_RunAddr: {
       if (cmd_raw.node_count != 3) {
         rci_printf("RunAddr: expected <program-id> <absolute-address>\n");
@@ -260,49 +309,4 @@ entry_point(CmdLine *cmdline)
       rvs_request_release(submit.request);
       rvs_request_control_release(submit.control);
     } break;
-
-    case RCI_CmdKind_Teardown: {
-      NotImplemented;
-    } break;
-
-    case RCI_CmdKind_LsProg: {
-      RVS_ProgramSnapshot *programs       = 0;
-      U64                  programs_count = 0;
-      RVS_Result           result         = rvs_engine_copy_programs(temp.arena, engine, &programs, &programs_count);
-      if (result == RVS_Result_Ok) {
-        rci_printf("--- Programs -------------------------------------------------------------------\n");
-        rci_printf("  %-3s %-10s %-8s %-8s %s\n", "No.", "PROGRAM-ID", "PID", "STATUS", "PATH");
-        for EachIndex(program_idx, programs_count) {
-          RVS_ProgramSnapshot snapshot = programs[program_idx];
-          String8 lifecycle = snapshot.is_retired ? str8_lit("Retired") : str8_lit("Live");
-          rci_printf("  %-3llu %-10llx %-8u %-8S\n", program_idx, snapshot.id.value, snapshot.pid, lifecycle);
-        }
-      } else {
-        rci_printf("LsProg: failed to read programs; error code %u\n", result);
-      }
-    } break;
-
-    case RCI_CmdKind_Help: {
-      rci_print_help();
-    } break;
-
-    case RCI_CmdKind_Exit: {
-      keep_running = 0;
-    } break;
-
-    default: {
-      rci_printf("unknown command: %S; use \"help\" to see the commands\n", cmd_string);
-    } break;
-    }
-
-    temp_end(temp);
-  }
-  scratch_end(scratch);
-
-  exit:;
-  // shutdown the debug engine
-  RVS_Result shutdown_result = rvs_engine_shutdown(engine);
-  rci_printf("debug engine exited with code %u%s\n", shutdown_result, shutdown_result == RVS_Result_Ok ? " (Ok)" : "");
-
-  mutex_release(g_rci.output_mutex);
-}
+#endif

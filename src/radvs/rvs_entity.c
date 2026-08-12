@@ -1,359 +1,467 @@
-// This file is included only by rvs_engine.c after private engine/session types.
+// Copyright (c) Epic Games Tools
+// Licensed under the MIT license (https://opensource.org/license/mit/)
+
+////////////////////////////////
+// Includes
 
 #include "radvs/rvs_entity.h"
 
+////////////////////////////////
+
 internal void
-rvs_entity_append_child_locked(RVS_Entity *parent, RVS_Entity *child)
+rvs_program_ptr_list_push_node(RVS_ProgramPtrList *list, RVS_ProgramPtrNode *n)
 {
-  child->parent = parent;
-  SLLQueuePush(parent->first_child, parent->last_child, child);
+  DLLPushBack(list->first, list->last, n);
+  list->count += 1;
 }
+
+internal void
+rvs_process_ptr_list_push_node(RVS_ProcessPtrList *list, RVS_ProcessPtrNode *n)
+{
+  DLLPushBack(list->first, list->last, n);
+  list->count += 1;
+}
+
+internal void
+rvs_thread_ptr_list_push_node(RVS_ThreadPtrList *list, RVS_ThreadPtrNode *n)
+{
+  DLLPushBack(list->first, list->last, n);
+  list->count += 1;
+}
+
+internal void
+rvs_module_ptr_list_push_node(RVS_ModulePtrList *list, RVS_ModulePtrNode *n)
+{
+  DLLPushBack(list->first, list->last, n);
+  list->count += 1;
+}
+
+internal void
+rvs_program_ptr_list_remove_node(RVS_ProgramPtrList *list, RVS_ProgramPtrNode *n)
+{
+  DLLRemove(list->first, list->last, n);
+  list->count -= 1;
+}
+
+internal void
+rvs_process_ptr_list_remove_node(RVS_ProcessPtrList *list, RVS_ProcessPtrNode *n)
+{
+  DLLRemove(list->first, list->last, n);
+  list->count -= 1;
+}
+
+internal void
+rvs_thread_ptr_list_remove_node(RVS_ThreadPtrList *list, RVS_ThreadPtrNode *n)
+{
+  DLLRemove(list->first, list->last, n);
+  list->count -= 1;
+}
+
+internal void
+rvs_module_ptr_list_remove_node(RVS_ModulePtrList *list, RVS_ModulePtrNode *n)
+{
+  DLLRemove(list->first, list->last, n);
+  list->count -= 1;
+}
+
+////////////////////////////////
 
 internal RVS_Program *
-rvs_entity_program_from_id_locked(RVS_EntityStore *store, RVS_ProgramID id)
+rvs_program_from_process(RVS_Process *process)
 {
-  for EachNode(entity, RVS_Entity, store->root.first_child) {
-    if (entity->kind == RVS_EntityKind_Program) {
-      RVS_Program *program = CastFromMember(RVS_Program, entity, entity);
-      if (MemoryMatchStruct(&program->snapshot.id, &id)) { return program; }
-    }
+  RVS_Entity *e;
+  for (e = RVS_EntityFromPtr(process); e != 0 && e->parent != 0; e = e->parent);
+  AssertAlways(e->kind == RVS_EntityKind_Program);
+  return &e->program;
+}
+
+////////////////////////////////
+
+internal RVS_EntityStore *
+rvs_entity_store_alloc(void)
+{
+  Arena *arena = arena_alloc(.name = "Entity Store");
+  RVS_EntityStore *result = push_array(arena, RVS_EntityStore, 1);
+  result->arena          = arena;
+  result->program_by_pid = hash_table_init(arena, 1024);
+  for EachElement(i, result->entity_by_id) {
+    result->entity_by_id[i] = hash_table_init(arena, 1024);
   }
-  return 0;
-}
-
-internal RVS_Process *
-rvs_entity_process_from_node_locked(RVS_Entity *node, RVS_ProcessID id)
-{
-  for (RVS_Entity *entity = node->first_child; entity; entity = entity->next) {
-    if (entity->kind == RVS_EntityKind_Process) {
-      RVS_Process *process = CastFromMember(RVS_Process, entity, entity);
-      if (MemoryMatchStruct(&process->snapshot.process, &id)) { return process; }
-    }
-    RVS_Process *found = rvs_entity_process_from_node_locked(entity, id);
-    if (found) { return found; }
-  }
-  return 0;
-}
-
-internal RVS_Process *
-rvs_entity_process_from_id_locked(RVS_EntityStore *store, RVS_ProcessID id)
-{
-  return rvs_entity_process_from_node_locked(&store->root, id);
-}
-
-internal RVS_Thread *
-rvs_entity_thread_from_node_locked(RVS_Entity *node, RVS_ThreadID id)
-{
-  for (RVS_Entity *entity = node->first_child; entity; entity = entity->next) {
-    if (entity->kind == RVS_EntityKind_Thread) {
-      RVS_Thread *thread = CastFromMember(RVS_Thread, entity, entity);
-      if (MemoryMatchStruct(&thread->snapshot.thread, &id)) { return thread; }
-    }
-    RVS_Thread *found = rvs_entity_thread_from_node_locked(entity, id);
-    if (found) { return found; }
-  }
-  return 0;
-}
-
-internal RVS_Thread *
-rvs_entity_thread_from_id_locked(RVS_EntityStore *store, RVS_ThreadID id)
-{
-  return rvs_entity_thread_from_node_locked(&store->root, id);
-}
-
-internal RVS_Program *
-rvs_entity_program_from_node_locked(RVS_Entity *node)
-{
-  for (; node; node = node->parent) {
-    if (node->kind == RVS_EntityKind_Program) { return CastFromMember(RVS_Program, entity, node); }
-  }
-  return 0;
-}
-
-internal void
-rvs_entity_store_init(RVS_EntityStore *store, Arena *arena, Mutex mutex)
-{
-  store->arena     = arena;
-  store->mutex     = mutex;
-  store->cv        = cond_var_alloc();
-  store->root.kind = RVS_EntityKind_Root;
-}
-
-internal void
-rvs_entity_store_close(RVS_EntityStore *store)
-{
-  mutex_take(store->mutex);
-  store->is_closed = 1;
-  cond_var_broadcast(store->cv);
-  mutex_drop(store->mutex);
+  return result;
 }
 
 internal void
 rvs_entity_store_release(RVS_EntityStore *store)
 {
-  cond_var_release(store->cv);
+  arena_release(store->arena);
 }
 
-internal void
-rvs_entity_changed_locked(RVS_EntityStore *store)
-{
-  cond_var_broadcast(store->cv);
-}
+////////////////////////////////
 
 internal RVS_Program *
-rvs_entity_program_create_locked(RVS_EntityStore *store, RVS_ProgramID id, U32 pid)
+rvs_program_from_pid(RVS_EntityStore *store, U32 pid)
 {
-  RVS_Program *program = rvs_entity_program_from_id_locked(store, id);
-  if (program) { return program; }
-  program = push_array(store->arena, RVS_Program, 1);
-  program->entity.kind = RVS_EntityKind_Program;
-  program->snapshot = (RVS_ProgramSnapshot){ .id = id, .pid = pid };
-  rvs_entity_append_child_locked(&store->root, &program->entity);
-  rvs_entity_changed_locked(store);
-  return program;
+  return hash_table_search_u64_raw(store->program_by_pid, pid);
 }
 
 internal RVS_Process *
-rvs_entity_process_create_locked(RVS_EntityStore *store, RVS_ProgramID program_id, RVS_ProcessID id, RVS_ProcessID parent_id, U32 pid)
+rvs_process_from_id(RVS_EntityStore *store, RVS_ProcessID id)
 {
-  RVS_Process *process = rvs_entity_process_from_id_locked(store, id);
-  if (process) { return process; }
-
-  RVS_Entity    *parent         = &store->root;
-  RVS_ProgramID  program        = program_id;
-  RVS_Process   *parent_process = rvs_entity_process_from_id_locked(store, parent_id);
-  if (parent_process) {
-    parent = &parent_process->entity;
-    program = parent_process->snapshot.program;
-  } else if (!MemoryIsZeroStruct(&program_id)) {
-    RVS_Program *program_entity = rvs_entity_program_from_id_locked(store, program_id);
-    if (program_entity) {
-      parent = &program_entity->entity;
-    }
-  }
-  process              = push_array(store->arena, RVS_Process, 1);
-  process->entity.kind = RVS_EntityKind_Process;
-  process->snapshot    = (RVS_ProcessSnapshot){ .program = program, .process = id, .parent_process = parent_id, .pid = pid };
-  rvs_entity_append_child_locked(parent, &process->entity);
-  rvs_entity_changed_locked(store);
-
-  return process;
-}
-
-internal B32
-rvs_entity_node_has_live_program_process_locked(RVS_Entity *node, RVS_ProgramID id)
-{
-  for EachNode(entity, RVS_Entity, node->first_child) {
-    if (entity->kind == RVS_EntityKind_Process) {
-      RVS_Process *process = CastFromMember(RVS_Process, entity, entity);
-      if (MemoryMatchStruct(&process->snapshot.program, &id) && !process->snapshot.is_retired) {
-        return 1;
-      }
-    }
-    if (rvs_entity_node_has_live_program_process_locked(entity, id)) { return 1; }
-  }
-  return 0;
-}
-
-internal RVS_EntityProcessExit
-rvs_entity_process_exit_locked(RVS_EntityStore *store, RVS_ProcessID id, U32 exit_code)
-{
-  RVS_EntityProcessExit result = {0};
-  RVS_Process *process = rvs_entity_process_from_id_locked(store, id);
-  if (!process || process->snapshot.is_retired) { return result; }
-  process->snapshot.is_retired = 1;
-  process->snapshot.exit_code = exit_code;
-  result.program = process->snapshot.program;
-  for (RVS_Entity *entity = process->entity.first_child; entity; entity = entity->next) {
-    if (entity->kind == RVS_EntityKind_Thread) {
-      (CastFromMember(RVS_Thread, entity, entity))->snapshot.is_retired = 1;
-    }
-  }
-  RVS_Program *program = rvs_entity_program_from_id_locked(store, result.program);
-  if (program && !rvs_entity_node_has_live_program_process_locked(&store->root, result.program)) {
-    program->snapshot.is_retired = 1;
-    program->snapshot.exit_code = exit_code;
-    result.program_retired = 1;
-  }
-  rvs_entity_changed_locked(store);
-  return result;
+  return hash_table_search_string_raw(store->entity_by_id[RVS_EntityKind_Process], str8_struct(&id));
 }
 
 internal RVS_Thread *
-rvs_entity_thread_create_locked(RVS_EntityStore *store, RVS_ProcessID process_id, RVS_ThreadID id, U32 tid)
+rvs_thread_from_id(RVS_EntityStore *store, RVS_ThreadID id)
 {
-  if (rvs_entity_thread_from_id_locked(store, id)) { return 0; }
-  RVS_Process *process = rvs_entity_process_from_id_locked(store, process_id);
-  if (!process || process->snapshot.is_retired) { return 0; }
-  RVS_Thread *thread = push_array(store->arena, RVS_Thread, 1);
-  thread->entity.kind = RVS_EntityKind_Thread;
-  thread->snapshot = (RVS_ThreadSnapshot){ .program = process->snapshot.program, .process = process_id, .thread = id, .tid = tid };
-  rvs_entity_append_child_locked(&process->entity, &thread->entity);
-  rvs_entity_changed_locked(store);
-  return thread;
+  return hash_table_search_string_raw(store->entity_by_id[RVS_EntityKind_Thread], str8_struct(&id));
+}
+
+internal RVS_Module *
+rvs_module_from_id(RVS_EntityStore *store, RVS_ModuleID id)
+{
+  return hash_table_search_string_raw(store->entity_by_id[RVS_EntityKind_Module], str8_struct(&id));
+}
+
+////////////////////////////////
+
+internal RVS_Entity *
+rvs_entity_alloc(RVS_EntityStore *store)
+{
+  RVS_EntityPtrNode *n = store->free_list;
+  if (n) {
+    SLLStackPop(store->free_list);
+  } else {
+    RVS_Entity *entity = push_array(store->arena, RVS_Entity, 1);
+    n = &entity->entity_ptr;
+    n->v = entity;
+  }
+  return n->v;
+}
+
+internal void *
+rvs_entity_alloc_raw(RVS_EntityStore *store)
+{
+  RVS_Entity *entity = rvs_entity_alloc(store);
+  return &entity->first;
 }
 
 internal void
-rvs_entity_thread_exit_locked(RVS_EntityStore *store, RVS_ThreadID id)
+rvs_entity_recycle(RVS_EntityStore *store, RVS_Entity *entity)
 {
-  RVS_Thread *thread = rvs_entity_thread_from_id_locked(store, id);
-  if (thread && !thread->snapshot.is_retired) {
-    thread->snapshot.is_retired = 1;
-    rvs_entity_changed_locked(store);
+  MemoryZeroStruct(entity);
+  entity->entity_ptr.v = entity;
+  SLLStackPush(store->free_list, &entity->entity_ptr);
+}
+
+////////////////////////////////
+
+internal RVS_Event
+rvs_event_from_backend_event(RVS_EntityStore *entities, DMN_Event event)
+{
+  RVS_Event result = { .raw_event = event };
+
+  RVS_Process *process = rvs_process_from_id(entities, rvs_process_id_from_handle(event.process));
+  RVS_Thread  *thread  = rvs_thread_from_id(entities, rvs_thread_id_from_handle(event.thread));
+  RVS_Module  *module  = rvs_module_from_id(entities, rvs_module_id_from_handle(event.module));
+
+  if (thread) {
+    result.program = thread->program;
+    result.process = thread->process;
+    result.thread  = thread->id;
   }
+  if (module && !process) {
+    process = rvs_process_from_id(entities, module->process);
+  }
+  if (process) {
+    RVS_Program *program = rvs_program_from_process(process);
+    result.program = program->id;
+    result.process = process->id;
+  }
+
+  if (MemoryIsZeroStruct(&result.process)) { result.process = rvs_process_id_from_handle(event.process); }
+  if (MemoryIsZeroStruct(&result.thread))  { result.thread  = rvs_thread_id_from_handle(event.thread);   }
+
+  if (event.kind == DMN_EventKind_ExitProcess) { result.process_exited.exit_code = event.code;       }
+  if (event.kind == DMN_EventKind_Error)       { result.error.kind               = event.error_kind; }
+
+  return result;
 }
 
 internal void
-rvs_entity_program_ack_destroyed_locked(RVS_EntityStore *store, RVS_ProgramID id)
+rvs_entity_store_emit_backend_event(Arena *arena, RVS_EntityStore *entities, DMN_Event event, RVS_EventList *events_out)
 {
-  RVS_Entity **entity_ptr = &store->root.first_child;
-  while (*entity_ptr) {
-    RVS_Entity *entity = *entity_ptr;
-    if (entity->kind == RVS_EntityKind_Program &&
-        MemoryMatchStruct(&(CastFromMember(RVS_Program, entity, entity))->snapshot.id, &id)) {
-      *entity_ptr = entity->next;
-      if (store->root.last_child == entity) {
-        store->root.last_child = 0;
-        for (RVS_Entity *last = store->root.first_child; last; last = last->next) { store->root.last_child = last; }
-      }
-      rvs_entity_changed_locked(store);
-      return;
-    }
-    entity_ptr = &entity->next;
-  }
+  rvs_event_list_push(arena, events_out, rvs_event_from_backend_event(entities, event));
 }
 
-internal B32
-rvs_entity_live_process_for_program_node_locked(RVS_Entity *node, RVS_ProgramID id, RVS_ProcessSnapshot *snapshot_out)
-{
-  for (RVS_Entity *entity = node->first_child; entity; entity = entity->next) {
-    if (entity->kind == RVS_EntityKind_Process) {
-      RVS_ProcessSnapshot snapshot = (CastFromMember(RVS_Process, entity, entity))->snapshot;
-      if (MemoryMatchStruct(&snapshot.program, &id) && !snapshot.is_retired) {
-        *snapshot_out = snapshot;
-        return 1;
-      }
-    }
-    if (rvs_entity_live_process_for_program_node_locked(entity, id, snapshot_out)) { return 1; }
-  }
-  return 0;
-}
-
-internal B32
-rvs_entity_live_process_for_program_locked(RVS_EntityStore *store, RVS_ProgramID id, RVS_ProcessSnapshot *snapshot_out)
-{
-  return rvs_entity_live_process_for_program_node_locked(&store->root, id, snapshot_out);
-}
-
-internal U64
-rvs_entity_live_process_count_node_locked(RVS_Entity *node)
-{
-  U64 count = 0;
-  for (RVS_Entity *entity = node->first_child; entity; entity = entity->next) {
-    if (entity->kind == RVS_EntityKind_Process && !(CastFromMember(RVS_Process, entity, entity))->snapshot.is_retired) {
-      count += 1;
-    }
-    count += rvs_entity_live_process_count_node_locked(entity);
-  }
-  return count;
-}
-
-internal void
-rvs_entity_copy_live_processes_node_locked(RVS_Entity *node, RVS_ProcessSnapshot *snapshots, U64 *index)
-{
-  for (RVS_Entity *entity = node->first_child; entity; entity = entity->next) {
-    if (entity->kind == RVS_EntityKind_Process) {
-      RVS_ProcessSnapshot snapshot = (CastFromMember(RVS_Process, entity, entity))->snapshot;
-      if (!snapshot.is_retired) { snapshots[(*index)++] = snapshot; }
-    }
-    rvs_entity_copy_live_processes_node_locked(entity, snapshots, index);
-  }
-}
-
-internal void
-rvs_entity_copy_live_processes_locked(RVS_EntityStore *store, Arena *arena, RVS_ProcessSnapshot **snapshots_out,
-                                      U64 *snapshots_count_out)
-{
-  U64 count = rvs_entity_live_process_count_node_locked(&store->root);
-  RVS_ProcessSnapshot *snapshots = count ? push_array(arena, RVS_ProcessSnapshot, count) : 0;
-  U64 index = 0;
-  rvs_entity_copy_live_processes_node_locked(&store->root, snapshots, &index);
-  AssertAlways(index == count);
-  *snapshots_out = snapshots;
-  *snapshots_count_out = count;
-}
-
-internal B32
-rvs_entity_program_snapshot_locked(RVS_EntityStore *store, RVS_ProgramID id, RVS_ProgramSnapshot *snapshot_out)
-{
-  RVS_Program *program = rvs_entity_program_from_id_locked(store, id);
-  if (!program) { return 0; }
-  *snapshot_out = program->snapshot;
-  return 1;
-}
+////////////////////////////////
 
 internal RVS_Result
-rvs_entity_copy_programs(RVS_EntityStore *store, Arena *arena, RVS_ProgramSnapshot **snapshots_out, U64 *snapshots_count_out)
+rvs_entity_store_apply_backend_event(Arena *arena, RVS_EntityStore *entities, DMN_Event event, RVS_EventList *events_out)
 {
-  mutex_take(store->mutex);
-  if (store->is_closed) {
-    mutex_drop(store->mutex);
-    return RVS_Result_EngineStopped;
-  }
+  switch (event.kind) {
+  case DMN_EventKind_Null: {
+    // null is the empty event and intentionally produces no normalized event
+  } break;
 
-  U64 count = 0;
-  for EachNode(entity, RVS_Entity, store->root.first_child) {
-    if (entity->kind == RVS_EntityKind_Program) { count += 1; }
-  }
-  RVS_ProgramSnapshot *snapshots = count ? push_array(arena, RVS_ProgramSnapshot, count) : 0;
-  U64 index = 0;
-  for EachNode(entity, RVS_Entity, store->root.first_child) {
-    if (entity->kind == RVS_EntityKind_Program) {
-      snapshots[index++] = (CastFromMember(RVS_Program, entity, entity))->snapshot;
+  case DMN_EventKind_CreateProcess: {
+    RVS_ProcessID process_id = rvs_process_id_from_handle(event.process);
+    RVS_Process  *process    = rvs_process_from_id(entities, process_id);
+
+    if (!process && !MemoryIsZeroStruct(&process_id)) {
+      RVS_Process *parent_process = rvs_process_from_id(entities, rvs_process_id_from_handle(event.parent_process));
+      RVS_Program *program = parent_process ? rvs_program_from_process(parent_process) : rvs_program_from_pid(entities, event.system_process_id);
+
+      // process without a known parent starts a new program
+      if (program == 0) {
+        RVS_Entity *program_entity = rvs_entity_alloc(entities);
+        program_entity->kind = RVS_EntityKind_Program;
+
+        program = &program_entity->program;
+        program->id.value = ++entities->next_program_id;
+        program->pid      = event.system_process_id;
+
+        RVS_ProgramPtrNode *program_node = &program_entity->program_ptr;
+        program_node->v = program;
+        rvs_program_ptr_list_push_node(&entities->programs, program_node);
+        hash_table_push_u64_raw(entities->arena, entities->program_by_pid, program->pid, program);
+      }
+
+      // alloc entity for new process
+      RVS_Entity *process_entity = rvs_entity_alloc(entities);
+      process_entity->kind   = RVS_EntityKind_Process;
+      process_entity->parent = parent_process ? RVS_EntityFromPtr(parent_process) : RVS_EntityFromPtr(program);
+
+      // fill out process
+      process = &process_entity->process;
+      process->id = process_id;
+
+      // append process to the parent
+      RVS_ProcessPtrNode *process_node = &process_entity->process_ptr;
+      process_node->v = process;
+      RVS_ProcessPtrList *process_list = parent_process ? &parent_process->processes : &program->processes;
+      rvs_process_ptr_list_push_node(process_list, process_node);
+
+      // id -> process mapping
+      hash_table_push_string_raw(entities->arena, entities->entity_by_id[RVS_EntityKind_Process], str8_struct(&process->id), process);
+    } else {
+      // TODO: log invalid event sequence
     }
-  }
-  mutex_drop(store->mutex);
 
-  *snapshots_out = snapshots;
-  *snapshots_count_out = count;
+    rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+  } break;
+
+  case DMN_EventKind_ExitProcess: {
+    RVS_Process *process = rvs_process_from_id(entities, rvs_process_id_from_handle(event.process));
+
+    if (process) {
+      RVS_Entity  *process_entity = RVS_EntityFromPtr(process);
+      RVS_Entity  *parent_entity  = process_entity->parent;
+      RVS_Program *program        = rvs_program_from_process(process);
+
+      // process exit owns the cleanup of any descendants the backend omitted
+      for (RVS_ProcessPtrNode *node = process->processes.first, *next; node; node = next) {
+        next = node->next;
+        DMN_Event exit_process = event;
+        exit_process.process           = rvs_handle_from_process_id(node->v->id);
+        exit_process.parent_process    = rvs_handle_from_process_id(process->id);
+        exit_process.thread            = (DMN_Handle){0};
+        exit_process.module            = (DMN_Handle){0};
+        exit_process.system_process_id = 0;
+        exit_process.system_thread_id  = 0;
+        exit_process.code              = 0; // TODO: mark child process that it does not have an exit code
+        rvs_entity_store_apply_backend_event(arena, entities, exit_process, events_out);
+      }
+
+      // cleanup process owned threads
+      for (RVS_ThreadPtrNode *node = process->threads.first, *next; node; node = next) {
+        next = node->next;
+        DMN_Event exit_thread = {
+          .kind              = DMN_EventKind_ExitThread,
+          .process           = rvs_handle_from_process_id(process->id),
+          .thread            = rvs_handle_from_thread_id(node->v->id),
+          .code              = 0, // TODO: mark thread that it does not have an exit code
+          .system_process_id = event.system_process_id,
+          .system_thread_id  = event.system_thread_id,
+        };
+        rvs_entity_store_apply_backend_event(arena, entities, exit_thread, events_out);
+      }
+
+      // cleanup process owned modules
+      for (RVS_ModulePtrNode *node = process->modules.first, *next; node; node = next) {
+        next = node->next;
+        DMN_Event unload_module = {
+          .kind              = DMN_EventKind_UnloadModule,
+          .process           = rvs_handle_from_process_id(process->id),
+          .module            = rvs_handle_from_module_id(node->v->id),
+          .system_process_id = event.system_process_id,
+          .system_thread_id  = event.system_thread_id,
+        };
+        rvs_entity_store_apply_backend_event(arena, entities, unload_module, events_out);
+      }
+
+      // emit create-process-event after its manual child cleanup but before
+      // its entity is removed, so all normalized ids are available
+      rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+
+      // remove process from the parent list
+      RVS_ProcessPtrList *process_list = 0;
+      if (parent_entity->kind == RVS_EntityKind_Program) {
+        process_list = &parent_entity->program.processes;
+      } else if (parent_entity->kind == RVS_EntityKind_Process) {
+        process_list = &parent_entity->process.processes;
+      }
+      rvs_process_ptr_list_remove_node(process_list, &process_entity->process_ptr);
+      hash_table_purge_string(entities->entity_by_id[RVS_EntityKind_Process], str8_struct(&process->id));
+
+      // on last process exit update the program state to be retired
+      if (program->processes.count == 0 && !program->is_retired) {
+        program->exit_code  = event.code;
+        program->is_retired = 1;
+        hash_table_purge_u64(entities->program_by_pid, program->pid);
+      }
+
+      // recycle process entity
+      rvs_entity_recycle(entities, process_entity);
+    } else {
+      // TODO: log invalid event sequence
+
+      // process entity does not exist -- forward the event
+      rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+    }
+  } break;
+
+  case DMN_EventKind_CreateThread: {
+    RVS_Process  *process   = rvs_process_from_id(entities, rvs_process_id_from_handle(event.process));
+    RVS_ThreadID  thread_id = rvs_thread_id_from_handle(event.thread);
+    RVS_Thread   *thread    = rvs_thread_from_id(entities, thread_id);
+
+    if (process && !thread && !MemoryIsZeroStruct(&thread_id)) {
+      // alloc thread entity
+      RVS_Entity *thread_entity = rvs_entity_alloc(entities);
+      thread_entity->kind   = RVS_EntityKind_Thread;
+      thread_entity->parent = RVS_EntityFromPtr(process);
+
+      // fill out thread
+      thread = &thread_entity->thread;
+      thread->program = rvs_program_from_process(process)->id;
+      thread->process = process->id;
+      thread->id      = thread_id;
+      thread->tid     = event.system_thread_id;
+
+      // append thread to the process thread list
+      RVS_ThreadPtrNode *thread_node = &thread_entity->thread_ptr;
+      thread_node->v = thread;
+      rvs_thread_ptr_list_push_node(&process->threads, thread_node);
+
+      // id -> thread mapping
+      hash_table_push_string_raw(entities->arena, entities->entity_by_id[RVS_EntityKind_Thread], str8_struct(&thread->id), thread);
+    } else {
+      // TODO: log invalid event sequence
+    }
+
+    rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+  } break;
+
+  case DMN_EventKind_ExitThread: {
+    rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+
+    RVS_Thread *thread = rvs_thread_from_id(entities, rvs_thread_id_from_handle(event.thread));
+    if (thread) {
+      RVS_Entity  *thread_entity = RVS_EntityFromPtr(thread);
+      RVS_Process *process       = &thread_entity->parent->process;
+
+      // on exit thread removes itself from the process thread list
+      rvs_thread_ptr_list_remove_node(&process->threads, &thread_entity->thread_ptr);
+
+      // purge id -> thread mapping
+      hash_table_purge_string(entities->entity_by_id[RVS_EntityKind_Thread], str8_struct(&thread->id));
+
+      // recycle thread entity
+      rvs_entity_recycle(entities, thread_entity);
+    } else {
+      // TODO: log invalid event sequence
+    }
+  } break;
+
+  case DMN_EventKind_LoadModule: {
+    RVS_Process  *process   = rvs_process_from_id(entities, rvs_process_id_from_handle(event.process));
+    RVS_ModuleID  module_id = rvs_module_id_from_handle(event.module);
+    RVS_Module   *module    = rvs_module_from_id(entities, module_id);
+
+    if (process && !module && !MemoryIsZeroStruct(&module_id)) {
+      // alloc module entity
+      RVS_Entity *module_entity = rvs_entity_alloc(entities);
+      module_entity->kind   = RVS_EntityKind_Module;
+      module_entity->parent = RVS_EntityFromPtr(process);
+
+      // fill out module
+      module = &module_entity->module;
+      module->id      = module_id;
+      module->process = process->id;
+      module->base    = event.address;
+      module->size    = event.size;
+
+      // append module to the process module list
+      RVS_ModulePtrNode *node = &module_entity->module_ptr;
+      node->v = module;
+      rvs_module_ptr_list_push_node(&process->modules, node);
+
+      // id -> module mapping
+      hash_table_push_string_raw(entities->arena, entities->entity_by_id[RVS_EntityKind_Module], str8_struct(&module->id), module);
+    } else {
+      // TODO: log invalid event sequence
+    }
+
+    rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+  } break;
+
+  case DMN_EventKind_UnloadModule: {
+    rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+
+    RVS_Module *module = rvs_module_from_id(entities, rvs_module_id_from_handle(event.module));
+    if (module) {
+      // get module & process
+      RVS_Entity  *module_entity = RVS_EntityFromPtr(module);
+      RVS_Process *process       = &module_entity->parent->process;
+
+      // remove module from the process module list
+      rvs_module_ptr_list_remove_node(&process->modules, &module_entity->module_ptr);
+
+      // purge id -> module mapping
+      hash_table_purge_string(entities->entity_by_id[RVS_EntityKind_Module], str8_struct(&module->id));
+
+      // recycle module entity
+      rvs_entity_recycle(entities, module_entity);
+    } else {
+      // TODO: log invalid event sequence
+    }
+  } break;
+
+  case DMN_EventKind_HandshakeComplete:
+  case DMN_EventKind_Error:
+  case DMN_EventKind_ModuleDebugInfo:
+  case DMN_EventKind_Breakpoint:
+  case DMN_EventKind_Trap:
+  case DMN_EventKind_SingleStep:
+  case DMN_EventKind_Exception:
+  case DMN_EventKind_Halt:
+  case DMN_EventKind_Memory:
+  case DMN_EventKind_DebugString:
+  case DMN_EventKind_SetThreadName:
+  case DMN_EventKind_SetThreadColor:
+  case DMN_EventKind_SetBreakpoint:
+  case DMN_EventKind_UnsetBreakpoint:
+  case DMN_EventKind_SetVAddrRangeNote: {
+    rvs_entity_store_emit_backend_event(arena, entities, event, events_out);
+  } break;
+
+  case DMN_EventKind_UserLo:
+  case DMN_EventKind_COUNT:
+  default: return RVS_Result_InvalidArgument;
+  }
+
   return RVS_Result_Ok;
 }
 
-internal RVS_Result
-rvs_entity_fetch_program(RVS_EntityStore *store, RVS_ProgramID id, U64 wait_us, RVS_ProgramSnapshot *snapshot_out)
-{
-  U64 endt_us = wait_us == max_U64 ? max_U64 : now_time_us() + wait_us;
-  mutex_take(store->mutex);
-  for (;;) {
-    RVS_Program *program = rvs_entity_program_from_id_locked(store, id);
-    if (program) { *snapshot_out = program->snapshot; mutex_drop(store->mutex); return RVS_Result_Ok; }
-    if (store->is_closed) { mutex_drop(store->mutex); return RVS_Result_EngineStopped; }
-    if (!cond_var_wait(store->cv, store->mutex, endt_us)) { mutex_drop(store->mutex); return RVS_Result_Timeout; }
-  }
-}
+////////////////////////////////
 
-internal RVS_Result
-rvs_entity_fetch_process(RVS_EntityStore *store, RVS_ProcessID id, U64 wait_us, RVS_ProcessSnapshot *snapshot_out)
-{
-  U64 endt_us = wait_us == max_U64 ? max_U64 : now_time_us() + wait_us;
-  mutex_take(store->mutex);
-  for (;;) {
-    RVS_Process *process = rvs_entity_process_from_id_locked(store, id);
-    if (process) { *snapshot_out = process->snapshot; mutex_drop(store->mutex); return RVS_Result_Ok; }
-    if (store->is_closed) { mutex_drop(store->mutex); return RVS_Result_EngineStopped; }
-    if (!cond_var_wait(store->cv, store->mutex, endt_us)) { mutex_drop(store->mutex); return RVS_Result_Timeout; }
-  }
-}
-
-internal RVS_Result
-rvs_entity_fetch_thread(RVS_EntityStore *store, RVS_ThreadID id, U64 wait_us, RVS_ThreadSnapshot *snapshot_out)
-{
-  U64 endt_us = wait_us == max_U64 ? max_U64 : now_time_us() + wait_us;
-  mutex_take(store->mutex);
-  for (;;) {
-    RVS_Thread *thread = rvs_entity_thread_from_id_locked(store, id);
-    if (thread) { *snapshot_out = thread->snapshot; mutex_drop(store->mutex); return RVS_Result_Ok; }
-    if (store->is_closed) { mutex_drop(store->mutex); return RVS_Result_EngineStopped; }
-    if (!cond_var_wait(store->cv, store->mutex, endt_us)) { mutex_drop(store->mutex); return RVS_Result_Timeout; }
-  }
-}

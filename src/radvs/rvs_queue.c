@@ -1,7 +1,7 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-#include "rvs_async.h"
+#include "rvs_queue.h"
 
 internal void
 rvs_queue_node_reset(RVS_Queue *q, RVS_QueueNode *node)

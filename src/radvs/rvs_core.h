@@ -1,12 +1,15 @@
 // Copyright (c) Epic Games Tools
 // Licensed under the MIT license (https://opensource.org/license/mit/)
 
-#pragma once
-
 ////////////////////////////////
+// Includes
 
-typedef U64 RVS_MessageID;
-typedef U64 RVS_Epoch;
+#pragma once
+#include "base/base_core.h"
+#include "base/base_strings.h"
+#include "base/base_arena.h"
+#include "base/base_processes.h"
+#include "demon/demon_core.h"
 
 ////////////////////////////////
 
@@ -14,6 +17,8 @@ typedef enum
 {
   RVS_Result_Null,
   RVS_Result_Ok,
+  RVS_Result_CallAgain,
+
   RVS_Result_Busy,
   RVS_Result_Timeout,
   RVS_Result_Error,
@@ -28,10 +33,14 @@ typedef enum
   RVS_Result_InvalidTtraps,
 } RVS_Result;
 
+////////////////////////////////
+// Commands
+
 #define RVS_COMMAND_XLIST                                       \
   X(Launch,       "Launch program and stop at the entry point") \
   X(Run,          "Run selected programs")                      \
   X(Pause,        "Pauses running programs")                    \
+  X(Stop,         "Stops processes")                            \
   X(Step,         "Execute a stepping command")                 \
   X(SelectThread, "Select a thread")                            \
   X(Exit,         "Shutdown debug engine")
@@ -42,8 +51,8 @@ typedef enum
 #define X(kind, ...) RVS_CommandKind_##kind,
   RVS_COMMAND_XLIST
 #undef X
+  RVS_CommandKind_UserLo,
 } RVS_CommandKind;
-
 
 ////////////////////////////////
 // Core Identifiers
@@ -53,7 +62,16 @@ typedef struct { union { DMN_Handle handle; U64 u64[2]; U32 u32[4]; }; } RVS_Pro
 typedef struct { union { DMN_Handle handle; U64 u64[2]; U32 u32[4]; }; } RVS_ThreadID;
 typedef struct { union { DMN_Handle handle; U64 u64[2]; U32 u32[4]; }; } RVS_ModuleID;
 
+typedef U64           RVS_MessageID;
+typedef RVS_MessageID RVS_BackendMessageID;
+typedef RVS_MessageID RVS_EngineMessageID;
+
+typedef U64 RVS_EffectID;
+typedef U64 RVS_Epoch;
+typedef U64 RVS_Addr;
+
 ////////////////////////////////
+// Thread Wroker Types
 
 typedef enum
 {
@@ -61,11 +79,12 @@ typedef enum
   RVS_WorkerState_Initing,
   RVS_WorkerState_Live,
   RVS_WorkerState_Stopped,
-  RVS_WorkerState_Terminating,
+  RVS_WorkerState_Exiting,
   RVS_WorkerState_Exited
 } RVS_WorkerState;
 
 ////////////////////////////////
+// Run Info
 
 typedef enum
 {
@@ -90,12 +109,6 @@ typedef enum
 
 typedef enum
 {
-  RVS_RunMode_Normal,
-  RVS_RunMode_ToAddress,
-} RVS_RunMode;
-
-typedef enum
-{
   RVS_RunIntentState_None,
   RVS_RunIntentState_Active,
   RVS_RunIntentState_Suspended,
@@ -112,14 +125,26 @@ typedef struct
   RVS_RunIntentState state;
 } RVS_RunIntent;
 
+typedef enum
+{
+  RVS_RunTargetKind_All,
+  RVS_RunTargetKind_Programs,
+} RVS_RunTargetKind;
+
 typedef struct
 {
-  U64             programs_count;
-  RVS_ProgramID  *programs;
-  RVS_RunIntent   intent;
-  RVS_RunMode     mode;
-  U64             address;
+  RVS_RunIntent     intent;
+  RVS_RunTargetKind target_kind;
+  union {
+    struct {
+      RVS_ProgramID *v;
+      U64            count;
+    } programs;
+  };
 } RVS_RunInfo;
+
+////////////////////////////////
+// Stop State
 
 typedef enum
 {
@@ -131,6 +156,26 @@ typedef enum
   RVS_StopCause_Exception,
   RVS_StopCause_ProcessExit,
 } RVS_StopCause;
+
+typedef enum
+{
+  RVS_StopSource_Interrupt,
+  RVS_StopSource_Exception,
+  RVS_StopSource_ProcessExit,
+  RVS_StopSource_ThreadExit,
+  RVS_StopSource_BackendFailed,
+} RVS_StopSource;
+
+typedef struct
+{
+  RVS_ProgramID program;
+  RVS_ProcessID process;
+  RVS_ThreadID  thread;
+  RVS_Epoch     epoch;
+  RVS_StopCause stop_cause;
+} RVS_StopState;
+
+////////////////////////////////
 
 typedef struct {
   RVS_CommandKind kind;
@@ -168,14 +213,55 @@ typedef struct
 } RVS_CommandReply;
 
 ////////////////////////////////
+// Debug Event
 
-#define rvs_process_id_from_handle(dmn) (((RVS_ProcessID){ .handle = dmn } })
-#define rvs_thread_id_from_handle(dmn)  (((RVS_ThreadID ){ .handle = dmn } })
-#define rvs_module_id_from_handle(dmn)  ((RVS_ModuleID  ){ .handle = dmn } })
+enum
+{
+  RVS_EventKind_First = DMN_EventKind_UserLo,
+  RVS_EventKind_Error,
+  RVS_EventKind_Stopped,
+  RVS_EventKind_ProgramDestroyed,
+};
+
+typedef struct
+{
+  RVS_ProgramID program;
+  RVS_ProcessID process;
+  RVS_ThreadID  thread;
+  DMN_Event     raw_event;
+  union {
+    struct { U32 exit_code;      } process_exited;
+    struct { DMN_ErrorKind kind; } error;
+  };
+} RVS_Event;
+
+typedef struct RVS_EventNode RVS_EventNode;
+struct RVS_EventNode
+{
+  RVS_Event      v;
+  RVS_EventNode *next;
+};
+
+typedef struct
+{
+  U64            count;
+  RVS_EventNode *first;
+  RVS_EventNode *last;
+} RVS_EventList;
+
+////////////////////////////////
+
+#define rvs_process_id_from_handle(dmn) ((RVS_ProcessID){ .handle = (dmn) })
+#define rvs_thread_id_from_handle(dmn)  ((RVS_ThreadID ){ .handle = (dmn) })
+#define rvs_module_id_from_handle(dmn)  ((RVS_ModuleID ){ .handle = (dmn) })
 
 #define rvs_handle_from_process_id(id) ((id).handle)
 #define rvs_handle_from_thread_id(id)  ((id).handle)
 #define rvs_handle_from_module_id(id)  ((id).handle)
+
+////////////////////////////////
+
+internal RVS_EventNode * rvs_event_list_push(Arena *arena, RVS_EventList *list, RVS_Event v);
 
 internal void rvs_run_copy(Arena *arena, RVS_RunInfo *dst, RVS_RunInfo *src);
 

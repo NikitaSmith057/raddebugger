@@ -45,6 +45,6 @@ struct RVS_RequestPool
 internal RVS_RequestPool * rvs_request_pool_alloc          (void);
 internal void              rvs_request_pool_destroy        (RVS_RequestPool *pool);
 internal RVS_Request *     rvs_request_pool_request_alloc  (RVS_RequestPool *pool);
-internal U64  rvs_request_pool_release_request(RVS_RequestPool *pool, RVS_Request *request);
-internal void rvs_request_pool_release_engine (RVS_RequestPool *pool);
-internal RVS_Request * rvs_request_from_id(RVS_RequestPool *pool, RVS_MessageID id);
+internal U64               rvs_request_pool_release_request(RVS_RequestPool *pool, RVS_Request *request);
+internal void              rvs_request_pool_release_engine (RVS_RequestPool *pool);
+internal RVS_Request *     rvs_request_from_id             (RVS_RequestPool *pool, RVS_MessageID id);

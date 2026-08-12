@@ -1,5 +1,5 @@
 
-#include "radvs/rvs_async.h"
+#include "radvs/rvs_queue.h"
 #include "radvs/rvs_demon.h"
 
 typedef struct RVS_DemonInterrupt
@@ -18,7 +18,7 @@ typedef struct RVS_Demon
   Thread                  worker;
   RVS_DemonReplyCallback *reply_callback;
   void                   *reply_ud;
-  RVS_MessageID           active_run_request_id;
+  RVS_DemonMessage       *active_message;
   B32                     is_run_in_flight;
   RVS_DemonInterrupt      pending_interrupt;
 } RVS_Demon;
@@ -27,38 +27,25 @@ global RVS_Demon g_rvs_demon;
 
 typedef struct
 {
-  RVS_Demon       *demon;
-  RVS_MessageID    request_id;
-  RVS_DemonAction  action;
-  U64              command_id;
-  B32              called;
-  B32              success;
+  RVS_Demon  *demon;
+  RVS_Result  run_result;
 } RVS_DemonRunStarted;
+
+////////////////////////////////
 
 internal void rvs_demon_worker(void *user_data);
 internal RVS_Result rvs_demon_push_message(RVS_Demon *dmn, RVS_DemonMessage *spec);
 
-internal void
-rvs_demon_run_started(B32 success, void *user_data)
+////////////////////////////////
+
+internal RVS_BackendInterruptCapability
+rvs_backend_interrupt_capability(void *ud)
 {
-  RVS_DemonRunStarted *started = user_data;
-  AssertAlways(!started->called);
-
-  started->called  = 1;
-  started->success = success;
-
-  RVS_DemonReply reply = {
-    .kind       = RVS_DemonReplyKind_ActionResult,
-    .request_id = started->request_id,
-    .action_result = {
-      .action     = started->action,
-      .result     = success ? RVS_Result_Ok : RVS_Result_Error,
-      .command_id = started->command_id,
-    },
-  };
-
-  started->demon->reply_callback(started->demon, &reply, started->demon->reply_ud);
+  RVS_Demon *dmn = ud;
+  return dmn ? RVS_BackendInterruptCapability_GlobalWithResume : RVS_BackendInterruptCapability_Null;
 }
+
+////////////////////////////////
 
 RVS_Result
 rvs_demon_init(void *reply_ud, RVS_DemonReplyCallback *reply_callback, RVS_Demon **dmn_out)
@@ -108,32 +95,38 @@ rvs_demon_shutdown(RVS_Demon *dmn)
   mutex_take(dmn->mutex);
   if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Live) {
     // Close command admission while keeping the backend alive for the wakeup.
-    ins_atomic_u32_eval_assign(&dmn->state, RVS_WorkerState_Terminating);
+    ins_atomic_u32_eval_assign(&dmn->state, RVS_WorkerState_Exiting);
   }
   mutex_drop(dmn->mutex);
 
-  if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Terminating) {
+  if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Exiting) {
     // The worker may have published Run acceptance just before entering the native run loop.
     B32 backend_wakeup_ready = 0;
     for (U32 wake_attempt = 0; wake_attempt < 30000; wake_attempt += 1) {
       mutex_take(dmn->mutex);
       B32 is_run_in_flight = dmn->is_run_in_flight;
       mutex_drop(dmn->mutex);
+
       if (!is_run_in_flight || dmn_halt(0, 0)) {
         backend_wakeup_ready = 1;
         break;
       }
+
       sleep_ms(1);
     }
+
     if (backend_wakeup_ready) {
-      result = rvs_demon_push_message(dmn, &(RVS_DemonMessage){ .type = RVS_DemonMessage_Shutdown });
+      RVS_DemonMessage exit_spec = { .base.kind = RVS_CommandKind_Exit };
+      result = rvs_demon_push_message(dmn, &exit_spec); // message backend to start the shutdown sequence
     }
   }
+
   if (result == RVS_Result_Ok) {
     thread_join(dmn->worker, max_U64);
   } else if (ins_atomic_u32_eval(&dmn->state) != RVS_WorkerState_Exited) {
     return_result = result;
   }
+
   ProfEnd();
   return return_result;
 }
@@ -184,37 +177,35 @@ internal void
 rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *src)
 {
   ProfBeginFunction();
-  RVS_QueueNode base = dst->base;
+
+  RVS_BackendMessage base = dst->base;
+
   *dst = *src;
   dst->base = base;
-  switch (src->type) {
-  case RVS_DemonMessage_Launch: {
+
+  switch (src->base.kind) {
+  case RVS_CommandKind_Launch: {
     dst->launch.params = *process_launch_params_copy(arena, &src->launch.params);
   } break;
-  case RVS_DemonMessage_Pump: {
-  } break;
-  case RVS_DemonMessage_Run: {
+
+  case RVS_CommandKind_Run: {
     dst->run.processes = push_array(arena, DMN_Handle, src->run.processes_count);
     dst->run.processes_count = src->run.processes_count;
     MemoryCopyTyped(dst->run.processes, src->run.processes, src->run.processes_count);
     rvs_demon_traps_copy(arena, &dst->run.traps, &src->run.traps);
   } break;
-  case RVS_DemonMessage_Resume: {
-    dst->resume.processes = push_array(arena, DMN_Handle, src->resume.processes_count);
-    dst->resume.processes_count = src->resume.processes_count;
-    dst->resume.execution_request_id = src->resume.execution_request_id;
-    MemoryCopyTyped(dst->resume.processes, src->resume.processes, src->resume.processes_count);
-    rvs_demon_traps_copy(arena, &dst->resume.traps, &src->resume.traps);
+
+  case RVS_CommandKind_Stop: {
+    dst->stop.process_handles = push_array_no_zero(arena, DMN_Handle, src->stop.process_count);
+    dst->stop.process_count   = src->stop.process_count;
+    MemoryCopyTyped(dst->stop.process_handles, src->stop.process_handles, src->stop.process_count);
   } break;
-  case RVS_DemonMessage_InterruptExecution: {
+
+  case RVS_CommandKind_Pause:
+  case (RVS_CommandKind)RVS_DemonCommand_PumpEvent: {
+    // no pointers to copy
   } break;
-  case RVS_DemonMessage_Terminate: {
-    dst->terminate.process_handles = push_array_no_zero(arena, DMN_Handle, src->terminate.process_count);
-    dst->terminate.process_count   = src->terminate.process_count;
-    MemoryCopyTyped(dst->terminate.process_handles, src->terminate.process_handles, src->terminate.process_count);
-  } break;
-  case RVS_DemonMessage_Shutdown: {
-  } break;
+
   default: { InvalidPath; } break;
   }
   ProfEnd();
@@ -245,25 +236,28 @@ internal void
 rvs_demon_reply_copy(Arena *arena, RVS_DemonReply *dst, RVS_DemonReply *src)
 {
   ProfBeginFunction();
+
   *dst = *src;
+
   switch (src->kind) {
-  case RVS_DemonReplyKind_LaunchStarted: {
-  } break;
-  case RVS_DemonReplyKind_ActionResult: {
-  } break;
   case RVS_DemonReplyKind_EventBatch: {
-    dst->event_batch.events = (DMN_EventList){0};
-    for EachNode(n, DMN_EventNode, src->event_batch.events.first) {
-      DMN_Event *event = dmn_event_list_push(arena, &dst->event_batch.events);
+    dst->event_batch = (DMN_EventList){0};
+    for EachNode(n, DMN_EventNode, src->event_batch.first) {
+      DMN_Event *event = dmn_event_list_push(arena, &dst->event_batch);
       rvs_demon_event_copy(arena, event, &n->v);
     }
   } break;
-  case RVS_DemonReplyKind_ExecutionStopped: {
-  } break;
+
+  case RVS_DemonReplyKind_CommandResult:
+  case RVS_DemonReplyKind_LaunchStarted:
+  case RVS_DemonReplyKind_ExecutionStopped:
   case RVS_DemonReplyKind_ExecutionFinished: {
+    // no pointers to copy
   } break;
-  default: { InvalidPath; } break;
+
+  default: InvalidPath;
   }
+
   ProfEnd();
 }
 
@@ -280,41 +274,11 @@ internal RVS_Result
 rvs_demon_send_message(RVS_Demon *dmn, RVS_DemonMessage spec)
 {
   ProfBeginFunction();
-  RVS_Result result = RVS_Result_Error;
-
   mutex_take(dmn->mutex);
-  if (spec.type == RVS_DemonMessage_InterruptExecution) {
-    // This command is necessarily out-of-band: the worker may be blocked in dmn_ctrl_run.
-    if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Live                    &&
-        spec.request_id != 0 && spec.interrupt_execution.command_id != 0            &&
-        spec.interrupt_execution.execution_request_id != 0 && dmn->is_run_in_flight &&
-        dmn->active_run_request_id == spec.interrupt_execution.execution_request_id &&
-        dmn->pending_interrupt.request_id == 0) {
-
-      dmn->pending_interrupt.request_id           = spec.request_id;
-      dmn->pending_interrupt.execution_request_id = spec.interrupt_execution.execution_request_id;
-      dmn->pending_interrupt.command_id           = spec.interrupt_execution.command_id;
-
-      if (dmn_halt(spec.interrupt_execution.command_id, spec.request_id)) {
-        result = RVS_Result_Ok;
-      } else {
-        MemoryZeroStruct(&dmn->pending_interrupt);
-      }
-    }
-  } else if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Live) {
-    AssertAlways(spec.request_id != 0);
-    result = rvs_demon_push_message(dmn, &spec);
-  }
+  RVS_Result result = rvs_demon_push_message(dmn, &spec);
   mutex_drop(dmn->mutex);
-
   ProfEnd();
   return result;
-}
-
-internal RVS_DemonInterruptCapability
-rvs_demon_interrupt_capability(RVS_Demon *dmn)
-{
-  return dmn ? RVS_DemonInterruptCapability_GlobalWithResume : RVS_DemonInterruptCapability_Null;
 }
 
 internal void
@@ -339,129 +303,101 @@ rvs_demon_worker(void *user_data)
 
     // process the message
     RVS_DemonReply reply = {0};
-    if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Terminating &&
-        message->type != RVS_DemonMessage_Shutdown) {
-      rvs_queue_recycle(dmn->queue, &message->base);
+    if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Exiting && message->base.kind != RVS_CommandKind_Exit) {
+      rvs_queue_recycle(dmn->queue, &message->base.base);
       continue;
     }
 
-    switch (message->type) {
-    case RVS_DemonMessage_Launch: {
+    switch (message->base.kind) {
+    case RVS_CommandKind_Launch: {
       U32 pid = dmn_ctrl_launch(ctrl_ctx, &message->launch.params);
       if (pid == 0) {
         reply = (RVS_DemonReply){
-          .kind          = RVS_DemonReplyKind_ActionResult,
-          .request_id    = message->request_id,
-          .action_result = { .action = RVS_DemonAction_Launch, .result = RVS_Result_Error },
+          .kind   = RVS_DemonReplyKind_CommandResult,
+          .result = RVS_Result_Error,
+          .id     = message->base.id,
         };
       } else {
         reply = (RVS_DemonReply){
-          .kind           = RVS_DemonReplyKind_LaunchStarted,
-          .request_id     = message->request_id,
-          .launch_started = { .pid = pid },
+          .kind       = RVS_DemonReplyKind_LaunchStarted,
+          .id         = message->base.id,
+          .launch_pid = pid,
         };
       }
     } break;
 
-    case RVS_DemonMessage_Pump: {
-      DMN_EventList events = dmn_ctrl_pump(temp.arena, ctrl_ctx);
-      reply = (RVS_DemonReply){
-        .kind        = RVS_DemonReplyKind_EventBatch,
-        .request_id  = message->request_id,
-        .event_batch = {
-          .events     = events,
-          .command_id = message->pump.command_id
-        },
-      };
-    } break;
-
-    case RVS_DemonMessage_Run: {
+    case RVS_CommandKind_Run: {
       // validate run traps
       if ( ! rvs_demon_traps_validate(&message->run.traps)) {
         reply = (RVS_DemonReply){
-          .kind          = RVS_DemonReplyKind_ActionResult,
-          .request_id    = message->request_id,
-          .action_result = {
-            .action = RVS_DemonAction_Run,
-            .result = RVS_Result_InvalidArgument
-          },
+          .kind   = RVS_DemonReplyKind_CommandResult,
+          .id     = message->base.id,
+          .result = RVS_Result_InvalidArgument,
         };
         break;
       }
 
       // enter run state
       mutex_take(dmn->mutex);
-      dmn->active_run_request_id = message->request_id;
-      dmn->is_run_in_flight      = 1;
+      dmn->active_message   = message;
+      dmn->is_run_in_flight = 1;
       mutex_drop(dmn->mutex);
 
-      // run the backend
-      RVS_DemonRunStarted started = {
-        .demon      = dmn,
-        .request_id = message->request_id,
-        .action     = RVS_DemonAction_Run,
+      // reply that backend running the command 
+      reply = (RVS_DemonReply){
+        .kind   = RVS_DemonReplyKind_CommandResult,
+        .id     = message->base.id,
+        .result = RVS_Result_Ok,
       };
+      dmn->reply_callback(dmn, &reply, dmn->reply_ud);
+
+      // run the backend
+      RVS_DemonRunStarted started = { .demon = dmn };
       DMN_RunCtrls ctrls = {
         .run_entities               = message->run.processes,
         .run_entity_count           = message->run.processes_count,
         .run_entities_are_processes = 1,
         .run_entities_are_unfrozen  = 1,
         .traps                      = message->run.traps,
-        .run_started                = rvs_demon_run_started,
-        .run_started_user_data      = &started,
       };
-      DMN_EventList events = dmn_ctrl_run(scratch.arena, ctrl_ctx, &ctrls);
+      DMN_EventList event_batch = dmn_ctrl_run(scratch.arena, ctrl_ctx, &ctrls);
 
       // leave run state
       mutex_take(dmn->mutex);
       MemoryZeroStruct(&dmn->pending_interrupt);
-      dmn->active_run_request_id = 0;
-      dmn->is_run_in_flight      = 0;
+      dmn->active_message   = 0;
+      dmn->is_run_in_flight = 0;
       mutex_drop(dmn->mutex);
 
       // emit reply
-      if (started.success) {
-        if (events.first) {
-          reply = (RVS_DemonReply){
-            .kind        = RVS_DemonReplyKind_EventBatch,
-            .request_id  = message->request_id,
-            .event_batch = { .events = events },
-          };
-        }
-      } else {
-        reply = (RVS_DemonReply){
-          .kind       = RVS_DemonReplyKind_ExecutionFinished,
-          .request_id = message->request_id,
-        };
-      }
-    } break;
-
-    case RVS_DemonMessage_Resume: {
-      InvalidPath;
-    } break;
-
-    case RVS_DemonMessage_Terminate: {
       reply = (RVS_DemonReply){
-        .kind          = RVS_DemonReplyKind_ActionResult,
-        .request_id    = message->request_id,
-        .action_result = {
-          .action = RVS_DemonAction_Terminate,
-          .result = RVS_Result_Ok
-        },
+        .kind        = RVS_DemonReplyKind_EventBatch,
+        .result      = started.run_result,
+        .id          = message->base.id,
+        .event_batch = event_batch
       };
-      for EachIndex(process_idx, message->terminate.process_count) {
-        if ( ! dmn_ctrl_kill(ctrl_ctx, message->terminate.process_handles[process_idx], 0)) {
-          reply.action_result.result = RVS_Result_Error;
+    } break;
+
+    case RVS_CommandKind_Stop: {
+      reply = (RVS_DemonReply){
+        .kind   = RVS_DemonReplyKind_CommandResult,
+        .id     = message->base.id,
+        .result = RVS_Result_Ok
+      };
+      for EachIndex(process_idx, message->stop.process_count) {
+        if ( ! dmn_ctrl_kill(ctrl_ctx, message->stop.process_handles[process_idx], 0)) {
+          reply.result = RVS_Result_Error;
           break;
         }
       }
     } break;
 
-    case RVS_DemonMessage_InterruptExecution: {
-      AssertAlways(message->request_id != 0);
+    case RVS_CommandKind_Pause: {
+      NotImplemented;
+      AssertAlways(message->base.id != 0);
     } break;
 
-    case RVS_DemonMessage_Shutdown: {
+    case RVS_CommandKind_Exit: {
       keep_running = 0;
     } break;
 
@@ -474,7 +410,7 @@ rvs_demon_worker(void *user_data)
     }
 
     // recycle the message
-    rvs_queue_recycle(dmn->queue, &message->base);
+    rvs_queue_recycle(dmn->queue, &message->base.base);
     
     temp_end(temp);
   }
