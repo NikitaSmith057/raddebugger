@@ -1,0 +1,19 @@
+LIBRARY RadDbg
+EXPORTS
+  radvs_ad7_bridge_abi_version
+  radvs_ad7_bridge_session_create
+  radvs_ad7_bridge_session_destroy
+  radvs_ad7_bridge_session_launch
+  radvs_ad7_bridge_continue_synchronous_event
+  radvs_ad7_bridge_run
+  radvs_ad7_bridge_break
+  radvs_ad7_bridge_terminate
+  radvs_ad7_bridge_close_event_wait
+  radvs_ad7_bridge_wait_event
+  radvs_ad7_bridge_get_program_name
+  radvs_ad7_bridge_get_host_name
+  radvs_ad7_bridge_get_host_pid
+  radvs_ad7_bridge_get_host_machine_name
+  radvs_ad7_bridge_get_engine_info
+  radvs_ad7_bridge_copy_threads
+  radvs_ad7_bridge_get_thread_properties
