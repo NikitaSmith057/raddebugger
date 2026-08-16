@@ -78,14 +78,11 @@ typedef enum
 {
   RVS_SchedulerMessageKind_Null,
 
-  // requests
   RVS_SchedulerMessageKind_Command,
-
-  // notifications
   RVS_SchedulerMessageKind_EffectComplete,
-  RVS_SchedulerMessageKind_BackendSendResult,
   RVS_SchedulerMessageKind_BackendReply,
-  RVS_SchedulerMessageKind_BackendEvent,
+  RVS_SchedulerMessageKind_BackendEvent_Raw,    // message with the snapshot of the event before conversion to the internal format "RVS_Event"
+  RVS_SchedulerMessageKind_BackendEvent_Normal, // message with the snapshot of the event after conversion
   RVS_SchedulerMessageKind_NewProgram,
   RVS_SchedulerMessageKind_CommandCompleteResult,
 } RVS_SchedulerMessageKind;
@@ -100,10 +97,11 @@ typedef struct
     } command;
 
     struct {
-      RVS_Result    send_result;
-      RVS_MessageID request_id;
-    } backend_send_result;
+      RVS_Effect *effect;
+      RVS_Result  result;
+    } effect_complete;
 
+    DMN_Event      raw_backend_event;
     RVS_Event      backend_event;
     RVS_DemonReply backend_reply;
 
@@ -262,6 +260,6 @@ struct RVS_Scheduler
 internal RVS_Scheduler * rvs_scheduler_init(Arena *arena, RVS_RequestPool *request_pool);
 internal void            rvs_scheduler_release(RVS_Scheduler *scheduler);
 
-internal RVS_Result   rvs_scheduler_apply(RVS_Scheduler *scheduler, RVS_EntityStore *entity_store, RVS_SchedulerMessage message);
+internal RVS_Result   rvs_scheduler_notify(RVS_Scheduler *scheduler, RVS_EntityStore *entity_store, RVS_SchedulerMessage message);
 internal RVS_Effect * rvs_scheduler_pump_effect(Arena *arena, RVS_Scheduler *scheduler);
 

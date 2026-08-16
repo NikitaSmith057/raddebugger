@@ -116,7 +116,7 @@ rvs_demon_shutdown(RVS_Demon *dmn)
     }
 
     if (backend_wakeup_ready) {
-      RVS_DemonMessage exit_spec = { .base.kind = RVS_CommandKind_Exit };
+      RVS_DemonMessage exit_spec = { .command.kind = RVS_CommandKind_Exit };
       result = rvs_demon_push_message(dmn, &exit_spec); // message backend to start the shutdown sequence
     }
   }
@@ -178,35 +178,19 @@ rvs_demon_message_copy(Arena *arena, RVS_DemonMessage *dst, RVS_DemonMessage *sr
 {
   ProfBeginFunction();
 
-  RVS_BackendMessage base = dst->base;
+  RVS_QueueNode queue_node = dst->base.base;
 
   *dst = *src;
-  dst->base = base;
+  dst->base.base = queue_node;
 
-  switch (src->base.kind) {
-  case RVS_CommandKind_Launch: {
-    dst->launch.params = *process_launch_params_copy(arena, &src->launch.params);
-  } break;
-
-  case RVS_CommandKind_Run: {
-    dst->run.processes = push_array(arena, DMN_Handle, src->run.processes_count);
-    dst->run.processes_count = src->run.processes_count;
-    MemoryCopyTyped(dst->run.processes, src->run.processes, src->run.processes_count);
-    rvs_demon_traps_copy(arena, &dst->run.traps, &src->run.traps);
-  } break;
-
-  case RVS_CommandKind_Stop: {
-    dst->stop.process_handles = push_array_no_zero(arena, DMN_Handle, src->stop.process_count);
-    dst->stop.process_count   = src->stop.process_count;
-    MemoryCopyTyped(dst->stop.process_handles, src->stop.process_handles, src->stop.process_count);
-  } break;
-
-  case RVS_CommandKind_Pause:
+  switch (src->command.kind) {
   case (RVS_CommandKind)RVS_DemonCommand_PumpEvent: {
     // no pointers to copy
   } break;
 
-  default: { InvalidPath; } break;
+  default: {
+    rvs_command_copy(arena, &dst->command, &src->command);
+  } break;
   }
   ProfEnd();
 }
@@ -303,14 +287,24 @@ rvs_demon_worker(void *user_data)
 
     // process the message
     RVS_DemonReply reply = {0};
-    if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Exiting && message->base.kind != RVS_CommandKind_Exit) {
+    if (ins_atomic_u32_eval(&dmn->state) == RVS_WorkerState_Exiting && message->command.kind != RVS_CommandKind_Exit) {
       rvs_queue_recycle(dmn->queue, &message->base.base);
       continue;
     }
 
-    switch (message->base.kind) {
+    switch (message->command.kind) {
+    case (RVS_CommandKind)RVS_DemonCommand_PumpEvent: {
+      DMN_RunCtrls ctrls = { .freeze_all = 1 };
+      reply = (RVS_DemonReply){
+        .kind        = RVS_DemonReplyKind_EventBatch,
+        .result      = RVS_Result_Ok,
+        .id          = message->base.id,
+        .event_batch = dmn_ctrl_run(temp.arena, ctrl_ctx, &ctrls),
+      };
+    } break;
+
     case RVS_CommandKind_Launch: {
-      U32 pid = dmn_ctrl_launch(ctrl_ctx, &message->launch.params);
+      U32 pid = dmn_ctrl_launch(ctrl_ctx, &message->command.launch.params);
       if (pid == 0) {
         reply = (RVS_DemonReply){
           .kind   = RVS_DemonReplyKind_CommandResult,
@@ -328,7 +322,7 @@ rvs_demon_worker(void *user_data)
 
     case RVS_CommandKind_Run: {
       // validate run traps
-      if ( ! rvs_demon_traps_validate(&message->run.traps)) {
+      if ( ! rvs_demon_traps_validate(&message->command.run.traps)) {
         reply = (RVS_DemonReply){
           .kind   = RVS_DemonReplyKind_CommandResult,
           .id     = message->base.id,
@@ -354,11 +348,11 @@ rvs_demon_worker(void *user_data)
       // run the backend
       RVS_DemonRunStarted started = { .demon = dmn };
       DMN_RunCtrls ctrls = {
-        .run_entities               = message->run.processes,
-        .run_entity_count           = message->run.processes_count,
+        .run_entities               = message->command.run.processes,
+        .run_entity_count           = message->command.run.processes_count,
         .run_entities_are_processes = 1,
         .run_entities_are_unfrozen  = 1,
-        .traps                      = message->run.traps,
+        .traps                      = message->command.run.traps,
       };
       DMN_EventList event_batch = dmn_ctrl_run(scratch.arena, ctrl_ctx, &ctrls);
 
@@ -384,8 +378,8 @@ rvs_demon_worker(void *user_data)
         .id     = message->base.id,
         .result = RVS_Result_Ok
       };
-      for EachIndex(process_idx, message->stop.process_count) {
-        if ( ! dmn_ctrl_kill(ctrl_ctx, message->stop.process_handles[process_idx], 0)) {
+      for EachIndex(process_idx, message->command.stop.process_count) {
+        if ( ! dmn_ctrl_kill(ctrl_ctx, message->command.stop.process_handles[process_idx], 0)) {
           reply.result = RVS_Result_Error;
           break;
         }

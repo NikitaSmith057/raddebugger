@@ -24,13 +24,6 @@ dmn_handle_match(DMN_Handle a, DMN_Handle b)
   return a.u32[0] == b.u32[0] && a.u32[1] == b.u32[1];
 }
 
-internal DMN_EventList
-dmn_ctrl_pump(Arena *arena, DMN_CtrlCtx *ctx)
-{
-  DMN_RunCtrls ctrls = { .freeze_all = 1 };
-  return dmn_ctrl_run(arena, ctx, &ctrls);
-}
-
 //- rjf: trap chunk lists
 
 internal void

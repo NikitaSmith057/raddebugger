@@ -52,7 +52,6 @@ RVS_Result rvs_engine_run            (RVS_Engine *engine, RVS_ProgramID *program
 RVS_Result rvs_engine_interrupt      (RVS_Engine *engine, RVS_ProgramID *programs, U64 programs_count, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_engine_continue       (RVS_Engine *engine, RVS_ProgramID program_id, RVS_SubmitInfo *submit_out);
 RVS_Result rvs_engine_step           (RVS_Engine *engine, RVS_StepKind kind, RVS_StepUnit unit, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out);
-RVS_Result rvs_engine_select_thread  (RVS_Engine *engine, RVS_ThreadID thread_id, RVS_SubmitInfo *submit_out);
 
 RVS_Result rvs_engine_wait_for_event(Arena *arena, RVS_Engine *engine, U64 wait_us, RVS_Event *event_out);
 RVS_Result rvs_engine_copy_programs (Arena *arena, RVS_Engine *engine, RVS_Program **program_out, U64 *program_count_out);

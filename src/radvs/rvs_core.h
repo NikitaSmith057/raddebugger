@@ -42,7 +42,6 @@ typedef enum
   X(Pause,        "Pauses running programs")                    \
   X(Stop,         "Stops processes")                            \
   X(Step,         "Execute a stepping command")                 \
-  X(SelectThread, "Select a thread")                            \
   X(Exit,         "Shutdown debug engine")
 
 typedef enum
@@ -82,6 +81,14 @@ typedef enum
   RVS_WorkerState_Exiting,
   RVS_WorkerState_Exited
 } RVS_WorkerState;
+
+////////////////////////////////
+// Launch Info
+
+typedef struct
+{
+  ProcessLaunchParams params;
+} RVS_LaunchInfo;
 
 ////////////////////////////////
 // Run Info
@@ -135,12 +142,16 @@ typedef struct
 {
   RVS_RunIntent     intent;
   RVS_RunTargetKind target_kind;
+  RVS_MessageID     execution_request_id;
   union {
     struct {
       RVS_ProgramID *v;
       U64            count;
     } programs;
   };
+  DMN_Handle        *processes;
+  U64                processes_count;
+  DMN_TrapChunkList  traps;
 } RVS_RunInfo;
 
 ////////////////////////////////
@@ -176,14 +187,18 @@ typedef struct
 } RVS_StopState;
 
 ////////////////////////////////
+// Debugger Command
 
 typedef struct {
   RVS_CommandKind kind;
   union {
-    ProcessLaunchParams launch_params;
-    RVS_RunInfo         run;
-    RVS_RunInfo         pause;
-    RVS_ThreadID        select_thread;
+    RVS_LaunchInfo launch;
+    RVS_RunInfo    run;
+    RVS_RunInfo    pause;
+    struct {
+      DMN_Handle *process_handles;
+      U64         process_count;
+    } stop;
     struct {
       RVS_ThreadID thread_id;
       RVS_StepKind kind;

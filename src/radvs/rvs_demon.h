@@ -21,23 +21,7 @@ typedef struct RVS_Demon RVS_Demon;
 typedef struct
 {
   RVS_BackendMessage base;
-  union {
-    struct {
-      ProcessLaunchParams params; // process launch params
-    } launch;
-    struct {
-      DMN_Handle        *processes;
-      U64                processes_count;
-      DMN_TrapChunkList  traps;
-    } run;
-    struct {
-      RVS_MessageID execution_request_id;
-    } pause;
-    struct {
-      DMN_Handle *process_handles;
-      U64         process_count;
-    } stop;
-  };
+  RVS_Command        command;
 } RVS_DemonMessage;
 
 typedef enum
