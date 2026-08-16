@@ -9,7 +9,7 @@
 #include "base/base_strings.h"
 #include "base/base_arena.h"
 #include "base/base_processes.h"
-#include "demon/demon_core.h"
+#include "demon/demon.h"
 
 ////////////////////////////////
 

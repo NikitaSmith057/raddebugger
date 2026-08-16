@@ -214,8 +214,8 @@ rvs_entity_store_apply_backend_event(Arena *arena, RVS_EntityStore *entities, DM
       break;
     }
 
-    RVS_Process *parent_process = rvs_process_from_id(entities, rvs_process_id_from_handle(event.parent_process));
-    RVS_Program *program = parent_process ? rvs_program_from_process(parent_process) : rvs_program_from_pid(entities, event.system_process_id);
+    RVS_Process *parent_process = 0;
+    RVS_Program *program = rvs_program_from_pid(entities, event.code);
 
     // process without a known parent starts a new program
     if (program == 0) {
@@ -224,7 +224,7 @@ rvs_entity_store_apply_backend_event(Arena *arena, RVS_EntityStore *entities, DM
 
       program = &program_entity->program;
       program->id.value = ++entities->next_program_id;
-      program->pid      = event.system_process_id;
+      program->pid      = event.code;
 
       RVS_ProgramPtrNode *program_node = &program_entity->program_ptr;
       program_node->v = program;
@@ -271,13 +271,10 @@ rvs_entity_store_apply_backend_event(Arena *arena, RVS_EntityStore *entities, DM
     for (RVS_ProcessPtrNode *node = process->processes.first, *next; node; node = next) {
       next = node->next;
       DMN_Event exit_process = event;
-      exit_process.process           = rvs_handle_from_process_id(node->v->id);
-      exit_process.parent_process    = rvs_handle_from_process_id(process->id);
-      exit_process.thread            = (DMN_Handle){0};
-      exit_process.module            = (DMN_Handle){0};
-      exit_process.system_process_id = 0;
-      exit_process.system_thread_id  = 0;
-      exit_process.code              = 0; // TODO: mark child process that it does not have an exit code
+      exit_process.process = rvs_handle_from_process_id(node->v->id);
+      exit_process.thread  = (DMN_Handle){0};
+      exit_process.module  = (DMN_Handle){0};
+      exit_process.code    = 0; // TODO: mark child process that it does not have an exit code
       rvs_entity_store_apply_backend_event(arena, entities, exit_process, events_out);
     }
 
@@ -285,12 +282,10 @@ rvs_entity_store_apply_backend_event(Arena *arena, RVS_EntityStore *entities, DM
     for (RVS_ThreadPtrNode *node = process->threads.first, *next; node; node = next) {
       next = node->next;
       DMN_Event exit_thread = {
-        .kind              = DMN_EventKind_ExitThread,
-        .process           = rvs_handle_from_process_id(process->id),
-        .thread            = rvs_handle_from_thread_id(node->v->id),
-        .code              = 0, // TODO: mark thread that it does not have an exit code
-        .system_process_id = event.system_process_id,
-        .system_thread_id  = event.system_thread_id,
+        .kind    = DMN_EventKind_ExitThread,
+        .process = rvs_handle_from_process_id(process->id),
+        .thread  = rvs_handle_from_thread_id(node->v->id),
+        .code    = 0, // TODO: mark thread that it does not have an exit code
       };
       rvs_entity_store_apply_backend_event(arena, entities, exit_thread, events_out);
     }
@@ -299,11 +294,9 @@ rvs_entity_store_apply_backend_event(Arena *arena, RVS_EntityStore *entities, DM
     for (RVS_ModulePtrNode *node = process->modules.first, *next; node; node = next) {
       next = node->next;
       DMN_Event unload_module = {
-        .kind              = DMN_EventKind_UnloadModule,
-        .process           = rvs_handle_from_process_id(process->id),
-        .module            = rvs_handle_from_module_id(node->v->id),
-        .system_process_id = event.system_process_id,
-        .system_thread_id  = event.system_thread_id,
+        .kind    = DMN_EventKind_UnloadModule,
+        .process = rvs_handle_from_process_id(process->id),
+        .module  = rvs_handle_from_module_id(node->v->id),
       };
       rvs_entity_store_apply_backend_event(arena, entities, unload_module, events_out);
     }
@@ -351,7 +344,7 @@ rvs_entity_store_apply_backend_event(Arena *arena, RVS_EntityStore *entities, DM
       thread->program = rvs_program_from_process(process)->id;
       thread->process = process->id;
       thread->id      = thread_id;
-      thread->tid     = event.system_thread_id;
+      thread->tid     = event.code;
 
       // append thread to the process thread list
       RVS_ThreadPtrNode *thread_node = &thread_entity->thread_ptr;

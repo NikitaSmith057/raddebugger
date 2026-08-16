@@ -8,7 +8,7 @@
 #include "base/base_strings.h"
 #include "base/base_arena.h"
 #include "base/base_markup.h"
-#include "demon/demon_core.h"
+#include "demon/demon.h"
 #include "radvs/rvs_core.h"
 #include "radvs/rvs_request.h"
 #include "radvs/rvs_queue.h"

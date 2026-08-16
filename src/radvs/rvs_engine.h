@@ -4,7 +4,7 @@
 ////////////////////////////////
 
 #pragma once
-#include "demon/demon_core.h"
+#include "demon/demon.h"
 #include "radvs/rvs_core.h"
 #include "radvs/rvs_request.h"
 #include "radvs/rvs_queue.h"

@@ -165,11 +165,11 @@ RVS_PLAN_FUNC(rvs_plan_launch_suspended)
     RVS_LaunchSuspendedState *launch_state = plan->ud;
     RVS_Event                *event        = &message->backend_event;
 
-    if (event->raw_event.system_process_id == launch_state->pid) {
+    if (event->raw_event.code == launch_state->pid) {
       // 4a. create process event found -> create program entity
       if (event->raw_event.kind == DMN_EventKind_CreateProcess) {
         RVS_LaunchSuspendedState *ud = plan->ud;
-        AssertAlways(event->raw_event.system_process_id == ud->pid);
+        AssertAlways(event->raw_event.code == ud->pid);
 
         RVS_CommandReply command_reply = {
           .request_id            = operation->request_id,
